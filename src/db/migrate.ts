@@ -121,21 +121,55 @@ async function ensureAppRolePassword(pool: Pool, connection: ResolvedConnection)
 }
 
 /**
- * Reports what the *application* will connect as, while we still have a build
- * log to say it in.
+ * Actually connects with the application's credentials.
  *
- * Migrations and runtime use different connection strings, so a green build
- * proves nothing about the runtime one — it can point at an unreachable host
- * or at the admin role and the build succeeds regardless, failing only when a
- * real request arrives. Two things are worth catching here:
- *
- * - Any warning the runtime connection carries in its own right (e.g. an
- *   IPv6-only Supabase host that this platform cannot reach).
- * - The app connecting as the schema owner. PostgreSQL exempts superusers and
- *   table owners from RLS, so that configuration disables tenant isolation
- *   entirely while appearing to work perfectly.
+ * Everything else here validates the migration connection, which says
+ * nothing about the runtime one — they are different strings, and a
+ * mismatch between the password written to mm_app and the password in
+ * DATABASE_URL produces a perfectly green build followed by
+ * "password authentication failed" on every request. Since both strings are
+ * already in hand, proving the app's works is one round trip.
  */
-function reportRuntimeConnection(migration: ResolvedConnection): void {
+async function verifyRuntimeConnection(runtime: ResolvedConnection): Promise<void> {
+  const pool = new Pool({
+    connectionString: runtime.connectionString,
+    ssl: runtime.ssl,
+    max: 1,
+    connectionTimeoutMillis: Number(process.env.DATABASE_CONNECT_TIMEOUT_MS ?? 15_000),
+  });
+  try {
+    const { rows } = await pool.query<{ user: string }>("SELECT current_user AS user");
+    console.log(`[db] Verified: the application can connect as "${rows[0]?.user}".`);
+  } catch (error) {
+    console.warn(
+      `\n[db] WARNING: the application's own credentials DO NOT WORK.\n` +
+        `     ${explainConnectionError(error, runtime)}\n` +
+        `     The build will still succeed, but every request will fail at runtime.\n` +
+        `\n` +
+        `     If MM_APP_DB_PASSWORD is set, the password in ${runtime.source} must match it\n` +
+        `     exactly — this script rewrites mm_app's password from MM_APP_DB_PASSWORD on\n` +
+        `     every build, so the two drift apart the moment they differ. Check both are\n` +
+        `     set, identical, and present in the same environment scope.\n` +
+        `\n` +
+        `     Any character in the password that is special in a URL (@ : / ? # %) must be\n` +
+        `     percent-encoded inside ${runtime.source}, or choose an alphanumeric password\n` +
+        `     to sidestep the question entirely.\n`,
+    );
+  } finally {
+    await pool.end();
+  }
+}
+
+/**
+ * Reports what the *application* will connect as, while we still have a build
+ * log to say it in, and returns that connection so it can be verified.
+ *
+ * Catches an unreachable runtime host (e.g. an IPv6-only Supabase host) and
+ * the app connecting as the schema owner — PostgreSQL exempts superusers and
+ * table owners from RLS, so that configuration disables tenant isolation
+ * entirely while appearing to work perfectly.
+ */
+function reportRuntimeConnection(migration: ResolvedConnection): ResolvedConnection | null {
   let runtime: ResolvedConnection;
   try {
     runtime = resolveConnection("runtime");
@@ -156,7 +190,7 @@ function reportRuntimeConnection(migration: ResolvedConnection): void {
         `     you choose and redeploy — this script applies it on every run, so that\n` +
         `     resets the role to a password you know without printing anything.\n`,
     );
-    return;
+    return null;
   }
 
   console.log(
@@ -178,6 +212,8 @@ function reportRuntimeConnection(migration: ResolvedConnection): void {
         `mm_app role instead.\n`,
     );
   }
+
+  return runtime;
 }
 
 async function main() {
@@ -204,7 +240,10 @@ async function main() {
     await migrate(drizzle(pool), { migrationsFolder: "./drizzle" });
     console.log("[db] Migrations complete.");
     await ensureAppRolePassword(pool, connection);
-    reportRuntimeConnection(connection);
+    const runtime = reportRuntimeConnection(connection);
+    if (runtime) {
+      await verifyRuntimeConnection(runtime);
+    }
 
     // Everything else the running app needs (auth secret, etc.) — a green
     // build otherwise says nothing about whether requests will succeed.
