@@ -142,6 +142,29 @@ emits a warning naming the Session pooler as the fix, and
 read-only, so a connection problem is one command to identify rather than a
 deploy cycle.
 
+## 2c. Phase 2 entity groups: banking
+
+- `BankAccount` — a bank account as the org sees it, always paired 1:1 with
+  the ASSET `Account` it represents (`glAccountId`) — see
+  `docs/decisions/0006-bank-feed-abstraction.md`. `provider`/
+  `externalAccountId` are `MANUAL`/null until a live feed is connected.
+- `BankImportBatch` — one row per statement upload, for traceability.
+- `BankTransaction` — a staged line from an imported statement, not yet part
+  of the ledger. `amount` follows the bank's own sign convention (positive =
+  in, negative = out). `externalId` is always populated (the provider's own
+  id, or a content hash for CSV/QIF — `src/domain/banking/external-id.ts`)
+  and unique per bank account, so re-importing a file is a no-op.
+- `BankRule` — organization-defined auto-categorization
+  (`src/domain/banking/bank-rule-matching.ts`), evaluated in priority order
+  against each newly-imported transaction.
+
+A `BankTransaction` becomes ledger history only once reconciled — matched to
+an existing posted `JournalLine` (`ReconciliationService.confirmMatch`) or
+posted as a new balanced entry with `sourceType: "BANK_TRANSACTION"`
+(`ReconciliationService.createJournalFromTransaction`), always through
+`PostingService`, so every Phase 1 invariant (period lock, active accounts,
+debit=credit) still applies to bank-originated entries.
+
 ## 3. Row-Level Security
 
 Every tenant table gets an RLS policy of the shape:
@@ -184,9 +207,12 @@ straight swap.
 
 ## 5. What's deferred
 
-Banking (`BankAccount`, `BankTransaction`, `BankRule`), sales (`Invoice`,
-`Payment`), purchases (`Bill`, `PurchaseOrder`), inventory, payroll, budgets,
-and everything else in the master spec's entity list (§62) are modeled in
-later phases, each with its own ledger-posting consequence documented before
-implementation, per master spec §84/§85 ("financial features additionally
-require correct ledger consequence").
+Sales (`Invoice`, `Payment`), purchases (`Bill`, `PurchaseOrder`), inventory,
+payroll, budgets, and everything else in the master spec's entity list
+(§62) are modeled in later phases, each with its own ledger-posting
+consequence documented before implementation, per master spec §84/§85
+("financial features additionally require correct ledger consequence").
+Within Phase 2 itself, a live bank feed provider, AI-assisted fuzzy
+reconciliation, document AI (receipt/invoice capture), expense management,
+object storage, a background job queue, and a cache are not yet built — see
+`docs/roadmap.md`.

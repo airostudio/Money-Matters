@@ -15,7 +15,7 @@ export interface JournalLineDraft {
 export interface JournalEntryDraft {
   postingDate: Date;
   memo?: string;
-  sourceType?: "MANUAL" | "OPENING_BALANCE" | "SYSTEM";
+  sourceType?: "MANUAL" | "OPENING_BALANCE" | "SYSTEM" | "BANK_TRANSACTION";
   lines: JournalLineDraft[];
 }
 

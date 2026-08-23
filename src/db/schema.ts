@@ -62,6 +62,23 @@ export const journalEntrySourceTypeEnum = pgEnum("journal_entry_source_type", [
   "MANUAL",
   "OPENING_BALANCE",
   "SYSTEM",
+  "BANK_TRANSACTION",
+]);
+
+/**
+ * "MANUAL" is the only provider implemented in Phase 2 — a person uploads a
+ * CSV/OFX/QIF statement export. The column exists so a live feed provider
+ * (Basiq, for AU open banking) can be added later without a schema change:
+ * see docs/decisions/0006-bank-feed-abstraction.md.
+ */
+export const bankFeedProviderEnum = pgEnum("bank_feed_provider", ["MANUAL"]);
+
+export const bankImportFormatEnum = pgEnum("bank_import_format", ["CSV", "OFX", "QIF"]);
+
+export const bankTransactionStatusEnum = pgEnum("bank_transaction_status", [
+  "UNMATCHED",
+  "RECONCILED",
+  "EXCLUDED",
 ]);
 
 export const approvalStatusEnum = pgEnum("approval_status", [
@@ -362,6 +379,162 @@ export const journalLineDimensions = pgTable("journal_line_dimensions", {
 }));
 
 // ---------------------------------------------------------------------------
+// Banking (Phase 2) — see docs/decisions/0006-bank-feed-abstraction.md
+// ---------------------------------------------------------------------------
+
+/**
+ * A bank account as the organization sees it, always paired 1:1 with the
+ * ASSET ledger account it represents (`glAccountId`) — importing or
+ * reconciling a transaction is meaningless without knowing which GL account
+ * to post to. `provider`/`externalAccountId` are populated once a live feed
+ * is connected; both are null for a manually-imported account.
+ */
+export const bankAccounts = pgTable("bank_accounts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  glAccountId: uuid("gl_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  name: text("name").notNull(),
+  institutionName: text("institution_name"),
+  /** Last 4 digits only — the full account number is never stored. */
+  accountNumberLast4: text("account_number_last4"),
+  currency: text("currency").notNull(),
+  provider: bankFeedProviderEnum("provider").notNull().default("MANUAL"),
+  externalAccountId: text("external_account_id"),
+  currentBalance: numeric("current_balance", { precision: 19, scale: 4 }),
+  currentBalanceAsOf: timestamp("current_balance_as_of", { withTimezone: true }),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+  updatedById: uuid("updated_by_id"),
+}, (table) => ({
+  orgGlAccountUnique: uniqueIndex("bank_accounts_org_gl_account_unique").on(
+    table.organizationId,
+    table.glAccountId,
+  ),
+}));
+
+/** One row per statement upload — lets an import be traced, and its transactions found, after the fact. */
+export const bankImportBatches = pgTable("bank_import_batches", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  bankAccountId: uuid("bank_account_id")
+    .notNull()
+    .references(() => bankAccounts.id, { onDelete: "cascade" }),
+  format: bankImportFormatEnum("format").notNull(),
+  fileName: text("file_name"),
+  rowCount: integer("row_count").notNull(),
+  importedRowCount: integer("imported_row_count").notNull(),
+  duplicateRowCount: integer("duplicate_row_count").notNull().default(0),
+  importedAt: timestamp("imported_at", { withTimezone: true }).notNull().defaultNow(),
+  importedById: uuid("imported_by_id").notNull(),
+}, (table) => ({
+  orgAccountIdx: index("bank_import_batches_org_account_idx").on(
+    table.organizationId,
+    table.bankAccountId,
+  ),
+}));
+
+/**
+ * A single line from an imported statement (or, later, a live feed sync).
+ * Staged data, not yet part of the ledger: it only becomes a journal entry
+ * once reconciled (matched to an existing entry, or posted as a new one via
+ * `ReconciliationService.createJournalFromTransaction`).
+ *
+ * `amount` follows the bank's own sign convention: positive is money that
+ * arrived in the account, negative is money that left it — the same
+ * convention OFX (`TRNAMT`) and QIF use natively, and that Money Matters'
+ * CSV importer normalizes any signed-amount or separate-debit/credit column
+ * layout into.
+ *
+ * `externalId` is always populated — the provider's own transaction id when
+ * one exists (OFX `FITID`, a live feed's id), otherwise a content hash of
+ * the row (`external-id.ts`) for formats with no stable id (CSV, QIF). This
+ * is what makes re-importing the same statement, or an overlapping date
+ * range from a live feed, a no-op instead of a duplicate.
+ */
+export const bankTransactions = pgTable("bank_transactions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  bankAccountId: uuid("bank_account_id")
+    .notNull()
+    .references(() => bankAccounts.id, { onDelete: "cascade" }),
+  importBatchId: uuid("import_batch_id").references(() => bankImportBatches.id),
+  externalId: text("external_id").notNull(),
+  postedDate: timestamp("posted_date", { withTimezone: true, mode: "date" }).notNull(),
+  description: text("description").notNull(),
+  amount: numeric("amount", { precision: 19, scale: 4 }).notNull(),
+  currency: text("currency").notNull(),
+  balanceAfter: numeric("balance_after", { precision: 19, scale: 4 }),
+  rawPayload: jsonb("raw_payload"),
+  status: bankTransactionStatusEnum("status").notNull().default("UNMATCHED"),
+  categorizedAccountId: uuid("categorized_account_id").references(() => accounts.id),
+  contactId: uuid("contact_id").references(() => contacts.id),
+  appliedRuleId: uuid("applied_rule_id").references((): AnyPgColumn => bankRules.id),
+  matchedJournalLineId: uuid("matched_journal_line_id").references(
+    (): AnyPgColumn => journalLines.id,
+  ),
+  matchedById: uuid("matched_by_id"),
+  matchedAt: timestamp("matched_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  accountExternalIdUnique: uniqueIndex("bank_transactions_account_external_id_unique").on(
+    table.bankAccountId,
+    table.externalId,
+  ),
+  orgAccountStatusIdx: index("bank_transactions_org_account_status_idx").on(
+    table.organizationId,
+    table.bankAccountId,
+    table.status,
+  ),
+  orgPostedDateIdx: index("bank_transactions_org_posted_date_idx").on(
+    table.organizationId,
+    table.postedDate,
+  ),
+  matchedJournalLineIdx: index("bank_transactions_matched_journal_line_idx").on(
+    table.matchedJournalLineId,
+  ),
+}));
+
+/**
+ * Organization-defined auto-categorization, evaluated in `priority` order
+ * (lowest first) against each newly-imported transaction — see
+ * `src/domain/banking/bank-rule-matching.ts`. `bankAccountId` null means the
+ * rule applies to every bank account in the organization.
+ */
+export const bankRules = pgTable("bank_rules", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  bankAccountId: uuid("bank_account_id").references(() => bankAccounts.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  priority: integer("priority").notNull().default(100),
+  isActive: boolean("is_active").notNull().default(true),
+  /** `BankRuleCondition[]` (all must match) — see src/domain/banking/types.ts. */
+  conditions: jsonb("conditions").notNull(),
+  /** `BankRuleAction` — see src/domain/banking/types.ts. */
+  actions: jsonb("actions").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+}, (table) => ({
+  orgAccountPriorityIdx: index("bank_rules_org_account_priority_idx").on(
+    table.organizationId,
+    table.bankAccountId,
+    table.priority,
+  ),
+}));
+
+// ---------------------------------------------------------------------------
 // Governance
 // ---------------------------------------------------------------------------
 
@@ -434,6 +607,77 @@ export const organizationsRelations = relations(organizations, ({ many }) => ({
   dimensions: many(dimensions),
   journalEntries: many(journalEntries),
   auditLogs: many(auditLogs),
+  bankAccounts: many(bankAccounts),
+  bankRules: many(bankRules),
+}));
+
+export const bankAccountsRelations = relations(bankAccounts, ({ one, many }) => ({
+  organization: one(organizations, {
+    fields: [bankAccounts.organizationId],
+    references: [organizations.id],
+  }),
+  glAccount: one(accounts, {
+    fields: [bankAccounts.glAccountId],
+    references: [accounts.id],
+  }),
+  transactions: many(bankTransactions),
+  importBatches: many(bankImportBatches),
+  rules: many(bankRules),
+}));
+
+export const bankImportBatchesRelations = relations(bankImportBatches, ({ one, many }) => ({
+  organization: one(organizations, {
+    fields: [bankImportBatches.organizationId],
+    references: [organizations.id],
+  }),
+  bankAccount: one(bankAccounts, {
+    fields: [bankImportBatches.bankAccountId],
+    references: [bankAccounts.id],
+  }),
+  transactions: many(bankTransactions),
+}));
+
+export const bankTransactionsRelations = relations(bankTransactions, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [bankTransactions.organizationId],
+    references: [organizations.id],
+  }),
+  bankAccount: one(bankAccounts, {
+    fields: [bankTransactions.bankAccountId],
+    references: [bankAccounts.id],
+  }),
+  importBatch: one(bankImportBatches, {
+    fields: [bankTransactions.importBatchId],
+    references: [bankImportBatches.id],
+  }),
+  categorizedAccount: one(accounts, {
+    fields: [bankTransactions.categorizedAccountId],
+    references: [accounts.id],
+  }),
+  contact: one(contacts, {
+    fields: [bankTransactions.contactId],
+    references: [contacts.id],
+  }),
+  appliedRule: one(bankRules, {
+    fields: [bankTransactions.appliedRuleId],
+    references: [bankRules.id],
+  }),
+  matchedJournalLine: one(journalLines, {
+    fields: [bankTransactions.matchedJournalLineId],
+    references: [journalLines.id],
+  }),
+}));
+
+export const bankRulesRelations = relations(bankRules, ({ one, many }) => ({
+  organization: one(organizations, {
+    fields: [bankRules.organizationId],
+    references: [organizations.id],
+  }),
+  bankAccount: one(bankAccounts, {
+    fields: [bankRules.bankAccountId],
+    references: [bankAccounts.id],
+  }),
+  matchedTransactions: many(bankTransactions),
 }));
 
 export const usersRelations = relations(users, ({ many }) => ({

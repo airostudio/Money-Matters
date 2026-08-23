@@ -17,6 +17,11 @@ export const PERMISSIONS = [
   "tax_code:manage",
   "dimension:manage",
   "audit:read",
+  "bank_account:read",
+  "bank_account:manage",
+  "bank_transaction:import",
+  "bank_transaction:reconcile",
+  "bank_rule:manage",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -45,6 +50,11 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "tax_code:manage",
     "dimension:manage",
     "audit:read",
+    "bank_account:read",
+    "bank_account:manage",
+    "bank_transaction:import",
+    "bank_transaction:reconcile",
+    "bank_rule:manage",
   ]),
   BOOKKEEPER: new Set<Permission>([
     "account:read",
@@ -53,27 +63,40 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "contact:read",
     "contact:manage",
     "dimension:manage",
+    "bank_account:read",
+    "bank_transaction:import",
+    "bank_transaction:reconcile",
+    "bank_rule:manage",
   ]),
   ACCOUNTS_RECEIVABLE: new Set<Permission>([
     "account:read",
     "journal:read",
     "contact:read",
     "contact:manage",
+    "bank_account:read",
   ]),
   ACCOUNTS_PAYABLE: new Set<Permission>([
     "account:read",
     "journal:read",
     "contact:read",
     "contact:manage",
+    "bank_account:read",
   ]),
   PAYROLL_MANAGER: new Set<Permission>(["account:read", "journal:read", "contact:read"]),
-  MANAGER: new Set<Permission>(["account:read", "journal:read", "contact:read", "audit:read"]),
+  MANAGER: new Set<Permission>([
+    "account:read",
+    "journal:read",
+    "contact:read",
+    "audit:read",
+    "bank_account:read",
+  ]),
   EMPLOYEE: new Set<Permission>([]),
   READ_ONLY: new Set<Permission>([
     "account:read",
     "journal:read",
     "contact:read",
     "audit:read",
+    "bank_account:read",
   ]),
 };
 

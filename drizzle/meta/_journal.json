@@ -22,6 +22,20 @@
       "when": 1787468804576,
       "tag": "0002_force_row_level_security",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1787486072573,
+      "tag": "0003_gorgeous_steel_serpent",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1787486073576,
+      "tag": "0004_bank_feed_row_level_security",
+      "breakpoints": true
     }
   ]
 }

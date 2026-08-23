@@ -36,12 +36,48 @@ phase breakdown). This file tracks what is actually built vs. planned so
 - [ ] Period-lock override workflow UI — reject path enforced, override
       workflow deferred to Phase 9 (Close)
 
-## Phase 2 — Money (not started)
+## Phase 2 — Money (in progress)
 
-Bank feed provider abstraction, bank import (CSV/OFX/QIF), AI reconciliation
-matching + explanations, bank rules, document AI (receipt/invoice capture),
-expense management, object storage for documents, background job
-infrastructure (queue), Redis-compatible cache.
+Built as a sequence of complete vertical slices per master spec §82, not all
+at once — see `docs/decisions/0006-bank-feed-abstraction.md`.
+
+### Slice 1 — Bank import, reconciliation, bank rules — **complete**
+
+- [x] Schema: `bank_accounts`, `bank_import_batches`, `bank_transactions`,
+      `bank_rules`, each RLS-enabled and FORCEd, `mm_app`-granted (verified
+      by the `db:migrate` tenant-isolation audit)
+- [x] Bank feed provider abstraction: `ParsedStatementRow` is
+      provider-agnostic; `MANUAL` (file upload) is the only provider today,
+      a live feed is additive later
+- [x] CSV import — auto-detects Date/Description/Amount or Debit/Credit
+      columns, or an explicit mapping; handles quoted fields, currency
+      symbols, parenthesized negatives, DD/MM/YYYY vs MM/DD/YYYY
+- [x] OFX import — both the SGML (1.x, unclosed leaf tags) and XML (2.x)
+      variants
+- [x] QIF import
+- [x] Idempotent import: a stable `externalId` (provider id or content
+      hash) per bank account means re-importing a file, or an overlapping
+      live-feed sync later, inserts nothing already on file
+- [x] Bank rules: priority-ordered, description/amount conditions,
+      auto-categorize on import
+- [x] Deterministic reconciliation matching with a plain-language
+      explanation per candidate (`ReconciliationService.findCandidateMatches`)
+- [x] Post a new balanced journal entry from an uncategorized transaction,
+      or match to an existing posted line — both go through
+      `PostingService`, so every Phase 1 invariant still applies
+- [x] UI: link a bank account, import a statement, reconcile (categorize +
+      post / confirm a suggested match / exclude), manage bank rules
+- [x] `npm run typecheck`, `npm run lint`, `npm test` (155 tests) and
+      `npm run build` all pass; smoke-tested end-to-end in a real browser
+      (register → link account → import CSV → post → Trial Balance
+      reflects it → re-import is a no-op → create a bank rule)
+
+### Slice 2 — not started
+Live bank feed provider (Basiq, most likely — AU open banking), AI-assisted
+fuzzy reconciliation for transactions with no exact-amount candidate,
+document AI (receipt/invoice capture), expense management, object storage
+for documents, background job infrastructure (queue), Redis-compatible
+cache, Stripe.
 
 ## Phase 3 — Sales (not started)
 
