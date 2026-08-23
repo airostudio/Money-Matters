@@ -142,6 +142,21 @@ emits a warning naming the Session pooler as the fix, and
 read-only, so a connection problem is one command to identify rather than a
 deploy cycle.
 
+**Concurrent deploys against the same database.** Vercel deploys Preview and
+Production independently, and both point at the same Supabase database
+unless deliberately separated — so two builds starting within moments of
+each other (in practice: one `git push` landing on both a feature branch
+and `main`) both run `db:migrate:ci` against the same schema at once.
+Without protection, the first to commit a pending migration succeeds and
+the second's identical `CREATE TYPE`/`CREATE TABLE` collides with what the
+first just created, failing an otherwise-correct build with a
+duplicate-object error. `src/db/migrate.ts` takes a session-scoped Postgres
+advisory lock (`pg_try_advisory_lock`) around the migration step, so a
+second concurrent run waits for the first to finish and then finds nothing
+pending, rather than racing it — verified by launching two `db:migrate`
+processes at once against an empty database and confirming the second logs
+"waiting for it to finish" and exits clean.
+
 ## 2c. Phase 2 entity groups: banking
 
 - `BankAccount` — a bank account as the org sees it, always paired 1:1 with

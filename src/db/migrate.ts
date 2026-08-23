@@ -316,6 +316,58 @@ function reportRuntimeConnection(migration: ResolvedConnection): ResolvedConnect
   return runtime;
 }
 
+/**
+ * Serializes concurrent migration runs against the same database with a
+ * session-scoped Postgres advisory lock.
+ *
+ * Vercel deploys Preview and Production independently, and both point at
+ * the same Supabase database unless deliberately separated — a single
+ * `git push` to a branch with an open PR against `main` (or, as happened in
+ * practice, one push landing on both a feature branch and `main` at once)
+ * starts two builds within milliseconds of each other, each running
+ * `db:migrate:ci`. Without this lock, both begin the same pending migration
+ * concurrently: the first to commit succeeds, and the second's `CREATE
+ * TYPE`/`CREATE TABLE` collides with what the first just created, failing
+ * the entire build with a duplicate-object error — even though nothing was
+ * actually wrong with the schema. `pool` must have `max: 1` (as `main()`'s
+ * does) so the lock and its later release run on the same physical
+ * connection; a session-scoped advisory lock means nothing to a different
+ * connection than the one that took it.
+ */
+async function acquireMigrationLock(pool: Pool): Promise<void> {
+  const LOCK_KEY_EXPRESSION = "hashtext('money_matters:db_migrate')";
+  const deadline = Date.now() + 120_000;
+  let waited = false;
+
+  while (Date.now() < deadline) {
+    const { rows } = await pool.query<{ locked: boolean }>(
+      `SELECT pg_try_advisory_lock(${LOCK_KEY_EXPRESSION}) AS locked`,
+    );
+    if (rows[0]?.locked) {
+      if (waited) console.log("[db] Acquired the migration lock — proceeding.");
+      return;
+    }
+    if (!waited) {
+      console.log(
+        "[db] Another deploy's migration is already running against this database — waiting for it to finish...",
+      );
+      waited = true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+
+  throw new DatabaseConfigurationError(
+    "Timed out after 2 minutes waiting for another concurrent deploy's migration to finish. " +
+      "If no other deploy is actually running, an earlier build may have been killed mid-migration " +
+      "without releasing its lock — that clears itself when its database session disconnects, so " +
+      "retrying this deploy after a short wait is usually enough.",
+  );
+}
+
+async function releaseMigrationLock(pool: Pool): Promise<void> {
+  await pool.query("SELECT pg_advisory_unlock(hashtext('money_matters:db_migrate'))");
+}
+
 async function main() {
   const connection = resolveConnection("migration");
 
@@ -334,8 +386,11 @@ async function main() {
     connectionTimeoutMillis: Number(process.env.DATABASE_CONNECT_TIMEOUT_MS ?? 15_000),
   });
 
+  let lockHeld = false;
   try {
     await preflight(pool, connection);
+    await acquireMigrationLock(pool);
+    lockHeld = true;
     console.log("[db] Connected. Running migrations...");
     await migrate(drizzle(pool), { migrationsFolder: "./drizzle" });
     console.log("[db] Migrations complete.");
@@ -353,6 +408,13 @@ async function main() {
       console.warn(formatEnvProblems(envProblems));
     }
   } finally {
+    if (lockHeld) {
+      await releaseMigrationLock(pool).catch(() => {
+        // pool.end() below drops the session regardless, which releases a
+        // session-scoped advisory lock just as surely — this is a courtesy,
+        // not the only way the lock is freed.
+      });
+    }
     await pool.end();
   }
 }
