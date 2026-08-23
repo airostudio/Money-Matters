@@ -6,12 +6,12 @@ forecasting + reporting + AI automation + practice management, per its §82
 phase breakdown). This file tracks what is actually built vs. planned so
 "done" claims stay honest.
 
-## Phase 1 — Financial Foundation — **in progress this session**
+## Phase 1 — Financial Foundation — **complete**
 
 - [x] Docs: architecture, accounting engine, database, security, AI agents,
       roadmap, decision records
 - [x] App scaffold: Next.js (TS strict, Tailwind, shadcn/ui), layered dirs
-- [x] Prisma schema: orgs, memberships, accounts, fiscal periods, journals,
+- [x] Drizzle schema: orgs, memberships, accounts, fiscal periods, journals,
       journal lines, dimensions, contacts, currencies, tax codes, audit log
 - [x] Double-entry posting engine (`LedgerService`/`PostingService`) +
       unit + property-based tests
@@ -20,8 +20,15 @@ phase breakdown). This file tracks what is actually built vs. planned so
 - [x] Dashboard shell + role-aware navigation
 - [x] Chart of Accounts UI, Journal Entry UI (create/post/reverse), Trial
       Balance report
-- [x] Northstar Electrical Group demo seed data
-- [x] Tenant isolation integration test
+- [x] Northstar Electrical Group demo seed data (28 journal entries incl.
+      one reversal, across a full AU electrical-contractor chart of
+      accounts)
+- [x] Tenant isolation integration test (RLS backstop, verified even when
+      application code forgets a tenant filter)
+- [x] `npm run typecheck`, `npm run lint`, `npm test` (38 tests) and
+      `npm run build` (production build) all pass; the built app was
+      smoke-tested end-to-end in a real browser (register/login/post a
+      journal entry/reverse it/trial balance), not just type-checked
 - [ ] MFA/passkey auth — deferred (noted in `security.md`)
 - [ ] Period-lock override workflow UI — reject path enforced, override
       workflow deferred to Phase 9 (Close)
