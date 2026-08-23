@@ -113,6 +113,11 @@ export const OrganizationService = {
     return org;
   },
 
+  async getBySlug(slug: string) {
+    const [org] = await db.select().from(organizations).where(eq(organizations.slug, slug));
+    return org ?? null;
+  },
+
   async getMembership(userId: string, organizationId: string) {
     const [membership] = await db
       .select()

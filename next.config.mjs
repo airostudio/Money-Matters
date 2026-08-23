@@ -1,8 +1,17 @@
-import type { NextConfig } from "next";
+/** @type {import('next').NextConfig} */
+
+// Next.js dev mode's hot-reload runtime uses eval()-based source maps, so
+// 'unsafe-eval' is required in development or the client bundle silently
+// fails to execute at all (discovered via a Playwright smoke test: with it
+// omitted, every onClick/onSubmit handler on the page was simply never
+// attached — forms fell back to native GET submission). Production builds
+// don't need it.
+const scriptSrc =
+  process.env.NODE_ENV === "production" ? "script-src 'self' 'unsafe-inline'" : "script-src 'self' 'unsafe-inline' 'unsafe-eval'";
 
 const contentSecurityPolicy = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline'",
+  scriptSrc,
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
@@ -12,7 +21,7 @@ const contentSecurityPolicy = [
   "form-action 'self'",
 ].join("; ");
 
-const nextConfig: NextConfig = {
+const nextConfig = {
   reactStrictMode: true,
   eslint: {
     ignoreDuringBuilds: false,
