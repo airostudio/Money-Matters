@@ -100,6 +100,15 @@ section covers the specific Vercel + Supabase path.
 target database — point `DATABASE_URL`/`DIRECT_DATABASE_URL` at it locally
 and run the script; it isn't wired into the Vercel build.
 
+### Deployment settings live in `vercel.json`
+
+`vercel.json` pins the framework preset (`nextjs`), build command and install
+command in version control. Vercel's dashboard settings can override
+auto-detection, and if the preset drifts to "Other" the build succeeds and
+then fails with `No Output Directory named "public" found` — Vercel looks
+for a static site rather than picking up `.next`. Keeping these in the repo
+means the deployment config is reviewable and can't silently change.
+
 ### When a connection won't work
 
 ```bash
