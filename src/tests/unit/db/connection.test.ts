@@ -294,3 +294,58 @@ describe("deriving the runtime connection from MM_APP_DB_PASSWORD", () => {
     );
   });
 });
+
+describe("MM_APP_DB_PASSWORD is authoritative for the mm_app role", () => {
+  const POOLED_APP =
+    "postgresql://mm_app.veoxnzvuqfw:STALE@aws-0-us-west-1.pooler.supabase.com:5432/postgres";
+
+  it("substitutes the stale password embedded in DATABASE_URL", () => {
+    // The migration writes MM_APP_DB_PASSWORD to the role on every run, so a
+    // different password for that same role is stale by construction — this
+    // is exactly the green-build/500-on-every-request failure.
+    const resolved = resolveConnection("runtime", {
+      DATABASE_URL: POOLED_APP,
+      MM_APP_DB_PASSWORD: "correct-horse",
+    });
+    expect(parseConnectionString(resolved.connectionString).password).toBe("correct-horse");
+    expect(resolved.warnings.join(" ")).toMatch(/MM_APP_DB_PASSWORD was used/);
+  });
+
+  it("preserves host, port and database — only the password is replaced", () => {
+    const resolved = resolveConnection("runtime", {
+      DATABASE_URL: POOLED_APP,
+      MM_APP_DB_PASSWORD: "correct-horse",
+    });
+    expect(resolved.host).toBe("aws-0-us-west-1.pooler.supabase.com");
+    expect(resolved.port).toBe(5432);
+    expect(resolved.database).toBe("postgres");
+    expect(resolved.user).toBe("mm_app.veoxnzvuqfw");
+  });
+
+  it("leaves any other role's credentials completely alone", () => {
+    // An admin or read-replica connection is not ours to rewrite.
+    const admin = "postgresql://postgres.veoxnzvuqfw:adminpw@aws-0-us-west-1.pooler.supabase.com:5432/postgres";
+    const resolved = resolveConnection("runtime", {
+      DATABASE_URL: admin,
+      MM_APP_DB_PASSWORD: "correct-horse",
+    });
+    expect(parseConnectionString(resolved.connectionString).password).toBe("adminpw");
+    expect(resolved.warnings).toEqual([]);
+  });
+
+  it("stays quiet when the passwords already agree", () => {
+    const resolved = resolveConnection("runtime", {
+      DATABASE_URL: POOLED_APP.replace("STALE", "correct-horse"),
+      MM_APP_DB_PASSWORD: "correct-horse",
+    });
+    expect(resolved.warnings).toEqual([]);
+  });
+
+  it("recognises the bare role name too, not just the pooled form", () => {
+    const resolved = resolveConnection("runtime", {
+      DATABASE_URL: "postgresql://mm_app:STALE@localhost:5432/money_matters",
+      MM_APP_DB_PASSWORD: "correct-horse",
+    });
+    expect(parseConnectionString(resolved.connectionString).password).toBe("correct-horse");
+  });
+});

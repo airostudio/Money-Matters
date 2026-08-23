@@ -390,9 +390,35 @@ export function resolveConnection(
     );
   }
 
-  const connectionString = normalizeConnectionString(raw);
-  const parsed = parseConnectionString(connectionString);
+  let connectionString = normalizeConnectionString(raw);
+  let parsed = parseConnectionString(connectionString);
   const warnings: string[] = [];
+
+  // When MM_APP_DB_PASSWORD is set, the migration writes it to the mm_app
+  // role on every run — so it *is* that role's password, and a different
+  // password embedded in a connection string for the same role is stale by
+  // construction rather than an alternative worth honouring. Substituting it
+  // removes an entire failure mode: the same secret maintained in two places,
+  // drifting apart into a green build where every request fails
+  // "password authentication failed". Only the password is replaced; host,
+  // port, database and any other role are left exactly as configured.
+  const appPassword = env.MM_APP_DB_PASSWORD?.trim();
+  if (
+    appPassword &&
+    baseRoleName(parsed.user) === APP_ROLE &&
+    parsed.password !== appPassword
+  ) {
+    connectionString =
+      `${parsed.scheme}://${encodeURIComponent(parsed.user)}:${encodeURIComponent(appPassword)}` +
+      `@${parsed.host}:${parsed.port}/${parsed.database}${parsed.query}`;
+    parsed = parseConnectionString(connectionString);
+    warnings.push(
+      `${source} carried a different password for the "${APP_ROLE}" role than ` +
+        `MM_APP_DB_PASSWORD. MM_APP_DB_PASSWORD was used, because the migration writes it ` +
+        `to the role on every run and is therefore authoritative. Remove the password from ` +
+        `${source} (or unset ${source} entirely) to keep one copy of it.`,
+    );
+  }
 
   if (isSupabaseDirectHost(parsed.host)) {
     warnings.push(
@@ -417,6 +443,15 @@ export function resolveConnection(
 
 /** The restricted role the application connects as. See docs/security.md §2. */
 export const APP_ROLE = "mm_app";
+
+/**
+ * The underlying PostgreSQL role behind a connection username. Supabase's
+ * pooler routes by `<role>.<project-ref>`, so the username carries a suffix
+ * that is not part of the role's actual name.
+ */
+export function baseRoleName(user: string): string {
+  return user.split(".")[0] ?? user;
+}
 
 /** Admin/owner connections, in preference order, that a runtime one can be derived from. */
 const ADMIN_ENV_VARS = ["DIRECT_DATABASE_URL", "POSTGRES_URL_NON_POOLING"] as const;
