@@ -1,25 +1,26 @@
 {
   "extends": ["next/core-web-vitals"],
-  "rules": {
-    "no-restricted-imports": [
-      "error",
-      {
-        "patterns": [
+  "overrides": [
+    {
+      "files": ["src/app/**/*.{ts,tsx}", "src/components/**/*.{ts,tsx}"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
           {
-            "group": ["@/db/client"],
-            "message": "src/db/client is server-only; import domain services instead of the Prisma client directly from UI code."
-          }
-        ],
-        "paths": [
-          {
-            "name": "@/domain/**",
-            "message": "Import domain modules via their package path, not deep internals."
+            "paths": [
+              {
+                "name": "@/db/client",
+                "message": "src/db/client is server-only; import a domain service instead of the database client directly from UI code."
+              },
+              {
+                "name": "@/db/tenant",
+                "message": "src/db/tenant is server-only; import a domain service instead of opening a tenant-scoped transaction directly from UI code."
+              }
+            ]
           }
         ]
       }
-    ]
-  },
-  "overrides": [
+    },
     {
       "files": ["src/domain/**/*.ts"],
       "rules": {
