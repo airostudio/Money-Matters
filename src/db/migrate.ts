@@ -139,10 +139,21 @@ function reportRuntimeConnection(migration: ResolvedConnection): void {
   try {
     runtime = resolveConnection("runtime");
   } catch (error) {
+    const appRoleName = poolerAwareRoleName("mm_app", migration.host, migration.user);
     console.warn(
       `\n[db] WARNING: the application's own connection is not usable yet: ` +
         `${error instanceof Error ? error.message.split("\n")[0] : String(error)}\n` +
-        `     The build will still succeed, but requests will fail at runtime.\n`,
+        `     The build will still succeed, but every request will fail at runtime.\n` +
+        `\n` +
+        `     Set DATABASE_URL to the mm_app role (NOT the admin connection, which is\n` +
+        `     exempt from row-level security). It should look like:\n` +
+        `\n` +
+        `       postgresql://${appRoleName}:<mm_app-password>` +
+        `@${migration.host}:${migration.port}/${migration.database}\n` +
+        `\n` +
+        `     If you do not have the mm_app password, set MM_APP_DB_PASSWORD to a value\n` +
+        `     you choose and redeploy — this script applies it on every run, so that\n` +
+        `     resets the role to a password you know without printing anything.\n`,
     );
     return;
   }
