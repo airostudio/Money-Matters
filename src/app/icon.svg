@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Money Matters">
+  <rect width="32" height="32" rx="7" fill="#2563eb" />
+  <path
+    d="M9 22V10.5c0-.3.35-.45.56-.24L16 16.7l6.44-6.44c.21-.21.56-.06.56.24V22"
+    fill="none"
+    stroke="#fff"
+    stroke-width="2.75"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

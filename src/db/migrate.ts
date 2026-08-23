@@ -9,6 +9,7 @@ import {
   resolveConnection,
   type ResolvedConnection,
 } from "./connection";
+import { checkRuntimeEnv, formatEnvProblems } from "@/lib/runtime-env";
 
 const SAFE_PASSWORD_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -204,6 +205,13 @@ async function main() {
     console.log("[db] Migrations complete.");
     await ensureAppRolePassword(pool, connection);
     reportRuntimeConnection(connection);
+
+    // Everything else the running app needs (auth secret, etc.) — a green
+    // build otherwise says nothing about whether requests will succeed.
+    const envProblems = checkRuntimeEnv(process.env);
+    if (envProblems.length > 0) {
+      console.warn(formatEnvProblems(envProblems));
+    }
   } finally {
     await pool.end();
   }
