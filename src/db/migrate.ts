@@ -120,18 +120,40 @@ async function ensureAppRolePassword(pool: Pool, connection: ResolvedConnection)
 }
 
 /**
- * The app bypassing its own tenant isolation is silent and catastrophic, and
- * the easiest way to end up there is pointing DATABASE_URL at the same admin
- * connection migrations use. PostgreSQL exempts both superusers and table
- * *owners* from RLS, so that configuration disables tenant isolation
- * entirely while appearing to work perfectly.
+ * Reports what the *application* will connect as, while we still have a build
+ * log to say it in.
+ *
+ * Migrations and runtime use different connection strings, so a green build
+ * proves nothing about the runtime one — it can point at an unreachable host
+ * or at the admin role and the build succeeds regardless, failing only when a
+ * real request arrives. Two things are worth catching here:
+ *
+ * - Any warning the runtime connection carries in its own right (e.g. an
+ *   IPv6-only Supabase host that this platform cannot reach).
+ * - The app connecting as the schema owner. PostgreSQL exempts superusers and
+ *   table owners from RLS, so that configuration disables tenant isolation
+ *   entirely while appearing to work perfectly.
  */
-function warnIfRuntimeUsesAdminRole(migration: ResolvedConnection): void {
+function reportRuntimeConnection(migration: ResolvedConnection): void {
   let runtime: ResolvedConnection;
   try {
     runtime = resolveConnection("runtime");
-  } catch {
-    return; // Nothing configured for runtime yet; not this script's problem.
+  } catch (error) {
+    console.warn(
+      `\n[db] WARNING: the application's own connection is not usable yet: ` +
+        `${error instanceof Error ? error.message.split("\n")[0] : String(error)}\n` +
+        `     The build will still succeed, but requests will fail at runtime.\n`,
+    );
+    return;
+  }
+
+  console.log(
+    `[db] Application will connect to ${runtime.host}:${runtime.port}/${runtime.database} ` +
+      `as "${runtime.user}" (from ${runtime.source}).`,
+  );
+
+  for (const warning of runtime.warnings) {
+    console.warn(`[db] WARNING: ${warning}`);
   }
 
   if (runtime.user === migration.user && runtime.host === migration.host) {
@@ -170,7 +192,7 @@ async function main() {
     await migrate(drizzle(pool), { migrationsFolder: "./drizzle" });
     console.log("[db] Migrations complete.");
     await ensureAppRolePassword(pool, connection);
-    warnIfRuntimeUsesAdminRole(connection);
+    reportRuntimeConnection(connection);
   } finally {
     await pool.end();
   }
