@@ -7,11 +7,20 @@
 -- as the migration-owning role or isolation would be a no-op.
 --
 -- See docs/security.md §2 and docs/decisions/0004-multi-tenancy-and-supabase.md.
+--
+-- mm_app is created WITHOUT a password and WITHOUT login rights here — a
+-- fixed, committed password on a role with real privileges is a real
+-- vulnerability the moment this runs against an internet-reachable
+-- database (mm_app can set app.current_org_id to anything, so a leaked
+-- password is a cross-tenant read of the entire database, not just its own
+-- grants). src/db/migrate.ts sets a real password and enables LOGIN
+-- immediately after this file runs, using MM_APP_DB_PASSWORD if provided or
+-- a freshly generated one otherwise (printed once, never committed).
 
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'mm_app') THEN
-    CREATE ROLE mm_app WITH LOGIN PASSWORD 'mm_app_dev_password' NOBYPASSRLS;
+    CREATE ROLE mm_app WITH NOLOGIN NOBYPASSRLS;
   END IF;
 END
 $$;

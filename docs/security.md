@@ -29,12 +29,29 @@ including when an org B id is guessed and passed explicitly. This test is
 part of the required-green suite for every PR that touches `src/db/**` or
 `src/domain/**`.
 
+**The `mm_app` role's credential never touches source control.**
+`drizzle/0001_row_level_security.sql` creates `mm_app` with `NOLOGIN` and no
+password — deliberately: a fixed password on a role with real database
+privileges, committed to a public repo, is a genuine vulnerability the
+moment it runs against an internet-reachable database (`mm_app` can set
+`app.current_org_id` to any value, so a leaked password is a cross-tenant
+read of the entire database). `src/db/migrate.ts` sets a real password
+immediately after that migration runs: `MM_APP_DB_PASSWORD` if the
+environment provides one (local dev pins this so `.env`'s connection
+strings stay valid across re-migrations), otherwise a freshly generated
+one, printed once to that process's own stdout and never stored anywhere
+else — so a Vercel deployment's build log is the only place it appears,
+not a chat transcript or a committed file. It's a no-op on every
+subsequent run once `mm_app` already has `LOGIN` enabled, so a redeploy
+never silently rotates a password another environment depends on.
+
 ## 3. AuthN / AuthZ
 
-- **Phase 1 auth**: NextAuth Credentials provider, `bcrypt`-hashed passwords,
-  Prisma adapter for sessions. MFA/passkey (WebAuthn) is architected for
-  (session model supports multiple credential types) but not implemented in
-  Phase 1 — tracked in `docs/roadmap.md`.
+- **Phase 1 auth**: NextAuth Credentials provider, `bcrypt`-hashed
+  passwords, JWT sessions (no database-backed session table — see
+  `docs/decisions/0002-auth-strategy.md`). MFA/passkey (WebAuthn) is
+  architected for (session model supports multiple credential types) but
+  not implemented in Phase 1 — tracked in `docs/roadmap.md`.
 - **AuthZ**: RBAC via `MembershipRole` on `OrganizationMembership`, checked
   by `assertPermission(actor, permission, org)` in
   `src/domain/permissions/`. UI-level hiding of controls is a courtesy, not
