@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { closeTestPools, createTestOrg, resetDatabase } from "../helpers/db";
 import { createSampleAccounts } from "../helpers/ledger";
 import { accounts, auditLogs } from "@/db/schema";
@@ -85,6 +85,46 @@ describe("Tenant isolation", () => {
         ],
       }),
     ).rejects.toThrow();
+  });
+
+  it("every tenant table has RLS both ENABLED and FORCED", async () => {
+    // FORCE matters separately from ENABLE: PostgreSQL exempts a table's
+    // OWNER from its own row-level security unless FORCE is set. Without it,
+    // pointing the app's connection at the migration/admin role silently
+    // disables tenant isolation while appearing to work — see
+    // drizzle/0002_force_row_level_security.sql.
+    const tenantTables = [
+      "accounts",
+      "fiscal_periods",
+      "exchange_rates",
+      "tax_codes",
+      "contacts",
+      "dimensions",
+      "dimension_values",
+      "journal_line_dimensions",
+      "approvals",
+      "journal_entries",
+      "journal_lines",
+      "audit_logs",
+    ];
+
+    const rows = await db.execute<{
+      relname: string;
+      relrowsecurity: boolean;
+      relforcerowsecurity: boolean;
+    }>(sql`
+      SELECT relname, relrowsecurity, relforcerowsecurity
+      FROM pg_class
+      WHERE relnamespace = 'public'::regnamespace AND relkind = 'r'
+    `);
+
+    const byName = new Map(rows.rows.map((r) => [r.relname, r]));
+    for (const table of tenantTables) {
+      const row = byName.get(table);
+      expect(row, `${table} should exist`).toBeDefined();
+      expect(row?.relrowsecurity, `${table} should have RLS enabled`).toBe(true);
+      expect(row?.relforcerowsecurity, `${table} should have RLS forced`).toBe(true);
+    }
   });
 
   it("RLS rejects an INSERT for an org other than the one scoped on the connection", async () => {

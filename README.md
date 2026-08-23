@@ -87,10 +87,22 @@ section covers the specific Vercel + Supabase path.
    prints the resulting connection string once, to that deployment's own
    build log — nowhere else.
 3. Open that build's log, copy the printed connection string, and in
-   Vercel: rename the current `DATABASE_URL` to `DIRECT_DATABASE_URL`
-   (migrations keep using this), and set `DATABASE_URL` to the printed
-   `mm_app` connection string instead (the app's actual runtime traffic
-   should never use the admin connection — RLS is bypassed for it).
+   Vercel: keep the admin string as `DIRECT_DATABASE_URL` (migrations use
+   it), and set `DATABASE_URL` to the printed `mm_app` connection string.
+   The app's runtime traffic must not use the admin connection — a table
+   owner is exempt from row-level security, so that configuration disables
+   tenant isolation (see `docs/security.md` §2).
+
+   Prefer not to have a password sitting in a build log? Set
+   `MM_APP_DB_PASSWORD` to a value you choose and redeploy — the migration
+   applies it without printing anything, and you build `DATABASE_URL`
+   yourself. This is also how to recover if the printed password was missed:
+   it is applied on every run, so it resets `mm_app` to a known value.
+
+   On a **pooled** Supabase connection the username is not plain `mm_app` —
+   Supavisor routes by `<role>.<project-ref>`, so it is
+   `mm_app.<project-ref>`, matching the `postgres.<project-ref>` in your
+   admin string. The migration prints the correct form.
 4. Redeploy. From then on, every build's migration step is a no-op if
    there's nothing new to apply, and it never touches `mm_app`'s password
    again once that role has `LOGIN` enabled — a redeploy won't silently

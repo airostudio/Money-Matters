@@ -293,6 +293,23 @@ export function isSupabaseDirectHost(host: string): boolean {
   return /^db\.[a-z0-9]+\.supabase\.(co|com)$/i.test(host);
 }
 
+/**
+ * Supabase's connection pooler (Supavisor) routes by tenant using a
+ * `<role>.<project-ref>` username — which is why a pooled connection string
+ * says `postgres.abcdefghijklmnop` where the direct one just says
+ * `postgres`. Any *other* role has to follow the same convention, so a bare
+ * `mm_app` is rejected by the pooler even though the role exists.
+ *
+ * Derives the correct pooled username for `role` by reusing the project ref
+ * from the connection we already have. Returns `role` unchanged when the
+ * connection isn't pooled.
+ */
+export function poolerAwareRoleName(role: string, host: string, currentUser: string): string {
+  if (!/(^|\.)pooler\./i.test(host)) return role;
+  const projectRef = /^[^.]+\.(.+)$/.exec(currentUser)?.[1];
+  return projectRef ? `${role}.${projectRef}` : role;
+}
+
 export function isLocalHost(host: string): boolean {
   return (
     host === "localhost" ||

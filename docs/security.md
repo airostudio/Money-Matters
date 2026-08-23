@@ -29,6 +29,23 @@ including when an org B id is guessed and passed explicitly. This test is
 part of the required-green suite for every PR that touches `src/db/**` or
 `src/domain/**`.
 
+**Row-level security is FORCED, not merely enabled.** PostgreSQL exempts a
+table's *owner* from its own RLS policies unless `FORCE ROW LEVEL SECURITY`
+is set (`drizzle/0002_force_row_level_security.sql`). Without FORCE, pointing
+the application's `DATABASE_URL` at the same admin connection the migrations
+use silently disables tenant isolation entirely — no error, no log line, and
+the app appears to work perfectly. Verified empirically: with a non-superuser
+owner, `ENABLE` alone returned a tenant row on an unscoped query, and adding
+`FORCE` returned none.
+
+FORCE does *not* constrain superusers or roles with `BYPASSRLS` — nothing at
+the table level can. That residual gap is covered two other ways: the
+application connects as `mm_app`, which is neither, and `npm run db:migrate`
+prints a loud warning if the runtime and migration connections resolve to the
+same role. `src/tests/integration/tenant-isolation.test.ts` asserts every
+tenant table has RLS both enabled *and* forced, so a future table cannot be
+added without it.
+
 **The `mm_app` role's credential never touches source control.**
 `drizzle/0001_row_level_security.sql` creates `mm_app` with `NOLOGIN` and no
 password — deliberately: a fixed password on a role with real database

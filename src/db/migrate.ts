@@ -5,6 +5,7 @@ import { migrate } from "drizzle-orm/node-postgres/migrator";
 import {
   DatabaseConfigurationError,
   explainConnectionError,
+  poolerAwareRoleName,
   resolveConnection,
   type ResolvedConnection,
 } from "./connection";
@@ -44,12 +45,15 @@ async function preflight(pool: Pool, connection: ResolvedConnection): Promise<vo
  * cross-tenant read of everything). This is the one place a real credential
  * gets attached to the role, and it never touches git:
  *
- * - MM_APP_DB_PASSWORD if provided (local dev pins this so .env's connection
- *   strings stay valid across re-migrations).
- * - Otherwise a fresh random password, with the resulting connection string
- *   printed once to this process's own stdout — for a Vercel build that means
- *   the deployment's build log, not a chat transcript or a committed file.
- * - Idempotent: once mm_app has LOGIN it is never rotated, so a redeploy
+ * - MM_APP_DB_PASSWORD if provided, applied on every run. Local dev pins this
+ *   so .env's connection strings stay valid across re-migrations, and it is
+ *   the recovery path when a generated password was missed — setting a
+ *   password you already know is idempotent, and nothing is printed.
+ * - Otherwise a fresh random password on first run only, with the resulting
+ *   connection string printed once to this process's own stdout — for a
+ *   Vercel build that means the deployment's build log, not a chat
+ *   transcript or a committed file.
+ * - Once mm_app has LOGIN it is never rotated implicitly, so a redeploy
  *   cannot invalidate a DATABASE_URL another environment is already using.
  */
 async function ensureAppRolePassword(pool: Pool, connection: ResolvedConnection): Promise<void> {
@@ -63,23 +67,39 @@ async function ensureAppRolePassword(pool: Pool, connection: ResolvedConnection)
     );
   }
 
-  if (role.rolcanlogin) {
-    console.log("[db] mm_app already has LOGIN — leaving its password as-is (not rotating).");
-    return;
-  }
-
+  // The username the app must connect as, which is not always just "mm_app":
+  // a pooled Supabase connection routes by "<role>.<project-ref>".
+  const appRoleName = poolerAwareRoleName("mm_app", connection.host, connection.user);
   const explicitPassword = process.env.MM_APP_DB_PASSWORD;
-  const password = explicitPassword ?? generateSafePassword();
-
-  await pool.query(`ALTER ROLE mm_app WITH LOGIN PASSWORD '${escapeSqlStringLiteral(password)}'`);
 
   if (explicitPassword) {
-    console.log("[db] mm_app password set from MM_APP_DB_PASSWORD.");
+    // Applied on every run, not just the first. Setting a password you
+    // already know is idempotent, and it's the escape hatch when the
+    // generated one was missed — no secret is ever printed on this path.
+    await pool.query(
+      `ALTER ROLE mm_app WITH LOGIN PASSWORD '${escapeSqlStringLiteral(explicitPassword)}'`,
+    );
+    console.log(
+      `[db] mm_app password set from MM_APP_DB_PASSWORD. ` +
+        `Connect the app as "${appRoleName}" at ${connection.host}:${connection.port}.`,
+    );
     return;
   }
 
+  if (role.rolcanlogin) {
+    console.log(
+      `[db] mm_app already has LOGIN — not rotating its password. ` +
+        `The app should connect as "${appRoleName}". If that password was lost, set ` +
+        `MM_APP_DB_PASSWORD to a value you choose and redeploy to reset it.`,
+    );
+    return;
+  }
+
+  const password = generateSafePassword();
+  await pool.query(`ALTER ROLE mm_app WITH LOGIN PASSWORD '${escapeSqlStringLiteral(password)}'`);
+
   const appUrl =
-    `postgresql://mm_app:${encodeURIComponent(password)}` +
+    `postgresql://${appRoleName}:${encodeURIComponent(password)}` +
     `@${connection.host}:${connection.port}/${connection.database}`;
 
   console.log("\n==================== ACTION REQUIRED ====================");
@@ -87,11 +107,43 @@ async function ensureAppRolePassword(pool: Pool, connection: ResolvedConnection)
   console.log("This is printed once, here only. Copy it now:\n");
   console.log(`  DATABASE_URL=${appUrl}\n`);
   console.log("In your hosting provider's environment variables:");
-  console.log(`  1. Rename the current DATABASE_URL to DIRECT_DATABASE_URL (migrations use it).`);
-  console.log(`  2. Set DATABASE_URL to the value above (the app's runtime traffic uses it,`);
-  console.log(`     and unlike the admin role it cannot bypass row-level security).`);
+  console.log("  1. Keep the current admin connection string as DIRECT_DATABASE_URL");
+  console.log("     (migrations use it).");
+  console.log("  2. Set DATABASE_URL to the value above. The app's runtime traffic must");
+  console.log("     use this role: unlike the admin/owner role it cannot bypass");
+  console.log("     row-level security, which is what enforces tenant isolation.");
   console.log("  3. Redeploy.");
+  console.log("");
+  console.log("Prefer not to have a password in a build log? Set MM_APP_DB_PASSWORD to a");
+  console.log("value you choose instead and redeploy — it is applied without being printed.");
   console.log("=========================================================\n");
+}
+
+/**
+ * The app bypassing its own tenant isolation is silent and catastrophic, and
+ * the easiest way to end up there is pointing DATABASE_URL at the same admin
+ * connection migrations use. PostgreSQL exempts both superusers and table
+ * *owners* from RLS, so that configuration disables tenant isolation
+ * entirely while appearing to work perfectly.
+ */
+function warnIfRuntimeUsesAdminRole(migration: ResolvedConnection): void {
+  let runtime: ResolvedConnection;
+  try {
+    runtime = resolveConnection("runtime");
+  } catch {
+    return; // Nothing configured for runtime yet; not this script's problem.
+  }
+
+  if (runtime.user === migration.user && runtime.host === migration.host) {
+    console.warn(
+      `\n[db] WARNING: ${runtime.source} connects as "${runtime.user}" — the same role that ` +
+        `owns the schema.\n` +
+        `     PostgreSQL exempts table owners from row-level security, so tenant isolation ` +
+        `is NOT enforced\n` +
+        `     for the running application in this configuration. Point ${runtime.source} at the ` +
+        `mm_app role instead.\n`,
+    );
+  }
 }
 
 async function main() {
@@ -118,6 +170,7 @@ async function main() {
     await migrate(drizzle(pool), { migrationsFolder: "./drizzle" });
     console.log("[db] Migrations complete.");
     await ensureAppRolePassword(pool, connection);
+    warnIfRuntimeUsesAdminRole(connection);
   } finally {
     await pool.end();
   }

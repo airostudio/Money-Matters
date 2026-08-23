@@ -5,6 +5,7 @@ import {
   explainConnectionError,
   isSupabaseDirectHost,
   normalizeConnectionString,
+  poolerAwareRoleName,
   parseConnectionString,
   redactConnectionString,
   resolveConnection,
@@ -217,5 +218,26 @@ describe("explainConnectionError", () => {
 
   it("still says something useful for an unknown error", () => {
     expect(explainConnectionError(new Error("boom"), supabaseDirect)).toContain("Could not connect");
+  });
+});
+
+describe("poolerAwareRoleName", () => {
+  it("appends the project ref for a pooled Supabase connection", () => {
+    // Supavisor routes by "<role>.<project-ref>", so a bare "mm_app" is
+    // rejected by the pooler even though the role exists.
+    expect(
+      poolerAwareRoleName("mm_app", "aws-0-us-west-1.pooler.supabase.com", "postgres.veoxnzvuqfw"),
+    ).toBe("mm_app.veoxnzvuqfw");
+  });
+
+  it("leaves the role alone on a direct (non-pooled) connection", () => {
+    expect(poolerAwareRoleName("mm_app", "db.veoxnzvuqfw.supabase.co", "postgres")).toBe("mm_app");
+    expect(poolerAwareRoleName("mm_app", "localhost", "postgres")).toBe("mm_app");
+  });
+
+  it("leaves the role alone if the pooled user carries no project ref", () => {
+    expect(poolerAwareRoleName("mm_app", "aws-0-us-west-1.pooler.supabase.com", "postgres")).toBe(
+      "mm_app",
+    );
   });
 });
