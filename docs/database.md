@@ -118,9 +118,17 @@ which variable is wrong or why. It:
   actually change.
 - **Derives** the application's connection from `MM_APP_DB_PASSWORD` plus the
   migration connection's host/database when no runtime connection string is
-  set, so the same password is not maintained in two places. An explicit
-  `DATABASE_URL` always takes precedence; the derived connection always uses
-  the restricted `mm_app` role, never the admin one.
+  set, so the same password is not maintained in two places.
+- **Forces the runtime connection onto the `mm_app` role** whenever
+  `MM_APP_DB_PASSWORD` is set. Pointing `DATABASE_URL` at the admin connection
+  is the natural thing to reach for when the app cannot authenticate, and it
+  appears to work perfectly — while disabling row-level security for every
+  request (§3 below). A failed connection is a far better outcome than silent
+  cross-tenant exposure, so the user and password are rewritten and the
+  substitution is reported as a warning. Only the user and password change;
+  host, port, database and query parameters are left as configured, migration
+  connections keep their owner role, and unsetting `MM_APP_DB_PASSWORD` opts
+  out for anyone running a differently-named restricted role.
 - **Never logs the password.** `redactConnectionString()` is the only
   sanctioned way to put a connection string in a log line.
 

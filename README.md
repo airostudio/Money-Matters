@@ -86,8 +86,11 @@ hand-written `DATABASE_URL` — is the single most common way to get a green
 build where every request fails with `password authentication failed`.
 
 Set `DATABASE_URL` explicitly only if the app must reach the database
-differently from migrations; it always takes precedence when present, and
-then its password must match `MM_APP_DB_PASSWORD` exactly.
+differently from migrations. Its host, port and database are used as given,
+but while `MM_APP_DB_PASSWORD` is set the role and password are always
+`mm_app`'s: an admin connection string here would run the whole application
+with row-level security disabled, so it is redirected rather than honoured,
+with a warning in the build log saying so.
 
 Deploy. `npm run build` runs `npm run db:migrate:ci` first, which applies the
 schema and RLS policies, provisions the `mm_app` role, and then **connects
@@ -99,9 +102,16 @@ A healthy build log looks like:
 [db] Migrating postgres at aws-0-….pooler.supabase.com:5432 as "postgres.…"
 [db] Migrations complete.
 [db] mm_app password set from MM_APP_DB_PASSWORD.
+[db] Tenant isolation audit: 12 of 16 tables are organization-scoped, and all have FORCEd row-level security with a policy.
 [db] Application will connect … as "mm_app.…" (from derived from MM_APP_DB_PASSWORD + DIRECT_DATABASE_URL)
 [db] Verified: the application can connect as "mm_app".
 ```
+
+The audit line is not decoration: adding a table is one line in
+`src/db/schema.ts`, while giving it a policy, `FORCE`, and an `mm_app` grant
+are three separate edits in a migration. Forgetting any of them raises no
+error — the table simply becomes invisible to the application, or visible to
+every tenant at once. The audit names either the first time it happens.
 
 `npm run db:seed` seeds Northstar Electrical Group the same way against any
 target database — point `DATABASE_URL`/`DIRECT_DATABASE_URL` at it locally

@@ -39,12 +39,36 @@ owner, `ENABLE` alone returned a tenant row on an unscoped query, and adding
 `FORCE` returned none.
 
 FORCE does *not* constrain superusers or roles with `BYPASSRLS` — nothing at
-the table level can. That residual gap is covered two other ways: the
-application connects as `mm_app`, which is neither, and `npm run db:migrate`
-prints a loud warning if the runtime and migration connections resolve to the
-same role. `src/tests/integration/tenant-isolation.test.ts` asserts every
-tenant table has RLS both enabled *and* forced, so a future table cannot be
-added without it.
+the table level can, and on Supabase the `postgres` role has `BYPASSRLS`, so
+an admin connection defeats FORCE as well as ENABLE. That residual gap is
+closed at the point the connection is built rather than by policy:
+`resolveConnection("runtime")` rewrites the connection's role to `mm_app`
+whenever `MM_APP_DB_PASSWORD` is set, so an admin `DATABASE_URL` cannot put
+the application on a privileged role even by accident. This is not a
+hypothetical: it happened in this project's own deployment, where
+`DATABASE_URL` was repointed at the admin connection to get past an
+authentication failure, and every subsequent request ran with isolation off.
+The rewrite is announced as a warning, never done silently, and unsetting
+`MM_APP_DB_PASSWORD` opts out.
+
+Two checks make a future regression visible instead of latent:
+
+- `npm run db:migrate` audits every table after migrating and warns about any
+  table carrying `organization_id` without RLS enabled, without `FORCE`, or
+  without a policy — and about any table `mm_app` cannot read. Adding a table
+  is one line in `src/db/schema.ts`; the policy, the FORCE and the grant are
+  three separate edits elsewhere, and forgetting any of them raises no error
+  on its own.
+- `src/tests/integration/tenant-isolation.test.ts` asserts every tenant table
+  has RLS both enabled *and* forced.
+
+`organization_memberships` is the one table with an `organization_id` and no
+policy, and it is exempt by name rather than by omission: it is the join that
+*answers* "which organizations is this user in?", so a policy keyed on
+`app.current_org_id` would make the lookup that establishes the current
+organization depend on it already being established. Isolation for it is
+enforced in the application layer — a session only ever reads its own
+memberships — and covered by the tenant-isolation suite.
 
 **The `mm_app` role's credential never touches source control.**
 `drizzle/0001_row_level_security.sql` creates `mm_app` with `NOLOGIN` and no

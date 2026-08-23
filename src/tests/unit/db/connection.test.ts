@@ -298,6 +298,8 @@ describe("deriving the runtime connection from MM_APP_DB_PASSWORD", () => {
 describe("MM_APP_DB_PASSWORD is authoritative for the mm_app role", () => {
   const POOLED_APP =
     "postgresql://mm_app.veoxnzvuqfw:STALE@aws-0-us-west-1.pooler.supabase.com:5432/postgres";
+  const ADMIN =
+    "postgresql://postgres.veoxnzvuqfw:adminpw@aws-0-us-west-1.pooler.supabase.com:5432/postgres";
 
   it("substitutes the stale password embedded in DATABASE_URL", () => {
     // The migration writes MM_APP_DB_PASSWORD to the role on every run, so a
@@ -322,13 +324,13 @@ describe("MM_APP_DB_PASSWORD is authoritative for the mm_app role", () => {
     expect(resolved.user).toBe("mm_app.veoxnzvuqfw");
   });
 
-  it("leaves any other role's credentials completely alone", () => {
-    // An admin or read-replica connection is not ours to rewrite.
-    const admin = "postgresql://postgres.veoxnzvuqfw:adminpw@aws-0-us-west-1.pooler.supabase.com:5432/postgres";
-    const resolved = resolveConnection("runtime", {
-      DATABASE_URL: admin,
+  it("leaves a migration connection's role and credentials completely alone", () => {
+    // Migrations run DDL and CREATE ROLE; they must stay the owner.
+    const resolved = resolveConnection("migration", {
+      DIRECT_DATABASE_URL: ADMIN,
       MM_APP_DB_PASSWORD: "correct-horse",
     });
+    expect(resolved.user).toBe("postgres.veoxnzvuqfw");
     expect(parseConnectionString(resolved.connectionString).password).toBe("adminpw");
     expect(resolved.warnings).toEqual([]);
   });
@@ -347,5 +349,78 @@ describe("MM_APP_DB_PASSWORD is authoritative for the mm_app role", () => {
       MM_APP_DB_PASSWORD: "correct-horse",
     });
     expect(parseConnectionString(resolved.connectionString).password).toBe("correct-horse");
+  });
+});
+
+describe("a runtime connection is forced onto the restricted role", () => {
+  // Regression guard for a real production misconfiguration: DATABASE_URL was
+  // pointed at the admin/owner connection to get past an authentication
+  // failure. It worked — and silently disabled row-level security for every
+  // request, because PostgreSQL exempts superusers and owners from it.
+  const ADMIN =
+    "postgresql://postgres.veoxnzvuqfw:adminpw@aws-0-us-west-1.pooler.supabase.com:5432/postgres";
+
+  it("redirects an admin DATABASE_URL to mm_app", () => {
+    const resolved = resolveConnection("runtime", {
+      DATABASE_URL: ADMIN,
+      MM_APP_DB_PASSWORD: "correct-horse",
+    });
+    expect(resolved.user).toBe("mm_app.veoxnzvuqfw");
+    expect(parseConnectionString(resolved.connectionString).password).toBe("correct-horse");
+  });
+
+  it("says why, in terms of the consequence rather than the mechanism", () => {
+    const resolved = resolveConnection("runtime", {
+      DATABASE_URL: ADMIN,
+      MM_APP_DB_PASSWORD: "correct-horse",
+    });
+    expect(resolved.warnings.join(" ")).toMatch(/tenant isolation switched off/);
+    expect(resolved.warnings.join(" ")).toMatch(/redirected to "mm_app\.veoxnzvuqfw"/);
+  });
+
+  it("keeps the pooler's <role>.<project-ref> username convention", () => {
+    // Supavisor routes by the suffix; a bare "mm_app" never reaches Postgres.
+    const resolved = resolveConnection("runtime", {
+      DATABASE_URL: ADMIN,
+      MM_APP_DB_PASSWORD: "correct-horse",
+    });
+    expect(resolved.user).toBe("mm_app.veoxnzvuqfw");
+  });
+
+  it("uses the bare role name when the host is not a pooler", () => {
+    const resolved = resolveConnection("runtime", {
+      DATABASE_URL: "postgresql://postgres:adminpw@localhost:5432/money_matters",
+      MM_APP_DB_PASSWORD: "correct-horse",
+    });
+    expect(resolved.user).toBe("mm_app");
+  });
+
+  it("preserves host, port, database and query parameters", () => {
+    const resolved = resolveConnection("runtime", {
+      DATABASE_URL: `${ADMIN}?sslmode=require`,
+      MM_APP_DB_PASSWORD: "correct-horse",
+    });
+    expect(resolved.host).toBe("aws-0-us-west-1.pooler.supabase.com");
+    expect(resolved.port).toBe(5432);
+    expect(resolved.database).toBe("postgres");
+    expect(resolved.connectionString).toContain("?sslmode=require");
+  });
+
+  it("does nothing without MM_APP_DB_PASSWORD — the documented opt-out", () => {
+    // Someone running their own differently-named restricted role needs a way
+    // out, and it must not be a flag nobody discovers.
+    const resolved = resolveConnection("runtime", {
+      DATABASE_URL: ADMIN,
+    });
+    expect(resolved.user).toBe("postgres.veoxnzvuqfw");
+    expect(resolved.warnings).toEqual([]);
+  });
+
+  it("percent-encodes a password containing URL-special characters", () => {
+    const resolved = resolveConnection("runtime", {
+      DATABASE_URL: ADMIN,
+      MM_APP_DB_PASSWORD: "p@ss/wo?rd#",
+    });
+    expect(parseConnectionString(resolved.connectionString).password).toBe("p@ss/wo?rd#");
   });
 });

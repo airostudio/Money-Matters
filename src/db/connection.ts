@@ -394,30 +394,69 @@ export function resolveConnection(
   let parsed = parseConnectionString(connectionString);
   const warnings: string[] = [];
 
-  // When MM_APP_DB_PASSWORD is set, the migration writes it to the mm_app
-  // role on every run — so it *is* that role's password, and a different
-  // password embedded in a connection string for the same role is stale by
-  // construction rather than an alternative worth honouring. Substituting it
-  // removes an entire failure mode: the same secret maintained in two places,
-  // drifting apart into a green build where every request fails
-  // "password authentication failed". Only the password is replaced; host,
-  // port, database and any other role are left exactly as configured.
+  // MM_APP_DB_PASSWORD, when set, makes this module authoritative about *who*
+  // the application connects as and *with what* — closing two failure modes
+  // that both otherwise produce a perfectly green build.
+  //
+  //  - A **stale password** for mm_app. The migration writes
+  //    MM_APP_DB_PASSWORD to the role on every run, so that value *is* the
+  //    role's password; a different one embedded in a connection string for
+  //    the same role is stale by construction rather than an alternative
+  //    worth honouring. Left alone it means one secret maintained in two
+  //    places, drifting apart into "password authentication failed" on every
+  //    request.
+  //
+  //  - The **wrong role**, which is the more dangerous of the two. Pointing
+  //    DATABASE_URL at the admin/owner connection is the natural thing to
+  //    reach for when the app cannot connect, and it appears to work
+  //    perfectly — while PostgreSQL exempts superusers (and, absent FORCE,
+  //    table owners) from row-level security, so every organization's data
+  //    becomes readable by every other with no error and no log line. A
+  //    connection that fails loudly is a far better outcome than a silent,
+  //    total loss of tenant isolation, so a runtime connection naming any
+  //    other role is redirected onto mm_app rather than honoured.
+  //
+  // Both rewrites are deliberately narrow: only the user and password change,
+  // host/port/database and query parameters are left exactly as configured,
+  // migration connections keep whatever owner role they name (they must — they
+  // run DDL), and unsetting MM_APP_DB_PASSWORD opts out of the mechanism
+  // entirely for anyone running a differently-named restricted role.
   const appPassword = env.MM_APP_DB_PASSWORD?.trim();
-  if (
-    appPassword &&
-    baseRoleName(parsed.user) === APP_ROLE &&
-    parsed.password !== appPassword
-  ) {
-    connectionString =
-      `${parsed.scheme}://${encodeURIComponent(parsed.user)}:${encodeURIComponent(appPassword)}` +
-      `@${parsed.host}:${parsed.port}/${parsed.database}${parsed.query}`;
-    parsed = parseConnectionString(connectionString);
-    warnings.push(
-      `${source} carried a different password for the "${APP_ROLE}" role than ` +
-        `MM_APP_DB_PASSWORD. MM_APP_DB_PASSWORD was used, because the migration writes it ` +
-        `to the role on every run and is therefore authoritative. Remove the password from ` +
-        `${source} (or unset ${source} entirely) to keep one copy of it.`,
-    );
+  if (appPassword) {
+    const alreadyAppRole = baseRoleName(parsed.user) === APP_ROLE;
+    const targetUser =
+      alreadyAppRole || purpose !== "runtime"
+        ? parsed.user
+        : poolerAwareRoleName(APP_ROLE, parsed.host, parsed.user);
+    const wrongRole = targetUser !== parsed.user;
+    const stalePassword = alreadyAppRole && parsed.password !== appPassword;
+
+    if (wrongRole) {
+      warnings.push(
+        `${source} connects as "${parsed.user}", not the restricted "${APP_ROLE}" role. ` +
+          `PostgreSQL exempts superusers and table owners from row-level security, so the ` +
+          `application would have run with tenant isolation switched off — every ` +
+          `organization's data readable and writable by every other. The connection was ` +
+          `redirected to "${targetUser}" using MM_APP_DB_PASSWORD, which the migration ` +
+          `writes to that role on every run. Point ${source} at ${APP_ROLE} — or unset it ` +
+          `and let the connection be derived — to silence this. To deliberately run as a ` +
+          `different role, unset MM_APP_DB_PASSWORD.`,
+      );
+    } else if (stalePassword) {
+      warnings.push(
+        `${source} carried a different password for the "${APP_ROLE}" role than ` +
+          `MM_APP_DB_PASSWORD. MM_APP_DB_PASSWORD was used, because the migration writes it ` +
+          `to the role on every run and is therefore authoritative. Remove the password from ` +
+          `${source} (or unset ${source} entirely) to keep one copy of it.`,
+      );
+    }
+
+    if (wrongRole || stalePassword) {
+      connectionString =
+        `${parsed.scheme}://${encodeURIComponent(targetUser)}:${encodeURIComponent(appPassword)}` +
+        `@${parsed.host}:${parsed.port}/${parsed.database}${parsed.query}`;
+      parsed = parseConnectionString(connectionString);
+    }
   }
 
   if (isSupabaseDirectHost(parsed.host)) {
