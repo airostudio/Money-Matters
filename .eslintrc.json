@@ -1,0 +1,36 @@
+{
+  "extends": ["next/core-web-vitals"],
+  "rules": {
+    "no-restricted-imports": [
+      "error",
+      {
+        "patterns": [
+          {
+            "group": ["@/db/client"],
+            "message": "src/db/client is server-only; import domain services instead of the Prisma client directly from UI code."
+          }
+        ],
+        "paths": [
+          {
+            "name": "@/domain/**",
+            "message": "Import domain modules via their package path, not deep internals."
+          }
+        ]
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": ["src/domain/**/*.ts"],
+      "rules": {
+        "no-restricted-syntax": [
+          "error",
+          {
+            "selector": "CallExpression[callee.name='parseFloat']",
+            "message": "Never parse monetary amounts with parseFloat; use Money.of()."
+          }
+        ]
+      }
+    }
+  ]
+}
