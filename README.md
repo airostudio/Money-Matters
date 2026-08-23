@@ -69,44 +69,39 @@ section covers the specific Vercel + Supabase path.
 > like `postgres.<project-ref>`). `npm run db:doctor` warns about this
 > explicitly if you get it wrong.
 
-1. Create a Supabase project and set **one** Vercel project env var:
-   `DATABASE_URL` = the Session pooler connection string. It needs enough
-   privilege to create tables/roles/RLS policies; the default `postgres`
-   role has it.
+Set **three** environment variables on the Vercel project, for every
+environment you deploy (Production *and* Preview — a preview branch does not
+read Production-scoped variables):
 
-   Two things that will otherwise cost you a deploy cycle: replace the
-   `[YOUR-PASSWORD]` placeholder with the real password, and make sure the
-   variable is enabled for the **environment you actually deploy** —
-   a preview branch does not read Production-scoped variables.
-2. Deploy. `npm run build` runs `npm run db:migrate:ci` first (see
-   `db:migrate:ci` below), which applies the schema and Row-Level Security
-   policies to that database using Vercel's own copy of `DATABASE_URL` —
-   this repo's migration tooling never needs that value handed to it any
-   other way. The **first** successful build also generates a random
-   password for the restricted `mm_app` role (see `docs/security.md`) and
-   prints the resulting connection string once, to that deployment's own
-   build log — nowhere else.
-3. Open that build's log, copy the printed connection string, and in
-   Vercel: keep the admin string as `DIRECT_DATABASE_URL` (migrations use
-   it), and set `DATABASE_URL` to the printed `mm_app` connection string.
-   The app's runtime traffic must not use the admin connection — a table
-   owner is exempt from row-level security, so that configuration disables
-   tenant isolation (see `docs/security.md` §2).
+| Variable | Value |
+|---|---|
+| `DIRECT_DATABASE_URL` | The Supabase **Session pooler** connection string (admin role). Migrations use it. |
+| `MM_APP_DB_PASSWORD` | Any password you choose for the restricted `mm_app` role. Alphanumeric avoids all URL-encoding questions. |
+| `NEXTAUTH_SECRET` | `openssl rand -base64 32`. Keep it stable — changing it invalidates every session. |
 
-   Prefer not to have a password sitting in a build log? Set
-   `MM_APP_DB_PASSWORD` to a value you choose and redeploy — the migration
-   applies it without printing anything, and you build `DATABASE_URL`
-   yourself. This is also how to recover if the printed password was missed:
-   it is applied on every run, so it resets `mm_app` to a known value.
+Leave `DATABASE_URL` **unset**. The application's connection is derived from
+`MM_APP_DB_PASSWORD` plus the host and database in `DIRECT_DATABASE_URL`, so
+the password exists in exactly one place. Setting it in two — the role and a
+hand-written `DATABASE_URL` — is the single most common way to get a green
+build where every request fails with `password authentication failed`.
 
-   On a **pooled** Supabase connection the username is not plain `mm_app` —
-   Supavisor routes by `<role>.<project-ref>`, so it is
-   `mm_app.<project-ref>`, matching the `postgres.<project-ref>` in your
-   admin string. The migration prints the correct form.
-4. Redeploy. From then on, every build's migration step is a no-op if
-   there's nothing new to apply, and it never touches `mm_app`'s password
-   again once that role has `LOGIN` enabled — a redeploy won't silently
-   invalidate the `DATABASE_URL` you just set.
+Set `DATABASE_URL` explicitly only if the app must reach the database
+differently from migrations; it always takes precedence when present, and
+then its password must match `MM_APP_DB_PASSWORD` exactly.
+
+Deploy. `npm run build` runs `npm run db:migrate:ci` first, which applies the
+schema and RLS policies, provisions the `mm_app` role, and then **connects
+with the application's own credentials to prove they work** — so a
+misconfiguration is named in the build log rather than discovered as a 500.
+A healthy build log looks like:
+
+```
+[db] Migrating postgres at aws-0-….pooler.supabase.com:5432 as "postgres.…"
+[db] Migrations complete.
+[db] mm_app password set from MM_APP_DB_PASSWORD.
+[db] Application will connect … as "mm_app.…" (from derived from MM_APP_DB_PASSWORD + DIRECT_DATABASE_URL)
+[db] Verified: the application can connect as "mm_app".
+```
 
 `npm run db:seed` seeds Northstar Electrical Group the same way against any
 target database — point `DATABASE_URL`/`DIRECT_DATABASE_URL` at it locally

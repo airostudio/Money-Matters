@@ -241,3 +241,56 @@ describe("poolerAwareRoleName", () => {
     );
   });
 });
+
+describe("deriving the runtime connection from MM_APP_DB_PASSWORD", () => {
+  const ADMIN = "postgresql://postgres.veoxnzvuqfw:adminpw@aws-0-us-west-1.pooler.supabase.com:5432/postgres";
+
+  it("derives it when no runtime connection string is set", () => {
+    // Removes the need to keep the same password in two places, which is
+    // what produced a green build with "password authentication failed" on
+    // every request.
+    const resolved = resolveConnection("runtime", {
+      DIRECT_DATABASE_URL: ADMIN,
+      MM_APP_DB_PASSWORD: "s3cret",
+    });
+    expect(resolved.user).toBe("mm_app.veoxnzvuqfw");
+    expect(resolved.host).toBe("aws-0-us-west-1.pooler.supabase.com");
+    expect(resolved.database).toBe("postgres");
+    expect(resolved.source).toContain("MM_APP_DB_PASSWORD");
+    expect(parseConnectionString(resolved.connectionString).password).toBe("s3cret");
+  });
+
+  it("never uses the admin role, so row-level security still applies", () => {
+    const resolved = resolveConnection("runtime", {
+      DIRECT_DATABASE_URL: ADMIN,
+      MM_APP_DB_PASSWORD: "s3cret",
+    });
+    expect(resolved.user).not.toBe("postgres.veoxnzvuqfw");
+    expect(resolved.user.startsWith("mm_app")).toBe(true);
+  });
+
+  it("percent-encodes a derived password containing URL-special characters", () => {
+    const resolved = resolveConnection("runtime", {
+      DIRECT_DATABASE_URL: ADMIN,
+      MM_APP_DB_PASSWORD: "p@ss/wo?rd#",
+    });
+    expect(() => new URL(resolved.connectionString)).not.toThrow();
+    expect(parseConnectionString(resolved.connectionString).password).toBe("p@ss/wo?rd#");
+  });
+
+  it("lets an explicit DATABASE_URL win — derivation never overrides a deliberate choice", () => {
+    const resolved = resolveConnection("runtime", {
+      DIRECT_DATABASE_URL: ADMIN,
+      MM_APP_DB_PASSWORD: "s3cret",
+      DATABASE_URL: LOCAL,
+    });
+    expect(resolved.source).toBe("DATABASE_URL");
+    expect(resolved.host).toBe("localhost");
+  });
+
+  it("does not derive without MM_APP_DB_PASSWORD", () => {
+    expect(() => resolveConnection("runtime", { DIRECT_DATABASE_URL: ADMIN })).toThrow(
+      /MM_APP_DB_PASSWORD/,
+    );
+  });
+});

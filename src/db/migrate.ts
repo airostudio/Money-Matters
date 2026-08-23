@@ -146,14 +146,16 @@ async function verifyRuntimeConnection(runtime: ResolvedConnection): Promise<voi
         `     ${explainConnectionError(error, runtime)}\n` +
         `     The build will still succeed, but every request will fail at runtime.\n` +
         `\n` +
-        `     If MM_APP_DB_PASSWORD is set, the password in ${runtime.source} must match it\n` +
-        `     exactly — this script rewrites mm_app's password from MM_APP_DB_PASSWORD on\n` +
-        `     every build, so the two drift apart the moment they differ. Check both are\n` +
-        `     set, identical, and present in the same environment scope.\n` +
+        `     SIMPLEST FIX: unset ${runtime.source} entirely and keep MM_APP_DB_PASSWORD.\n` +
+        `     The application's connection is then derived from MM_APP_DB_PASSWORD and the\n` +
+        `     migration connection, so there is only one copy of the password and nothing\n` +
+        `     left to drift.\n` +
         `\n` +
-        `     Any character in the password that is special in a URL (@ : / ? # %) must be\n` +
-        `     percent-encoded inside ${runtime.source}, or choose an alphanumeric password\n` +
-        `     to sidestep the question entirely.\n`,
+        `     If you would rather keep ${runtime.source}: its password must match\n` +
+        `     MM_APP_DB_PASSWORD exactly (this script rewrites the role's password from\n` +
+        `     MM_APP_DB_PASSWORD on every build), both must be set in the same environment\n` +
+        `     scope, and any URL-special character (@ : / ? # %) must be percent-encoded\n` +
+        `     inside the connection string.\n`,
     );
   } finally {
     await pool.end();

@@ -367,8 +367,16 @@ export function resolveConnection(
   const source = candidates.find((name) => (env[name] ?? "").trim() !== "");
 
   if (!source) {
+    if (purpose === "runtime") {
+      const derived = deriveRuntimeConnection(env);
+      if (derived) return derived;
+    }
     throw new DatabaseConfigurationError(
-      `No database connection string found for ${purpose}. Set one of: ${candidates.join(", ")}.`,
+      `No database connection string found for ${purpose}. Set one of: ${candidates.join(", ")}.` +
+        (purpose === "runtime"
+          ? `\nAlternatively, set MM_APP_DB_PASSWORD and leave DATABASE_URL unset — the ` +
+            `application's connection is then derived from it and the migration connection.`
+          : ""),
     );
   }
 
@@ -403,6 +411,60 @@ export function resolveConnection(
     database: parsed.database,
     user: parsed.user,
     ssl: resolveSsl(parsed.host, env),
+    warnings,
+  };
+}
+
+/** The restricted role the application connects as. See docs/security.md §2. */
+export const APP_ROLE = "mm_app";
+
+/** Admin/owner connections, in preference order, that a runtime one can be derived from. */
+const ADMIN_ENV_VARS = ["DIRECT_DATABASE_URL", "POSTGRES_URL_NON_POOLING"] as const;
+
+/**
+ * Builds the application's connection from MM_APP_DB_PASSWORD plus the
+ * migration connection's host/port/database.
+ *
+ * Otherwise the same password has to be kept in sync in two places —
+ * MM_APP_DB_PASSWORD (which the migration writes to the role) and the
+ * password embedded in DATABASE_URL — and the moment they differ the build
+ * is green while every request fails "password authentication failed". They
+ * cannot drift if there is only one of them.
+ *
+ * Only used when no runtime connection string is set at all: an explicit
+ * DATABASE_URL always wins, so this never silently overrides a deliberate
+ * choice. The derived connection uses the restricted role, never the admin
+ * one, so row-level security still applies.
+ */
+function deriveRuntimeConnection(env: EnvLike): ResolvedConnection | null {
+  const password = env.MM_APP_DB_PASSWORD?.trim();
+  if (!password) return null;
+
+  const adminVar = ADMIN_ENV_VARS.find((name) => (env[name] ?? "").trim() !== "");
+  if (!adminVar) return null;
+  if (diagnoseConnectionString(env[adminVar]!)) return null;
+
+  const admin = parseConnectionString(normalizeConnectionString(env[adminVar]!));
+  const user = poolerAwareRoleName(APP_ROLE, admin.host, admin.user);
+
+  const warnings: string[] = [];
+  if (isSupabaseDirectHost(admin.host)) {
+    warnings.push(
+      `The derived application connection inherits the IPv6-only host ${admin.host} from ` +
+        `${adminVar}; IPv4-only platforms cannot reach it.`,
+    );
+  }
+
+  return {
+    connectionString:
+      `${admin.scheme}://${encodeURIComponent(user)}:${encodeURIComponent(password)}` +
+      `@${admin.host}:${admin.port}/${admin.database}${admin.query}`,
+    source: `derived from MM_APP_DB_PASSWORD + ${adminVar}`,
+    host: admin.host,
+    port: admin.port,
+    database: admin.database,
+    user,
+    ssl: resolveSsl(admin.host, env),
     warnings,
   };
 }

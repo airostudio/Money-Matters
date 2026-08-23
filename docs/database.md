@@ -1,23 +1,24 @@
 # Database
 
-PostgreSQL, accessed through Prisma (`prisma/schema.prisma`). This document
-describes the Phase 1 schema and the conventions every future migration must
-follow.
+PostgreSQL, accessed through Drizzle ORM (`src/db/schema.ts`; migrations in
+`drizzle/`). This document describes the Phase 1 schema and the conventions
+every future migration must follow. See
+`decisions/0001-database-orm.md` for why Drizzle rather than Prisma.
 
 ## 1. Conventions
 
-- Every tenant-owned table has `organizationId String` (FK →
-  `Organization.id`, indexed) and an application-layer helper that requires
+- Every tenant-owned table has an `organization_id` column (FK →
+  `organizations.id`, indexed) and an application-layer helper that requires
   it (`src/db/tenant.ts`). No repository function accepts "find by id"
   without also taking `organizationId` in its signature.
-- Primary keys are `cuid()` strings, not auto-increment integers (avoids
-  leaking row counts, and merges cleanly across environments/seeds).
+- Primary keys are UUIDs (`gen_random_uuid()`), not auto-increment integers
+  (avoids leaking row counts, and merges cleanly across environments/seeds).
 - Monetary columns are `Decimal(19, 4)`. Never `Float`/`Int` cents-hack.
 - All tables have `createdAt`/`updatedAt`. Mutable business tables also have
   `createdById`/`updatedById`. Immutable tables (journal lines, audit logs)
   have `createdById` only.
-- Enums are Prisma enums for closed sets (`AccountType`, `JournalEntryStatus`,
-  `FiscalPeriodStatus`, `MembershipRole`) — not free-text columns — so
+- Closed sets are PostgreSQL enums (`account_type`, `journal_entry_status`,
+  `fiscal_period_status`, `membership_role`) — not free-text columns — so
   invalid states are unrepresentable, not just validated.
 - Soft-delete is used only where accounting history must be preserved
   (accounts, contacts use `isActive`/`archivedAt`, never a hard delete once
@@ -46,9 +47,8 @@ follow.
   extensible for later phases' AR/AP/payroll-generated journals),
   `reversalOfId`, `reversedById`.
 - `JournalLine` — `accountId`, `debit`/`credit` (`Decimal(19,4)`, exactly
-  one non-zero per row — enforced in the domain layer, not by a DB CHECK,
-  because Prisma's `Decimal` CHECK support is limited; see
-  `decisions/0003-monetary-precision.md`), `currency`, `exchangeRate`,
+  one non-zero per row — enforced in the domain layer by `PostingService`
+  rather than a DB CHECK; see `decisions/0003-monetary-precision.md`), `currency`, `exchangeRate`,
   `baseAmount`, `contactId?`, `taxCodeId?`, `memo?`.
 - `JournalLineDimension` — join of `JournalLine`×`DimensionValue`.
 - `Dimension` / `DimensionValue` — organization-defined slicing axes
@@ -116,6 +116,11 @@ which variable is wrong or why. It:
   placeholders, whitespace, wrong scheme, missing database name — and maps
   driver errno codes (`ENETUNREACH`, `28P01`, `3D000`, …) to what to
   actually change.
+- **Derives** the application's connection from `MM_APP_DB_PASSWORD` plus the
+  migration connection's host/database when no runtime connection string is
+  set, so the same password is not maintained in two places. An explicit
+  `DATABASE_URL` always takes precedence; the derived connection always uses
+  the restricted `mm_app` role, never the admin one.
 - **Never logs the password.** `redactConnectionString()` is the only
   sanctioned way to put a connection string in a log line.
 
@@ -134,24 +139,40 @@ deploy cycle.
 Every tenant table gets an RLS policy of the shape:
 
 ```sql
-alter table "Account" enable row level security;
-create policy tenant_isolation on "Account"
-  using (organization_id = current_setting('app.current_org_id', true)::text);
+alter table accounts enable row level security;
+alter table accounts force row level security;
+create policy tenant_isolation_accounts on accounts
+  using (organization_id = nullif(current_setting('app.current_org_id', true), '')::uuid)
+  with check (organization_id = nullif(current_setting('app.current_org_id', true), '')::uuid);
 ```
 
-The Prisma client sets `app.current_org_id` via `SET LOCAL` inside each
-request's transaction (`src/db/tenant.ts`), using the org resolved from the
-authenticated session — never a client-supplied header/body value. RLS
-policies live in `prisma/migrations/*_enable_rls/migration.sql` (Prisma
-schema does not model RLS directly, so it is hand-authored SQL in a
-migration, checked into version control like any other migration).
+`withTenant()` sets `app.current_org_id` via `set_config(..., true)` —
+transaction-local, equivalent to `SET LOCAL` — inside each request's
+transaction (`src/db/tenant.ts`), using the org resolved from the
+authenticated session, never a client-supplied header or body value.
 
-## 4. Why Prisma over raw SQL or an ORM tied to Supabase
+Two details that are load-bearing rather than stylistic:
 
-See `decisions/0001-database-orm.md`. Short version: Prisma gives typed
+- `nullif(..., '')` because an unset custom GUC reads back as the empty
+  string, not NULL, and `''::uuid` raises rather than simply matching no
+  rows.
+- `FORCE` (migration `0002`) because PostgreSQL exempts a table's owner from
+  its own policies — see `docs/security.md` §2.
+
+RLS is hand-authored SQL in `drizzle/0001_row_level_security.sql` and
+`drizzle/0002_force_row_level_security.sql`; Drizzle's schema DSL does not
+model policies, so they live in migrations, version-controlled like any
+other.
+
+## 4. Why Drizzle over Prisma or an ORM tied to Supabase
+
+See `decisions/0001-database-orm.md`. Short version: Drizzle gives typed
 migrations and a typed client while remaining plain PostgreSQL underneath —
 `DATABASE_URL` can point at Supabase Postgres, a local Postgres, or any
-other Postgres, satisfying "the database should remain portable Postgres."
+other Postgres, satisfying "the database should remain portable Postgres".
+Prisma was the original choice; its engine binaries could not be fetched in
+the build environment, and the portability requirement made Drizzle a
+straight swap.
 
 ## 5. What's deferred
 
