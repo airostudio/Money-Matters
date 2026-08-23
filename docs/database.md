@@ -93,6 +93,42 @@ application code instead — see `loadLinesForEntries` in
 for relations with no numeric columns (e.g. joining an `Account` or
 `Contact` purely for display fields).
 
+## 2b. The connection layer (`src/db/connection.ts`)
+
+Every database consumer resolves its configuration through one pure,
+unit-tested module rather than reading `process.env.DATABASE_URL` directly.
+It exists because a misconfigured connection string otherwise surfaces as
+`TypeError: Invalid URL` from deep inside the driver, with no indication of
+which variable is wrong or why. It:
+
+- **Resolves** from a prioritised list of variable names, so a project wired
+  up by Vercel's Postgres/Supabase integration works unchanged
+  (`DATABASE_URL`, `POSTGRES_URL`, `SUPABASE_DB_URL`, …). Migrations prefer
+  explicitly non-pooled names (`DIRECT_DATABASE_URL`,
+  `POSTGRES_URL_NON_POOLING`) because DDL, `CREATE ROLE` and session-level
+  settings misbehave through a transaction-mode pooler.
+- **Repairs** credentials that are legal as passwords but illegal raw inside
+  a URI. `@`, `/`, `?`, `#`, spaces and brackets are all common in generated
+  database passwords and all make `new URL()` throw; the parser finds the
+  userinfo boundary by scanning right-to-left for a plausible host, then
+  re-encodes. Stray wrapping quotes from copy-paste are stripped.
+- **Diagnoses**, in operator terms: unsubstituted `[YOUR-PASSWORD]`
+  placeholders, whitespace, wrong scheme, missing database name — and maps
+  driver errno codes (`ENETUNREACH`, `28P01`, `3D000`, …) to what to
+  actually change.
+- **Never logs the password.** `redactConnectionString()` is the only
+  sanctioned way to put a connection string in a log line.
+
+A known hosting trap encoded here: Supabase's direct host
+(`db.<ref>.supabase.co`) is IPv6-only, and IPv4-only platforms — Vercel
+among them — cannot reach it regardless of credentials. `resolveConnection`
+emits a warning naming the Session pooler as the fix, and
+`explainConnectionError` repeats it if the connection then fails.
+
+`npm run db:doctor` (`scripts/db-doctor.ts`) exercises all of the above
+read-only, so a connection problem is one command to identify rather than a
+deploy cycle.
+
 ## 3. Row-Level Security
 
 Every tenant table gets an RLS policy of the shape:

@@ -16,6 +16,8 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx --env-file=.env src/db/migrate.ts",
     "db:migrate:ci": "tsx src/db/migrate.ts",
+    "db:doctor": "tsx --env-file=.env scripts/db-doctor.ts",
+    "db:doctor:ci": "tsx scripts/db-doctor.ts",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
     "db:seed": "NODE_OPTIONS=--conditions=react-server tsx --env-file=.env scripts/seed.ts"

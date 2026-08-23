@@ -1,5 +1,5 @@
 import { Pool } from "pg";
-import { db, pool } from "@/db/client";
+import { closeDatabase, db } from "@/db/client";
 import { users } from "@/db/schema";
 import { OrganizationService } from "@/domain/organizations/organization-service";
 import type { Actor } from "@/domain/permissions/permission-service";
@@ -36,7 +36,8 @@ export async function resetDatabase(): Promise<void> {
 
 export async function closeTestPools(): Promise<void> {
   await adminPool?.end();
-  await pool.end();
+  adminPool = undefined;
+  await closeDatabase();
 }
 
 let testUserCounter = 0;

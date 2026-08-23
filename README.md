@@ -60,11 +60,24 @@ with the seeded demo credentials.
 The app runs against plain PostgreSQL, so any Postgres works — this
 section covers the specific Vercel + Supabase path.
 
+> **Use the Session pooler connection string, not the direct one.**
+> Supabase's direct host (`db.<ref>.supabase.co`) is IPv6-only unless you
+> pay for the IPv4 add-on, and Vercel's builds and functions are IPv4-only —
+> so the direct string fails there no matter how correct the password is.
+> In Supabase: Project Settings → Database → Connection string → **Session
+> pooler** (host looks like `aws-0-<region>.pooler.supabase.com`, user looks
+> like `postgres.<project-ref>`). `npm run db:doctor` warns about this
+> explicitly if you get it wrong.
+
 1. Create a Supabase project and set **one** Vercel project env var:
-   `DATABASE_URL` = the project's direct connection string (port `5432`,
-   the `postgres` user — the one shown on Supabase's Database settings
-   page). This needs to have enough privilege to create tables/roles/RLS
-   policies; the default `postgres` role does.
+   `DATABASE_URL` = the Session pooler connection string. It needs enough
+   privilege to create tables/roles/RLS policies; the default `postgres`
+   role has it.
+
+   Two things that will otherwise cost you a deploy cycle: replace the
+   `[YOUR-PASSWORD]` placeholder with the real password, and make sure the
+   variable is enabled for the **environment you actually deploy** —
+   a preview branch does not read Production-scoped variables.
 2. Deploy. `npm run build` runs `npm run db:migrate:ci` first (see
    `db:migrate:ci` below), which applies the schema and Row-Level Security
    policies to that database using Vercel's own copy of `DATABASE_URL` —
@@ -87,6 +100,24 @@ section covers the specific Vercel + Supabase path.
 target database — point `DATABASE_URL`/`DIRECT_DATABASE_URL` at it locally
 and run the script; it isn't wired into the Vercel build.
 
+### When a connection won't work
+
+```bash
+npm run db:doctor
+```
+
+Reports every connection-string variable it can see, whether each parses,
+what host/user/database/SSL it resolves to, and whether it can actually
+connect — with the password redacted throughout. It names the specific
+problem (unsubstituted placeholder, stray quotes or whitespace, wrong
+scheme, IPv6-only Supabase host, bad password, missing database) instead of
+the driver's bare `TypeError: Invalid URL`. Run it locally against a copy of
+the failing value, or as a one-off command in your host's shell.
+
+Note that `next build` no longer needs a reachable database — only the
+migration step does — so a connection problem can never break the app build
+itself.
+
 ## Scripts
 
 | Command | What it does |
@@ -99,6 +130,7 @@ and run the script; it isn't wired into the Vercel build.
 | `npm run db:generate` | Generate a Drizzle migration from `src/db/schema.ts` |
 | `npm run db:migrate` | Apply pending migrations (owner connection), loading `.env` |
 | `npm run db:migrate:ci` | Same, but reads `process.env` directly (no `.env` file) — what `npm run build` runs first, so it works on Vercel |
+| `npm run db:doctor` | Diagnose the database connection without changing anything (`db:doctor:ci` reads `process.env` directly) |
 | `npm run db:studio` | Drizzle Studio, a DB browser |
 | `npm run db:seed` | Seed the Northstar Electrical Group demo company |
 

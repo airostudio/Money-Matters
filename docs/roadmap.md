@@ -30,6 +30,9 @@ phase breakdown). This file tracks what is actually built vs. planned so
       smoke-tested end-to-end in a real browser (register/login/post a
       journal entry/reverse it/trial balance), not just type-checked
 - [ ] MFA/passkey auth — deferred (noted in `security.md`)
+- [ ] **Set `DATABASE_CA_CERT` for the production database** — TLS is on for
+      hosted connections but the server certificate is not verified without
+      it (`docs/security.md` §4a). Required before real financial data.
 - [ ] Period-lock override workflow UI — reject path enforced, override
       workflow deferred to Phase 9 (Close)
 

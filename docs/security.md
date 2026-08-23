@@ -71,6 +71,24 @@ parallel permission system to keep in sync. When Phase 6 adds AI tool calls,
 they call the same `AccountService`/`LedgerService` methods a human request
 calls — permissions are checked once, in one place, for both.
 
+## 4a. Database transport (TLS) — a known gap
+
+`resolveConnection` (see `docs/database.md` §2b) enables TLS for every
+non-local database host. Without a CA to check the server certificate
+against, it uses `rejectUnauthorized: false`: the channel is **encrypted but
+not authenticated**, which stops passive interception but not an active
+machine-in-the-middle attacker who can already redirect traffic.
+
+Set `DATABASE_CA_CERT` to the provider's CA certificate to get full
+verification (`rejectUnauthorized: true`). Doing that for the production
+database is a **required step before this platform holds real financial
+data**, and is tracked as such in `docs/roadmap.md` — it is deliberately not
+silently defaulted on, because a wrong or missing CA fails closed and would
+take the whole application down rather than degrade.
+
+Connection strings are treated as credentials throughout: they are never
+logged in full, only via `redactConnectionString()`.
+
 ## 5. Transport & storage
 
 - All traffic HTTPS (enforced at the hosting layer — Vercel).

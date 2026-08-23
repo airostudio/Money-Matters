@@ -2,6 +2,12 @@ import { randomBytes } from "node:crypto";
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
+import {
+  DatabaseConfigurationError,
+  explainConnectionError,
+  resolveConnection,
+  type ResolvedConnection,
+} from "./connection";
 
 const SAFE_PASSWORD_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -14,34 +20,39 @@ function generateSafePassword(length = 32): string {
   return out;
 }
 
-// Safe because the value is either our own generated alphanumeric-only
-// string, or (for the explicit-password path) still needs escaping since an
-// operator-supplied password could contain a quote.
 function escapeSqlStringLiteral(value: string): string {
   return value.replace(/'/g, "''");
 }
 
 /**
+ * Fails fast with a diagnosed error instead of letting the first migration
+ * query surface a bare driver TypeError/errno with no context.
+ */
+async function preflight(pool: Pool, connection: ResolvedConnection): Promise<void> {
+  try {
+    await pool.query("SELECT 1");
+  } catch (error) {
+    throw new DatabaseConfigurationError(explainConnectionError(error, connection));
+  }
+}
+
+/**
  * drizzle/0001_row_level_security.sql creates `mm_app` with NOLOGIN and no
  * password — a fixed password committed to source control is a real
- * vulnerability the moment this runs against an internet-reachable
- * database (mm_app can set app.current_org_id to anything, so a leaked
- * password is a cross-tenant read of the whole database). This is the one
- * place a real credential gets attached to the role, and it never touches
- * git:
+ * vulnerability the moment it runs against an internet-reachable database
+ * (mm_app can set app.current_org_id to anything, so a leaked password is a
+ * cross-tenant read of everything). This is the one place a real credential
+ * gets attached to the role, and it never touches git:
  *
- * - If MM_APP_DB_PASSWORD is set, use it verbatim (local dev: .env pins
- *   this to a fixed value so `DATABASE_URL` in .env stays valid across
- *   re-migrations).
- * - Otherwise, generate a fresh random password and print the resulting
- *   connection string once, to this process's stdout only — for a Vercel
- *   build, that means it lands in the deployment's build log, not in any
- *   chat transcript or committed file.
- * - Idempotent: if mm_app already has LOGIN enabled (a password was
- *   already set by a prior run), this is a no-op — it never silently
- *   rotates a password a deploy might already be depending on.
+ * - MM_APP_DB_PASSWORD if provided (local dev pins this so .env's connection
+ *   strings stay valid across re-migrations).
+ * - Otherwise a fresh random password, with the resulting connection string
+ *   printed once to this process's own stdout — for a Vercel build that means
+ *   the deployment's build log, not a chat transcript or a committed file.
+ * - Idempotent: once mm_app has LOGIN it is never rotated, so a redeploy
+ *   cannot invalidate a DATABASE_URL another environment is already using.
  */
-async function ensureAppRolePassword(pool: Pool, connectionString: string) {
+async function ensureAppRolePassword(pool: Pool, connection: ResolvedConnection): Promise<void> {
   const { rows } = await pool.query<{ rolcanlogin: boolean }>(
     "SELECT rolcanlogin FROM pg_catalog.pg_roles WHERE rolname = 'mm_app'",
   );
@@ -53,7 +64,7 @@ async function ensureAppRolePassword(pool: Pool, connectionString: string) {
   }
 
   if (role.rolcanlogin) {
-    console.log("mm_app already has LOGIN enabled — leaving its password as-is (not rotating).");
+    console.log("[db] mm_app already has LOGIN — leaving its password as-is (not rotating).");
     return;
   }
 
@@ -63,50 +74,61 @@ async function ensureAppRolePassword(pool: Pool, connectionString: string) {
   await pool.query(`ALTER ROLE mm_app WITH LOGIN PASSWORD '${escapeSqlStringLiteral(password)}'`);
 
   if (explicitPassword) {
-    console.log("mm_app password set from MM_APP_DB_PASSWORD.");
+    console.log("[db] mm_app password set from MM_APP_DB_PASSWORD.");
     return;
   }
 
-  const adminUrl = new URL(connectionString);
-  const appUrl = `postgresql://mm_app:${password}@${adminUrl.host}${adminUrl.pathname}${adminUrl.search}`;
-  console.log("\n=== mm_app now has LOGIN enabled with a freshly generated password ===");
-  console.log("Printed once, here only — not stored anywhere else. Copy it now:");
-  console.log(`  DATABASE_URL=${appUrl}`);
-  console.log(
-    "Set that as this project's DATABASE_URL (move the current admin connection string to",
-  );
-  console.log("DIRECT_DATABASE_URL instead, so future migrations keep using it), then redeploy.");
-  console.log("======================================================================\n");
+  const appUrl =
+    `postgresql://mm_app:${encodeURIComponent(password)}` +
+    `@${connection.host}:${connection.port}/${connection.database}`;
+
+  console.log("\n==================== ACTION REQUIRED ====================");
+  console.log("mm_app now has LOGIN with a freshly generated password.");
+  console.log("This is printed once, here only. Copy it now:\n");
+  console.log(`  DATABASE_URL=${appUrl}\n`);
+  console.log("In your hosting provider's environment variables:");
+  console.log(`  1. Rename the current DATABASE_URL to DIRECT_DATABASE_URL (migrations use it).`);
+  console.log(`  2. Set DATABASE_URL to the value above (the app's runtime traffic uses it,`);
+  console.log(`     and unlike the admin role it cannot bypass row-level security).`);
+  console.log("  3. Redeploy.");
+  console.log("=========================================================\n");
 }
 
-/**
- * Applies pending migrations, including the hand-authored RLS/grants
- * migration (drizzle/0001_row_level_security.sql) which creates the
- * restricted `mm_app` role the application runtime connects as, then
- * provisions that role's password (see ensureAppRolePassword above).
- *
- * Must run against DIRECT_DATABASE_URL (a superuser/owner connection) — the
- * restricted `mm_app` role has no privilege to CREATE ROLE or ALTER TABLE.
- */
 async function main() {
-  const connectionString = process.env.DIRECT_DATABASE_URL ?? process.env.DATABASE_URL;
-  if (!connectionString) {
-    throw new Error("DIRECT_DATABASE_URL (or DATABASE_URL) must be set to run migrations.");
+  const connection = resolveConnection("migration");
+
+  console.log(
+    `[db] Migrating ${connection.database} at ${connection.host}:${connection.port} ` +
+      `as "${connection.user}" (from ${connection.source}, ssl=${connection.ssl ? "on" : "off"}).`,
+  );
+  for (const warning of connection.warnings) {
+    console.warn(`[db] WARNING: ${warning}`);
   }
 
-  const pool = new Pool({ connectionString });
-  const db = drizzle(pool);
+  const pool = new Pool({
+    connectionString: connection.connectionString,
+    ssl: connection.ssl,
+    max: 1,
+    connectionTimeoutMillis: Number(process.env.DATABASE_CONNECT_TIMEOUT_MS ?? 15_000),
+  });
 
-  console.log("Running migrations...");
-  await migrate(db, { migrationsFolder: "./drizzle" });
-  console.log("Migrations complete.");
-
-  await ensureAppRolePassword(pool, connectionString);
-
-  await pool.end();
+  try {
+    await preflight(pool, connection);
+    console.log("[db] Connected. Running migrations...");
+    await migrate(drizzle(pool), { migrationsFolder: "./drizzle" });
+    console.log("[db] Migrations complete.");
+    await ensureAppRolePassword(pool, connection);
+  } finally {
+    await pool.end();
+  }
 }
 
 main().catch((error) => {
-  console.error("Migration failed:", error);
+  if (error instanceof DatabaseConfigurationError) {
+    // Already an operator-readable explanation; a stack trace adds only noise.
+    console.error(`\n[db] Migration aborted.\n\n${error.message}\n`);
+  } else {
+    console.error("[db] Migration failed:", error);
+  }
   process.exit(1);
 });
