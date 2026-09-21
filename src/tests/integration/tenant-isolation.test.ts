@@ -2,11 +2,13 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { closeTestPools, createTestOrg, resetDatabase } from "../helpers/db";
 import { createSampleAccounts } from "../helpers/ledger";
-import { accounts, auditLogs } from "@/db/schema";
+import { createSalesFixtures } from "../helpers/sales";
+import { accounts, auditLogs, invoices } from "@/db/schema";
 import { db } from "@/db/client";
 import { withTenant } from "@/db/tenant";
 import { AccountService } from "@/domain/accounts/account-service";
 import { PostingService } from "@/domain/ledger/posting-service";
+import { InvoiceService } from "@/domain/sales/invoice-service";
 
 /**
  * Master spec §48 / §87 non-negotiable #7: "A coding mistake must not allow
@@ -106,6 +108,10 @@ describe("Tenant isolation", () => {
       "journal_entries",
       "journal_lines",
       "audit_logs",
+      "invoices",
+      "invoice_lines",
+      "payments",
+      "payment_allocations",
     ];
 
     const rows = await db.execute<{
@@ -125,6 +131,26 @@ describe("Tenant isolation", () => {
       expect(row?.relrowsecurity, `${table} should have RLS enabled`).toBe(true);
       expect(row?.relforcerowsecurity, `${table} should have RLS forced`).toBe(true);
     }
+  });
+
+  it("an invoice created under org A is invisible to org B, even by direct query with no filter", async () => {
+    const fixturesA = await createSalesFixtures(orgA.owner, orgA.baseCurrency);
+    const created = await InvoiceService.create(orgA.owner, {
+      customerContactId: fixturesA.customerContactId,
+      issueDate: new Date(),
+      dueDate: new Date(),
+      currency: "AUD",
+      arAccountId: fixturesA.arAccountId,
+      lines: [{ description: "x", quantity: "1", unitPrice: "10.00", accountId: fixturesA.revenueAccountId }],
+    });
+
+    expect(await InvoiceService.get(orgB.owner, created.id)).toBeNull();
+
+    const rowsAsOrgB = await withTenant(orgB.organizationId, (tx) => tx.select().from(invoices));
+    expect(rowsAsOrgB.some((r) => r.id === created.id)).toBe(false);
+
+    const rowsWithNoTenantContext = await db.select().from(invoices);
+    expect(rowsWithNoTenantContext).toHaveLength(0);
   });
 
   it("RLS rejects an INSERT for an org other than the one scoped on the connection", async () => {
