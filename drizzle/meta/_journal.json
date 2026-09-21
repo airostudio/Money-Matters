@@ -36,6 +36,20 @@
       "when": 1787486073576,
       "tag": "0004_bank_feed_row_level_security",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1789967645146,
+      "tag": "0005_huge_jasper_sitwell",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1789967646146,
+      "tag": "0006_sales_row_level_security",
+      "breakpoints": true
     }
   ]
 }
