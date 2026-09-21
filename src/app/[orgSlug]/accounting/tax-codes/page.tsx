@@ -1,5 +1,6 @@
 import { requireOrgAndActor } from "@/lib/session";
 import { TaxCodeService } from "@/domain/tax/tax-code-service";
+import { AccountService } from "@/domain/accounts/account-service";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -9,6 +10,8 @@ import { createTaxCodeAction } from "./actions";
 export default async function TaxCodesPage({ params }: { params: { orgSlug: string } }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
   const taxCodes = await TaxCodeService.list(actor);
+  const accounts = await AccountService.list(actor);
+  const liabilityAccounts = accounts.filter((a) => a.type === "LIABILITY");
   const boundCreate = createTaxCodeAction.bind(null, org.slug);
 
   return (
@@ -32,17 +35,24 @@ export default async function TaxCodesPage({ params }: { params: { orgSlug: stri
                   <th className="px-6 py-2 font-medium">Name</th>
                   <th className="px-6 py-2 font-medium">Jurisdiction</th>
                   <th className="px-6 py-2 text-right font-medium">Rate</th>
+                  <th className="px-6 py-2 font-medium">Payable account</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {taxCodes.map((tc) => (
-                  <tr key={tc.id}>
-                    <td className="px-6 py-2.5 font-mono text-xs">{tc.code}</td>
-                    <td className="px-6 py-2.5">{tc.name}</td>
-                    <td className="px-6 py-2.5 text-muted-foreground">{tc.jurisdiction}</td>
-                    <td className="px-6 py-2.5 text-right">{(Number(tc.rate) * 100).toFixed(2)}%</td>
-                  </tr>
-                ))}
+                {taxCodes.map((tc) => {
+                  const payableAccount = accounts.find((a) => a.id === tc.payableAccountId);
+                  return (
+                    <tr key={tc.id}>
+                      <td className="px-6 py-2.5 font-mono text-xs">{tc.code}</td>
+                      <td className="px-6 py-2.5">{tc.name}</td>
+                      <td className="px-6 py-2.5 text-muted-foreground">{tc.jurisdiction}</td>
+                      <td className="px-6 py-2.5 text-right">{(Number(tc.rate) * 100).toFixed(2)}%</td>
+                      <td className="px-6 py-2.5 text-muted-foreground">
+                        {payableAccount ? `${payableAccount.code} · ${payableAccount.name}` : "Not configured"}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           )}
@@ -70,6 +80,24 @@ export default async function TaxCodesPage({ params }: { params: { orgSlug: stri
             <div className="space-y-2">
               <Label htmlFor="ratePercent">Rate (%)</Label>
               <Input id="ratePercent" name="ratePercent" type="number" step="0.01" min="0" max="100" placeholder="10" required />
+            </div>
+            <div className="col-span-2 space-y-2">
+              <Label htmlFor="payableAccountId">Payable account (for invoicing)</Label>
+              <select
+                id="payableAccountId"
+                name="payableAccountId"
+                className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+              >
+                <option value="">Not configured yet</option>
+                {liabilityAccounts.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.code} · {a.name}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-muted-foreground">
+                Tax collected under this code is credited here on a posted invoice — required before this code can be used on one.
+              </p>
             </div>
           </CardContent>
           <div className="flex justify-end border-t border-border px-6 py-4">

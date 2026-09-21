@@ -32,7 +32,17 @@ export interface NavItem {
 export const NAV_ITEMS: NavItem[] = [
   { label: "Home", href: "", icon: Home },
   { label: "Money", href: "/money", icon: Banknote },
-  { label: "Sales", href: "/sales", icon: LineChart },
+  {
+    label: "Sales",
+    href: "/sales",
+    icon: LineChart,
+    permission: "customer_invoice:read",
+    children: [
+      { label: "Invoices", href: "/sales/invoices", permission: "customer_invoice:read" },
+      { label: "Customers", href: "/sales/customers", permission: "customer_invoice:read" },
+      { label: "Aged Receivables", href: "/sales/aged-receivables", permission: "customer_invoice:read" },
+    ],
+  },
   { label: "Purchases", href: "/purchases", icon: ShoppingCart },
   { label: "People", href: "/people", icon: Users },
   { label: "Operations", href: "/operations", icon: Package },
