@@ -548,9 +548,31 @@ function deriveRuntimeConnection(env: EnvLike): ResolvedConnection | null {
  * likely cause. These codes otherwise surface as bare errno strings in a
  * build log with no indication of which knob to turn.
  */
+/**
+ * Supavisor (Supabase's pooler) returns this exact text — under the
+ * catch-all SQLSTATE `XX000`, not a distinct code — when it cannot route to
+ * a project at all. In practice that has one cause: the Supabase project
+ * has been paused (free-tier projects auto-pause after about a week of
+ * inactivity). It is not a credentials or code problem, and the fix is on
+ * Supabase's dashboard, not in this application.
+ */
+const SUPAVISOR_TENANT_NOT_FOUND = /tenant\s*(?:\/|or)\s*user(?:\s+\S+)?\s+not found/i;
+
 export function explainConnectionError(error: unknown, connection: ResolvedConnection): string {
   const code = (error as { code?: string } | null)?.code;
+  const message = (error as { message?: string } | null)?.message ?? "";
   const target = `${connection.host}:${connection.port}`;
+
+  if (SUPAVISOR_TENANT_NOT_FOUND.test(message)) {
+    return (
+      `Supabase's connection pooler doesn't recognize "${connection.user}" at ${target}. ` +
+      `This exact message is what Supavisor returns when the Supabase project itself has been ` +
+      `paused, not when a credential is wrong — free-tier projects auto-pause after about a ` +
+      `week with no activity. Log into the Supabase dashboard, find this project, and click ` +
+      `"Restore project"; nothing here needs to change, and the app works again as soon as it's ` +
+      `back online.`
+    );
+  }
 
   switch (code) {
     case "ENETUNREACH":

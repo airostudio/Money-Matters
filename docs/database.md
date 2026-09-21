@@ -138,6 +138,16 @@ among them — cannot reach it regardless of credentials. `resolveConnection`
 emits a warning naming the Session pooler as the fix, and
 `explainConnectionError` repeats it if the connection then fails.
 
+A second one, encountered in production rather than anticipated in advance:
+a free-tier Supabase project auto-pauses after about a week with no
+activity, and every connection then fails with `(ENOTFOUND) tenant/user
+<role> not found` — a Supavisor-specific message returned under the
+catch-all SQLSTATE `XX000`, easy to mistake for a credentials problem since
+nothing about the error code says "paused project". `explainConnectionError`
+recognizes this message text specifically and says to restore the project
+from the Supabase dashboard, because retrying, rotating a password, or
+redeploying all do nothing until the project itself is running again.
+
 `npm run db:doctor` (`scripts/db-doctor.ts`) exercises all of the above
 read-only, so a connection problem is one command to identify rather than a
 deploy cycle.

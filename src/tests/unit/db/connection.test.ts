@@ -219,6 +219,26 @@ describe("explainConnectionError", () => {
   it("still says something useful for an unknown error", () => {
     expect(explainConnectionError(new Error("boom"), supabaseDirect)).toContain("Could not connect");
   });
+
+  it("recognizes a paused Supabase project from Supavisor's tenant/user error, not just a bad password", () => {
+    // Real production example: SQLSTATE XX000 (a catch-all), with the
+    // identifying text in the message, not the code — this happens when the
+    // Supabase project has been paused for inactivity, and looks nothing
+    // like a credentials problem from the error code alone.
+    const error = {
+      code: "XX000",
+      message: "(ENOTFOUND) tenant/user mm_app.veoxnzvuqfwkratkrwvy not found",
+    };
+    const explanation = explainConnectionError(error, supabaseDirect);
+    expect(explanation).toMatch(/paused/i);
+    expect(explanation).toMatch(/restore project/i);
+    expect(explanation).not.toMatch(/password/i);
+  });
+
+  it("also recognizes Supavisor's generic \"tenant or user not found\" wording", () => {
+    const error = { code: "XX000", message: "FATAL: Tenant or user not found" };
+    expect(explainConnectionError(error, supabaseDirect)).toMatch(/paused/i);
+  });
 });
 
 describe("poolerAwareRoleName", () => {
