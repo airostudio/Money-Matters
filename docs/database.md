@@ -190,6 +190,41 @@ posted as a new balanced entry with `sourceType: "BANK_TRANSACTION"`
 `PostingService`, so every Phase 1 invariant (period lock, active accounts,
 debit=credit) still applies to bank-originated entries.
 
+## 2d. Phase 3 Slice 1 entity groups: sales (customer invoicing & AR)
+
+- `Invoice` — a customer invoice. `arAccountId` names the specific
+  Accounts Receivable control account it posts to, chosen explicitly at
+  creation time (the same convention as `BankAccount.glAccountId` — no
+  per-organization "default account" magic). `subtotal`/`taxTotal`/`total`
+  are denormalized from `InvoiceLine`s for cheap list/aging queries, but
+  only ever written by `InvoiceService` in the same transaction as the
+  lines that justify them. `status` is `DRAFT → APPROVED → (SENT/VIEWED) →
+  PART_PAID → PAID`, or `VOID`; there is no stored `OVERDUE` value — see the
+  `invoiceStatusEnum` doc comment in `src/db/schema.ts` for why.
+- `InvoiceLine` — `accountId` is the revenue account credited on posting;
+  `taxCodeId` is optional. `lineAmount`/`taxAmount` are computed and stored
+  by `InvoiceService` via `Money`/`decimal.js`, never floating point.
+- `Payment` — a customer receipt. `depositAccountId` is the ASSET account
+  debited on posting (a bank's own `glAccountId`, or an "Undeposited Funds"
+  clearing account); `bankAccountId` is an optional informational link to
+  Phase 2's `BankAccount` for later reconciliation.
+- `PaymentAllocation` — how much of a `Payment` was applied to a given
+  `Invoice`. The join that makes partial payments and one-payment-to-
+  many-invoices both work. An invoice's "amount paid"/"outstanding" is
+  never a denormalized column — it's computed fresh from this table's rows
+  every time (`InvoiceService.loadAllocatedTotal`), so it can't drift.
+- `TaxCode.payableAccountId` (added in this slice) — the liability account
+  tax collected under a code is credited to on a posted invoice. Nullable
+  because Phase 1 tax codes predate this; `InvoiceService` rejects posting
+  a line whose tax code has none configured.
+
+An `Invoice`'s only path to the ledger is `InvoiceService.approveAndPost`
+(debit AR, credit revenue + tax payable) and `InvoiceService.voidInvoice`
+(a full reversal of that same entry) — both go through `PostingService`,
+never a direct `journal_lines` write, exactly like Phase 2's banking
+reconciliation. Same for `PaymentAllocationService.recordPayment` (debit
+deposit account, credit AR).
+
 ## 3. Row-Level Security
 
 Every tenant table gets an RLS policy of the shape:

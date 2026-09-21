@@ -52,6 +52,8 @@ src/
     accounts/              Chart of Accounts service
     contacts/              Customers/suppliers service
     tax/                   Tax code / jurisdiction service (Phase 1 architecture only)
+    banking/               Bank import/reconciliation/rules (Phase 2 Slice 1)
+    sales/                 InvoiceService, PaymentAllocationService, AgedReceivablesService (Phase 3 Slice 1)
     permissions/           Roles, permission checks
     audit/                 AuditService
     organizations/         Org + membership service
