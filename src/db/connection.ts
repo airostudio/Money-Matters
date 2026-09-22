@@ -461,10 +461,12 @@ export function resolveConnection(
 
   if (isSupabaseDirectHost(parsed.host)) {
     warnings.push(
-      `${source} points at Supabase's direct-connection host (${parsed.host}), which is IPv6-only. ` +
-        `IPv4-only platforms — Vercel included — cannot reach it. Use the Session pooler ` +
+      `${source} points at Supabase's direct-connection host (${parsed.host}). This host is ` +
+        `IPv6-only by default — IPv4-only platforms (Vercel included) can't reach it unless the ` +
+        `project has the IPv4 add-on enabled. If connections are working, this project already has ` +
+        `IPv4 and no action is needed; if they start failing, switch to the Session pooler ` +
         `connection string from Supabase (Project Settings -> Database -> Connection string -> ` +
-        `Session pooler), which is dual-stack.`,
+        `Session pooler), which is dual-stack regardless.`,
     );
   }
 
@@ -524,8 +526,10 @@ function deriveRuntimeConnection(env: EnvLike): ResolvedConnection | null {
   const warnings: string[] = [];
   if (isSupabaseDirectHost(admin.host)) {
     warnings.push(
-      `The derived application connection inherits the IPv6-only host ${admin.host} from ` +
-        `${adminVar}; IPv4-only platforms cannot reach it.`,
+      `The derived application connection inherits Supabase's direct-connection host ${admin.host} ` +
+        `from ${adminVar}. That host is IPv6-only unless the project has the IPv4 add-on; if ` +
+        `connections are working, no action is needed. If an IPv4-only platform later can't reach ` +
+        `it, switch ${adminVar} to the Session pooler connection string instead.`,
     );
   }
 
@@ -578,8 +582,10 @@ export function explainConnectionError(error: unknown, connection: ResolvedConne
     case "ENETUNREACH":
     case "EHOSTUNREACH":
       return isSupabaseDirectHost(connection.host)
-        ? `Cannot reach ${target}: this is Supabase's IPv6-only direct-connection host and this platform is IPv4-only. ` +
-            `Switch ${connection.source} to the Session pooler connection string (Supabase -> Project Settings -> Database).`
+        ? `Cannot reach ${target}: this is Supabase's direct-connection host, which is IPv6-only ` +
+            `unless the project has the IPv4 add-on. If this platform is IPv4-only, switch ` +
+            `${connection.source} to the Session pooler connection string (Supabase -> Project ` +
+            `Settings -> Database) — it works regardless of the add-on.`
         : `Cannot reach ${target} (network unreachable). Check the host is correct and reachable from this network.`;
     case "ENOTFOUND":
       return `Host "${connection.host}" does not resolve. Check for a typo, or that the project still exists.`;
