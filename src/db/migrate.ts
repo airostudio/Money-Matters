@@ -181,17 +181,30 @@ async function auditTableSecurity(pool: Pool): Promise<void> {
           `("permission denied for table ${row.table_name}"). Add a GRANT in a migration.`,
       );
     }
+
+    // RLS enabled with zero policies denies every row to every non-owner
+    // role, tenant-scoped table or not. This app relies on GRANTs alone for
+    // non-tenant tables (users, organizations, organization_memberships,
+    // currencies — see drizzle/0001's own comment), so nothing should ever
+    // enable RLS on them; the most likely cause in practice is Supabase's
+    // dashboard "Enable RLS" prompt being clicked on a table without a
+    // policy being added, which fails every insert/update with no build-time
+    // signal unless this check runs unconditionally on every table.
+    if (row.rls_enabled && Number(row.policies) === 0) {
+      problems.push(
+        `${row.table_name}: row-level security is enabled but no policy exists, so the ` +
+          `table denies everything to mm_app ("new row violates row-level security policy"). ` +
+          `Add a policy, or if this table isn't meant to have RLS at all, ` +
+          `ALTER TABLE ${row.table_name} DISABLE ROW LEVEL SECURITY.`,
+      );
+    }
+
     if (!row.tenant_scoped || RLS_EXEMPT_TABLES.has(row.table_name)) continue;
     if (!row.rls_enabled) {
       problems.push(
         `${row.table_name}: has organization_id but row-level security is NOT enabled — ` +
           `every organization can read every other's rows. Add ` +
           `ALTER TABLE ${row.table_name} ENABLE ROW LEVEL SECURITY plus a policy.`,
-      );
-    } else if (Number(row.policies) === 0) {
-      problems.push(
-        `${row.table_name}: row-level security is enabled but no policy exists, so the ` +
-          `table denies everything to mm_app. Add a tenant_isolation policy.`,
       );
     }
     if (row.rls_enabled && !row.rls_forced) {
