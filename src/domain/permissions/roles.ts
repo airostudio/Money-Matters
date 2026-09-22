@@ -28,6 +28,7 @@ export const PERMISSIONS = [
   "customer_invoice:void",
   "customer_payment:read",
   "customer_payment:manage",
+  "onboarding:manage",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
