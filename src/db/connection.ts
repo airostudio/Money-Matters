@@ -294,6 +294,37 @@ export function isSupabaseDirectHost(host: string): boolean {
 }
 
 /**
+ * Pulls the project ref out of a direct-connection host, so an error message
+ * can hand back the exact dashboard URL and connection-string shape for
+ * *this* project instead of generic instructions the operator has to adapt.
+ */
+export function extractSupabaseProjectRef(host: string): string | null {
+  return /^db\.([a-z0-9]+)\.supabase\.(co|com)$/i.exec(host)?.[1] ?? null;
+}
+
+/**
+ * Full instructions for finding and shaping the Session pooler connection
+ * string, parameterized by project ref when known. Shared between the
+ * config-time warning and the runtime unreachable-host diagnosis so both
+ * say exactly the same thing.
+ */
+export function sessionPoolerInstructions(host: string): string {
+  const ref = extractSupabaseProjectRef(host);
+  const dashboardUrl = ref
+    ? `https://supabase.com/dashboard/project/${ref}/settings/database`
+    : `Supabase dashboard -> your project -> Project Settings -> Database`;
+  const exampleUser = ref ? `postgres.${ref}` : `postgres.<project-ref>`;
+  return (
+    `Get it from ${dashboardUrl}, under "Connection string" -> the "Session pooler" tab (not ` +
+    `"Direct connection" or "Transaction pooler"). Copy the URI shown there and fill in your ` +
+    `database password in place of [YOUR-PASSWORD] — it has this shape: ` +
+    `postgresql://${exampleUser}:[YOUR-PASSWORD]@aws-0-<region>.pooler.supabase.com:5432/postgres ` +
+    `(the username carries the project ref as a suffix; the host starts with aws-0- and ends in ` +
+    `.pooler.supabase.com; port 5432 is session mode, not 6543/transaction mode).`
+  );
+}
+
+/**
  * Supabase's connection pooler (Supavisor) routes by tenant using a
  * `<role>.<project-ref>` username — which is why a pooled connection string
  * says `postgres.abcdefghijklmnop` where the direct one just says
@@ -464,9 +495,8 @@ export function resolveConnection(
       `${source} points at Supabase's direct-connection host (${parsed.host}). This host is ` +
         `IPv6-only by default — IPv4-only platforms (Vercel included) can't reach it unless the ` +
         `project has the IPv4 add-on enabled. If connections are working, this project already has ` +
-        `IPv4 and no action is needed; if they start failing, switch to the Session pooler ` +
-        `connection string from Supabase (Project Settings -> Database -> Connection string -> ` +
-        `Session pooler), which is dual-stack regardless.`,
+        `IPv4 and no action is needed; if they start failing, switch to the Session pooler instead: ` +
+        `${sessionPoolerInstructions(parsed.host)}`,
     );
   }
 
@@ -529,7 +559,7 @@ function deriveRuntimeConnection(env: EnvLike): ResolvedConnection | null {
       `The derived application connection inherits Supabase's direct-connection host ${admin.host} ` +
         `from ${adminVar}. That host is IPv6-only unless the project has the IPv4 add-on; if ` +
         `connections are working, no action is needed. If an IPv4-only platform later can't reach ` +
-        `it, switch ${adminVar} to the Session pooler connection string instead.`,
+        `it, switch ${adminVar} to the Session pooler instead: ${sessionPoolerInstructions(admin.host)}`,
     );
   }
 
@@ -584,8 +614,8 @@ export function explainConnectionError(error: unknown, connection: ResolvedConne
       return isSupabaseDirectHost(connection.host)
         ? `Cannot reach ${target}: this is Supabase's direct-connection host, which is IPv6-only ` +
             `unless the project has the IPv4 add-on. If this platform is IPv4-only, switch ` +
-            `${connection.source} to the Session pooler connection string (Supabase -> Project ` +
-            `Settings -> Database) — it works regardless of the add-on.`
+            `${connection.source} to the Session pooler instead — it works regardless of the ` +
+            `add-on. ${sessionPoolerInstructions(connection.host)}`
         : `Cannot reach ${target} (network unreachable). Check the host is correct and reachable from this network.`;
     case "ENOTFOUND":
       return `Host "${connection.host}" does not resolve. Check for a typo, or that the project still exists.`;
