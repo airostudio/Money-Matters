@@ -23,6 +23,7 @@
     "db:seed": "NODE_OPTIONS=--conditions=react-server tsx --env-file=.env scripts/seed.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
     "@radix-ui/react-dialog": "^1.1.2",
     "@radix-ui/react-dropdown-menu": "^2.1.2",
     "@radix-ui/react-label": "^2.1.0",
