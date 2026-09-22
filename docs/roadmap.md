@@ -79,10 +79,79 @@ document AI (receipt/invoice capture), expense management, object storage
 for documents, background job infrastructure (queue), Redis-compatible
 cache, Stripe.
 
-## Phase 3 — Sales (not started)
+## Phase 3 — Sales (in progress)
 
-Customers, quotes, invoices (incl. recurring/progress/milestone), payments,
-AR aging, customer portal, smart debt collection.
+### Slice 1 — Customer invoicing & AR core — **complete**
+
+- [x] Schema: `invoices`, `invoice_lines`, `payments`, `payment_allocations`
+      (plus a `payable_account_id` column added to `tax_codes`), each RLS-
+      enabled and FORCEd, `mm_app`-granted (verified by the `db:migrate`
+      tenant-isolation audit — 20 of 24 tables now organization-scoped)
+- [x] `InvoiceService` (`src/domain/sales/invoice-service.ts`): create/edit/
+      delete a draft invoice with computed line/tax/subtotal/total (never
+      floating point — `src/domain/sales/invoice-calculations.ts`);
+      approve-and-post debits the invoice's AR control account and credits
+      each line's revenue account plus each tax code's payable account, all
+      through `PostingService.postJournal` — never a direct `journal_lines`
+      write, so every Phase 1 invariant (balance, period-lock, immutability)
+      still applies; void reverses the posting journal via
+      `PostingService.reverseEntry` rather than editing the original
+      (refused while any payment is still allocated)
+- [x] `PaymentAllocationService` (`src/domain/sales/payment-service.ts`):
+      records a customer receipt and allocates it across one or more
+      invoices in one transaction, posts the ledger effect (debit deposit
+      account, credit each allocated invoice's AR account) via
+      `PostingService`, and recomputes each invoice's PART_PAID/PAID status
+      from `payment_allocations` (never a denormalized counter). Enforces
+      explicitly: an allocation can never exceed its invoice's outstanding
+      balance, and a payment's allocations can never exceed the payment's
+      own amount
+- [x] `AgedReceivablesService` (`src/domain/sales/aged-receivables-service.ts`):
+      current/1-30/31-60/61-90/90+ buckets per customer per master spec §32,
+      computed from `dueDate` and live allocation totals (no stored
+      "overdue" status/background job — see the `invoice_status` enum's
+      doc comment in `src/db/schema.ts`)
+  - [x] New permissions: `customer_invoice:read/manage/post/void`,
+      `customer_payment:read/manage`, wired into the existing
+      `ROLE_PERMISSIONS` matrix (ACCOUNTS_RECEIVABLE gets full access,
+      matching its name; MANAGER/READ_ONLY get read-only)
+- [x] `AuditService` wired into every invoice/payment mutation
+- [x] UI under `/[orgSlug]/sales`: dashboard, invoice list (status filter)
+      and create/edit/detail (post/void/record-payment actions), a minimal
+      customers list/create/detail (Contacts had no UI yet in Phase 1;
+      Phase 3 needed one to select an invoice's customer), Aged Receivables
+      report with drill-down links to invoices — added to the role-aware
+      nav under "Sales" per master spec §59. The Tax Codes page gained a
+      "payable account" field (`src/app/[orgSlug]/accounting/tax-codes`),
+      required before a tax code can be used on an invoice line
+- [x] Tests: unit (`src/tests/unit/sales/invoice-calculations.test.ts` — 11
+      cases incl. Decimal-exact tax rounding), property-based
+      (`src/tests/property/sales/*` — every approved invoice's journal
+      balances; payment allocation accept/reject always matches the
+      arithmetic truth), integration (`src/tests/integration/sales/
+      invoice-and-payments.test.ts` — 12 cases: draft → approve/post →
+      trial balance reflects it → full/partial payment → status updates →
+      multi-invoice allocation → void/credit-note path → double-post
+      rejected → over-allocation rejected), and a tenant-isolation case
+      added to the existing suite
+- [x] `npm run typecheck`, `npm run lint`, `npm test` (183 tests) and
+      `npm run build` all pass; smoke-tested end-to-end against a real
+      local Postgres and a running dev server driven via raw HTTP (React
+      Server Action form submissions, not a browser — see the session
+      notes for this slice): register → create chart-of-accounts entries
+      and a tax code with a payable account → add a customer → create a
+      draft invoice → approve & post it → Trial Balance reflects the
+      debit/credit exactly → record a full payment → invoice status
+      becomes PAID and the bank account balance updates → a second
+      invoice's void correctly reverses its journal
+- Deferred to later Sales slices (explicitly out of scope for this one):
+  quotes, recurring/progress/milestone invoicing, the customer portal,
+  smart debt collection, a dedicated full Contacts/CRM UI (Phase 3 Slice 1
+  added only the minimal customer list/create/detail invoicing needs)
+
+### Slice 2 — not started
+Quotes, recurring/progress/milestone invoicing, customer portal, smart debt
+collection.
 
 ## Phase 4 — Purchases (not started)
 

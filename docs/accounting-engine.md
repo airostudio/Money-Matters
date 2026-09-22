@@ -123,6 +123,9 @@ entry with `reversalOfId` set → mark the original `reversedById` → audit.
   implementation is a stub returning rate `1`.
 - Period-lock override workflow UI — the reject path is enforced now; the
   "request override / approve override" workflow is Phase 9 (Close).
-- Sub-ledger reconciliation to control accounts (AR/AP control account
-  agreement) — enforced conceptually via `isControlAccount`, checked in
-  Phase 3/4 when invoices/bills exist.
+- Sub-ledger reconciliation to control accounts — implemented for AR in
+  Phase 3 Slice 1 (`src/domain/sales/invoice-service.ts`,
+  `src/domain/sales/payment-service.ts`): every invoice/payment posting
+  goes through this same `PostingService`, so an invoice's AR control
+  account balance is always exactly the sum of its own postings, never a
+  parallel ledger. The AP side (Phase 4) is still unbuilt.

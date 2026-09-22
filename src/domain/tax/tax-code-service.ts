@@ -12,6 +12,8 @@ export interface CreateTaxCodeInput {
   jurisdiction: string;
   effectiveFrom: Date;
   effectiveTo?: Date;
+  /** The liability account tax collected under this code is credited to — see src/domain/sales/invoice-service.ts. */
+  payableAccountId?: string;
 }
 
 /**
@@ -47,6 +49,7 @@ export const TaxCodeService = {
           jurisdiction: input.jurisdiction,
           effectiveFrom: input.effectiveFrom,
           effectiveTo: input.effectiveTo ?? null,
+          payableAccountId: input.payableAccountId ?? null,
         })
         .returning();
       if (!taxCode) throw new Error("Failed to create tax code.");

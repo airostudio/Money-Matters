@@ -7,6 +7,13 @@ const STATUS_STYLES: Record<string, string> = {
   OPEN: "bg-success/10 text-success",
   SOFT_LOCKED: "bg-warning/10 text-warning",
   HARD_LOCKED: "bg-destructive/10 text-destructive",
+  APPROVED: "bg-sky-500/10 text-sky-600 dark:text-sky-400",
+  SENT: "bg-sky-500/10 text-sky-600 dark:text-sky-400",
+  VIEWED: "bg-sky-500/10 text-sky-600 dark:text-sky-400",
+  PART_PAID: "bg-warning/10 text-warning",
+  PAID: "bg-success/10 text-success",
+  VOID: "bg-destructive/10 text-destructive",
+  OVERDUE: "bg-destructive/10 text-destructive",
 };
 
 export function StatusBadge({ status }: { status: string }) {

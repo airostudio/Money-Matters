@@ -1,8 +1,14 @@
 {
-  "extends": ["next/core-web-vitals"],
+  "root": true,
+  "extends": [
+    "next/core-web-vitals"
+  ],
   "overrides": [
     {
-      "files": ["src/app/**/*.{ts,tsx}", "src/components/**/*.{ts,tsx}"],
+      "files": [
+        "src/app/**/*.{ts,tsx}",
+        "src/components/**/*.{ts,tsx}"
+      ],
       "rules": {
         "no-restricted-imports": [
           "error",
@@ -22,7 +28,9 @@
       }
     },
     {
-      "files": ["src/domain/**/*.ts"],
+      "files": [
+        "src/domain/**/*.ts"
+      ],
       "rules": {
         "no-restricted-syntax": [
           "error",

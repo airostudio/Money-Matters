@@ -22,6 +22,12 @@ export const PERMISSIONS = [
   "bank_transaction:import",
   "bank_transaction:reconcile",
   "bank_rule:manage",
+  "customer_invoice:read",
+  "customer_invoice:manage",
+  "customer_invoice:post",
+  "customer_invoice:void",
+  "customer_payment:read",
+  "customer_payment:manage",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -55,6 +61,12 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "bank_transaction:import",
     "bank_transaction:reconcile",
     "bank_rule:manage",
+    "customer_invoice:read",
+    "customer_invoice:manage",
+    "customer_invoice:post",
+    "customer_invoice:void",
+    "customer_payment:read",
+    "customer_payment:manage",
   ]),
   BOOKKEEPER: new Set<Permission>([
     "account:read",
@@ -67,6 +79,11 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "bank_transaction:import",
     "bank_transaction:reconcile",
     "bank_rule:manage",
+    "customer_invoice:read",
+    "customer_invoice:manage",
+    "customer_invoice:post",
+    "customer_payment:read",
+    "customer_payment:manage",
   ]),
   ACCOUNTS_RECEIVABLE: new Set<Permission>([
     "account:read",
@@ -74,6 +91,12 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "contact:read",
     "contact:manage",
     "bank_account:read",
+    "customer_invoice:read",
+    "customer_invoice:manage",
+    "customer_invoice:post",
+    "customer_invoice:void",
+    "customer_payment:read",
+    "customer_payment:manage",
   ]),
   ACCOUNTS_PAYABLE: new Set<Permission>([
     "account:read",
@@ -89,6 +112,8 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "contact:read",
     "audit:read",
     "bank_account:read",
+    "customer_invoice:read",
+    "customer_payment:read",
   ]),
   EMPLOYEE: new Set<Permission>([]),
   READ_ONLY: new Set<Permission>([
@@ -97,6 +122,8 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "contact:read",
     "audit:read",
     "bank_account:read",
+    "customer_invoice:read",
+    "customer_payment:read",
   ]),
 };
 

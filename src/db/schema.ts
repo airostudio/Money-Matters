@@ -89,6 +89,40 @@ export const approvalStatusEnum = pgEnum("approval_status", [
 
 export const auditActorTypeEnum = pgEnum("audit_actor_type", ["HUMAN", "AI", "SYSTEM"]);
 
+/**
+ * Phase 3 Slice 1 (Sales — customer invoicing & AR core). `DRAFT` has no
+ * ledger effect and is fully editable/deletable, mirroring the journal
+ * entry lifecycle in docs/accounting-engine.md §1. `APPROVED` means posted
+ * to the ledger (debit AR / credit revenue+tax) via `PostingService` — see
+ * `src/domain/sales/invoice-service.ts`. `SENT`/`VIEWED` are informational
+ * only. `PART_PAID`/`PAID` are derived from `payment_allocations` and kept
+ * in sync by `PaymentAllocationService`. `VOID` means the posting journal
+ * was reversed (never edited) — see `InvoiceService.voidInvoice`.
+ *
+ * There is deliberately no stored `OVERDUE` value: "overdue" is a function
+ * of `dueDate` vs. "now" for any unpaid invoice, computed at read time
+ * (`InvoiceService.list`/`get`) rather than written by a background job —
+ * Phase 2 Slice 2's job/queue infrastructure (see docs/roadmap.md) is what
+ * a scheduled status flip would need, and isn't built yet.
+ */
+export const invoiceStatusEnum = pgEnum("invoice_status", [
+  "DRAFT",
+  "APPROVED",
+  "SENT",
+  "VIEWED",
+  "PART_PAID",
+  "PAID",
+  "VOID",
+]);
+
+export const paymentMethodEnum = pgEnum("payment_method", [
+  "BANK_TRANSFER",
+  "CASH",
+  "CARD",
+  "CHEQUE",
+  "OTHER",
+]);
+
 // ---------------------------------------------------------------------------
 // Identity & tenancy
 // ---------------------------------------------------------------------------
@@ -229,6 +263,15 @@ export const taxCodes = pgTable("tax_codes", {
   effectiveFrom: timestamp("effective_from", { withTimezone: true, mode: "date" }).notNull(),
   effectiveTo: timestamp("effective_to", { withTimezone: true, mode: "date" }),
   isActive: boolean("is_active").notNull().default(true),
+  /**
+   * The liability account tax collected under this code is credited to
+   * (e.g. "GST Payable") — set once per tax code, per docs/database.md's
+   * "explicit, not inferred" convention for every other account reference
+   * in this schema. Nullable because Phase 1 seeded tax codes before Phase
+   * 3 existed; `InvoiceService` rejects posting an invoice line that uses a
+   * tax code with no `payableAccountId` configured.
+   */
+  payableAccountId: uuid("payable_account_id").references((): AnyPgColumn => accounts.id),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
@@ -535,6 +578,165 @@ export const bankRules = pgTable("bank_rules", {
 }));
 
 // ---------------------------------------------------------------------------
+// Sales (Phase 3 Slice 1) — customer invoicing & AR core.
+// See docs/accounting-engine.md and src/domain/sales/*.
+// ---------------------------------------------------------------------------
+
+/**
+ * A customer invoice. `arAccountId` names the specific Accounts Receivable
+ * control account this invoice posts to (chosen explicitly, the same way a
+ * bank account names its own `glAccountId` — no per-organization "default
+ * account" magic anywhere else in this schema, so invoicing doesn't
+ * introduce one either). `subtotal`/`taxTotal`/`total` are denormalized from
+ * `invoice_lines` for cheap list/aging queries, but are only ever written by
+ * `InvoiceService` in the same transaction as the lines that justify them —
+ * never edited independently.
+ */
+export const invoices = pgTable("invoices", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  customerContactId: uuid("customer_contact_id")
+    .notNull()
+    .references(() => contacts.id),
+  invoiceNumber: text("invoice_number").notNull(),
+  issueDate: timestamp("issue_date", { withTimezone: true, mode: "date" }).notNull(),
+  dueDate: timestamp("due_date", { withTimezone: true, mode: "date" }).notNull(),
+  currency: text("currency").notNull(),
+  memo: text("memo"),
+  arAccountId: uuid("ar_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  status: invoiceStatusEnum("status").notNull().default("DRAFT"),
+  subtotal: numeric("subtotal", { precision: 19, scale: 4 }).notNull().default("0"),
+  taxTotal: numeric("tax_total", { precision: 19, scale: 4 }).notNull().default("0"),
+  total: numeric("total", { precision: 19, scale: 4 }).notNull().default("0"),
+  /** Set once, when `InvoiceService.approveAndPost` posts the balanced journal. Never re-pointed. */
+  journalEntryId: uuid("journal_entry_id").references((): AnyPgColumn => journalEntries.id),
+  /** Set once, when `InvoiceService.voidInvoice` reverses that journal — the original is never edited. */
+  voidJournalEntryId: uuid("void_journal_entry_id").references((): AnyPgColumn => journalEntries.id),
+  postedAt: timestamp("posted_at", { withTimezone: true }),
+  postedById: uuid("posted_by_id"),
+  voidedAt: timestamp("voided_at", { withTimezone: true }),
+  voidedById: uuid("voided_by_id"),
+  voidReason: text("void_reason"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+  updatedById: uuid("updated_by_id"),
+}, (table) => ({
+  orgInvoiceNumberUnique: uniqueIndex("invoices_org_invoice_number_unique").on(
+    table.organizationId,
+    table.invoiceNumber,
+  ),
+  orgStatusIdx: index("invoices_org_status_idx").on(table.organizationId, table.status),
+  orgCustomerIdx: index("invoices_org_customer_idx").on(table.organizationId, table.customerContactId),
+  orgDueDateIdx: index("invoices_org_due_date_idx").on(table.organizationId, table.dueDate),
+}));
+
+/**
+ * One line of an invoice. `accountId` is the revenue account this line's
+ * `lineAmount` (quantity × unit price) is credited to on posting;
+ * `taxCodeId` is optional (a zero-rated/out-of-scope line has none).
+ * `lineAmount`/`taxAmount` are computed and stored by `InvoiceService` using
+ * `Money`/`decimal.js` — never floating point, per docs/accounting-engine.md §4.
+ */
+export const invoiceLines = pgTable("invoice_lines", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  invoiceId: uuid("invoice_id")
+    .notNull()
+    .references(() => invoices.id, { onDelete: "cascade" }),
+  lineNumber: integer("line_number").notNull(),
+  description: text("description").notNull(),
+  quantity: numeric("quantity", { precision: 19, scale: 4 }).notNull(),
+  unitPrice: numeric("unit_price", { precision: 19, scale: 4 }).notNull(),
+  accountId: uuid("account_id")
+    .notNull()
+    .references(() => accounts.id),
+  taxCodeId: uuid("tax_code_id").references(() => taxCodes.id),
+  lineAmount: numeric("line_amount", { precision: 19, scale: 4 }).notNull(),
+  taxAmount: numeric("tax_amount", { precision: 19, scale: 4 }).notNull().default("0"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  invoiceLineUnique: uniqueIndex("invoice_lines_invoice_line_unique").on(
+    table.invoiceId,
+    table.lineNumber,
+  ),
+  orgInvoiceIdx: index("invoice_lines_org_invoice_idx").on(table.organizationId, table.invoiceId),
+}));
+
+/**
+ * A receipt from a customer, which may fund one or more invoices'
+ * `payment_allocations`. `depositAccountId` is the ASSET account debited on
+ * posting — a bank's own `glAccountId` for a direct bank receipt, or an
+ * "Undeposited Funds" clearing account when the deposit hasn't hit the bank
+ * feed yet; `bankAccountId` is an optional informational link to Phase 2's
+ * `bank_accounts` for a receipt that will later reconcile against an
+ * imported bank transaction.
+ */
+export const payments = pgTable("payments", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  customerContactId: uuid("customer_contact_id")
+    .notNull()
+    .references(() => contacts.id),
+  paymentDate: timestamp("payment_date", { withTimezone: true, mode: "date" }).notNull(),
+  amount: numeric("amount", { precision: 19, scale: 4 }).notNull(),
+  currency: text("currency").notNull(),
+  method: paymentMethodEnum("method").notNull().default("BANK_TRANSFER"),
+  depositAccountId: uuid("deposit_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  bankAccountId: uuid("bank_account_id").references(() => bankAccounts.id),
+  reference: text("reference"),
+  /** Set once, when `PaymentAllocationService.recordPayment` posts the balanced journal. */
+  journalEntryId: uuid("journal_entry_id").references((): AnyPgColumn => journalEntries.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+}, (table) => ({
+  orgCustomerIdx: index("payments_org_customer_idx").on(table.organizationId, table.customerContactId),
+  orgDateIdx: index("payments_org_date_idx").on(table.organizationId, table.paymentDate),
+}));
+
+/**
+ * How much of a `payment` was applied to a given `invoice` — the join that
+ * makes partial payments and one-payment-to-many-invoices both work.
+ * `PaymentAllocationService` is the only writer, and it enforces the
+ * invariant that the sum of a payment's allocations never exceeds the
+ * payment's own amount, and that a single allocation never exceeds the
+ * invoice's outstanding balance at the moment it's recorded — see
+ * docs/accounting-engine.md and the master spec's AR invariants.
+ */
+export const paymentAllocations = pgTable("payment_allocations", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  paymentId: uuid("payment_id")
+    .notNull()
+    .references(() => payments.id, { onDelete: "cascade" }),
+  invoiceId: uuid("invoice_id")
+    .notNull()
+    .references(() => invoices.id),
+  amount: numeric("amount", { precision: 19, scale: 4 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+}, (table) => ({
+  paymentInvoiceUnique: uniqueIndex("payment_allocations_payment_invoice_unique").on(
+    table.paymentId,
+    table.invoiceId,
+  ),
+  orgInvoiceIdx: index("payment_allocations_org_invoice_idx").on(table.organizationId, table.invoiceId),
+  orgPaymentIdx: index("payment_allocations_org_payment_idx").on(table.organizationId, table.paymentId),
+}));
+
+// ---------------------------------------------------------------------------
 // Governance
 // ---------------------------------------------------------------------------
 
@@ -609,6 +811,8 @@ export const organizationsRelations = relations(organizations, ({ many }) => ({
   auditLogs: many(auditLogs),
   bankAccounts: many(bankAccounts),
   bankRules: many(bankRules),
+  invoices: many(invoices),
+  payments: many(payments),
 }));
 
 export const bankAccountsRelations = relations(bankAccounts, ({ one, many }) => ({
@@ -730,7 +934,12 @@ export const taxCodesRelations = relations(taxCodes, ({ one, many }) => ({
     fields: [taxCodes.organizationId],
     references: [organizations.id],
   }),
+  payableAccount: one(accounts, {
+    fields: [taxCodes.payableAccountId],
+    references: [accounts.id],
+  }),
   journalLines: many(journalLines),
+  invoiceLines: many(invoiceLines),
 }));
 
 export const dimensionsRelations = relations(dimensions, ({ one, many }) => ({
@@ -809,5 +1018,86 @@ export const auditLogsRelations = relations(auditLogs, ({ one }) => ({
   organization: one(organizations, {
     fields: [auditLogs.organizationId],
     references: [organizations.id],
+  }),
+}));
+
+export const invoicesRelations = relations(invoices, ({ one, many }) => ({
+  organization: one(organizations, {
+    fields: [invoices.organizationId],
+    references: [organizations.id],
+  }),
+  customer: one(contacts, {
+    fields: [invoices.customerContactId],
+    references: [contacts.id],
+  }),
+  arAccount: one(accounts, {
+    fields: [invoices.arAccountId],
+    references: [accounts.id],
+  }),
+  journalEntry: one(journalEntries, {
+    fields: [invoices.journalEntryId],
+    references: [journalEntries.id],
+    relationName: "invoice_journal",
+  }),
+  voidJournalEntry: one(journalEntries, {
+    fields: [invoices.voidJournalEntryId],
+    references: [journalEntries.id],
+    relationName: "invoice_void_journal",
+  }),
+  lines: many(invoiceLines),
+  allocations: many(paymentAllocations),
+}));
+
+export const invoiceLinesRelations = relations(invoiceLines, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [invoiceLines.organizationId],
+    references: [organizations.id],
+  }),
+  invoice: one(invoices, {
+    fields: [invoiceLines.invoiceId],
+    references: [invoices.id],
+  }),
+  account: one(accounts, {
+    fields: [invoiceLines.accountId],
+    references: [accounts.id],
+  }),
+  taxCode: one(taxCodes, {
+    fields: [invoiceLines.taxCodeId],
+    references: [taxCodes.id],
+  }),
+}));
+
+export const paymentsRelations = relations(payments, ({ one, many }) => ({
+  organization: one(organizations, {
+    fields: [payments.organizationId],
+    references: [organizations.id],
+  }),
+  customer: one(contacts, {
+    fields: [payments.customerContactId],
+    references: [contacts.id],
+  }),
+  depositAccount: one(accounts, {
+    fields: [payments.depositAccountId],
+    references: [accounts.id],
+  }),
+  bankAccount: one(bankAccounts, {
+    fields: [payments.bankAccountId],
+    references: [bankAccounts.id],
+  }),
+  allocations: many(paymentAllocations),
+}));
+
+export const paymentAllocationsRelations = relations(paymentAllocations, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [paymentAllocations.organizationId],
+    references: [organizations.id],
+  }),
+  payment: one(payments, {
+    fields: [paymentAllocations.paymentId],
+    references: [payments.id],
+  }),
+  invoice: one(invoices, {
+    fields: [paymentAllocations.invoiceId],
+    references: [invoices.id],
   }),
 }));

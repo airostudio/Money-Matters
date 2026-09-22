@@ -36,3 +36,6 @@ next-env.d.ts
 # prisma
 prisma/dev.db
 prisma/dev.db-journal
+
+# claude code agent worktrees (local tooling state, not project content)
+/.claude/

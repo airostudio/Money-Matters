@@ -6,6 +6,10 @@ import type { Actor } from "@/domain/permissions/permission-service";
 
 const TENANT_TABLES = [
   "audit_logs",
+  "payment_allocations",
+  "payments",
+  "invoice_lines",
+  "invoices",
   "bank_transactions",
   "bank_import_batches",
   "bank_rules",
