@@ -39,7 +39,9 @@ export function LoginForm() {
       setError("Invalid email or password.");
       return;
     }
-    router.push("/app");
+    const next = searchParams.get("next");
+    const isSafeRelativePath = !!next && next.startsWith("/") && !next.startsWith("//");
+    router.push(isSafeRelativePath ? next : "/app");
     router.refresh();
   }
 

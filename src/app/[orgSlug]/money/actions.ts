@@ -23,8 +23,21 @@ const CreateBankAccountSchema = z.object({
   accountNumberLast4: z.string().trim().max(4).optional(),
 });
 
-export async function createBankAccountAction(orgSlug: string, formData: FormData): Promise<void> {
+/**
+ * `onErrorPath`/`onSuccessPath` default to the Money section's own new-account
+ * form, but the onboarding wizard binds them to itself/the dashboard so this
+ * one action can be reused there too rather than duplicated — see
+ * `src/app/[orgSlug]/onboarding/page.tsx`.
+ */
+export async function createBankAccountAction(
+  orgSlug: string,
+  formData: FormData,
+  onErrorPath?: string,
+  onSuccessPath?: string,
+): Promise<void> {
   const { actor, org } = await requireOrgAndActor(orgSlug);
+  const errorPath = onErrorPath ?? `/${orgSlug}/money/new`;
+  const successPath = onSuccessPath ?? `/${orgSlug}/money`;
 
   const parsed = CreateBankAccountSchema.safeParse({
     name: formData.get("name"),
@@ -34,17 +47,18 @@ export async function createBankAccountAction(orgSlug: string, formData: FormDat
     accountNumberLast4: formData.get("accountNumberLast4") || undefined,
   });
   if (!parsed.success) {
-    redirectWithError(`/${orgSlug}/money/new`, new Error(parsed.error.issues[0]?.message ?? "Invalid input."));
+    redirectWithError(errorPath, new Error(parsed.error.issues[0]?.message ?? "Invalid input."));
   }
 
   try {
     await BankAccountService.create(actor, parsed.data);
   } catch (error) {
-    redirectWithError(`/${orgSlug}/money/new`, error);
+    redirectWithError(errorPath, error);
   }
 
   revalidatePath(`/${orgSlug}/money`);
-  redirect(`/${orgSlug}/money`);
+  revalidatePath(`/${orgSlug}`);
+  redirect(successPath);
 }
 
 const FORMAT_BY_EXTENSION: Record<string, (typeof bankImportFormatEnum.enumValues)[number]> = {

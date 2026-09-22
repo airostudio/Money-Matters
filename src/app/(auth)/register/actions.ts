@@ -28,16 +28,22 @@ export async function registerAction(formData: FormData): Promise<void> {
 
   const { name, email, password, organizationName } = parsed.data;
 
+  let orgSlug: string;
   try {
     const user = await UserService.register({ name, email, password });
 
     const baseSlug = slugify(organizationName) || "business";
     try {
-      await OrganizationService.createWithOwner(user.id, { slug: baseSlug, name: organizationName });
+      const org = await OrganizationService.createWithOwner(user.id, { slug: baseSlug, name: organizationName });
+      orgSlug = org.slug;
     } catch (error) {
       if (error instanceof SlugTakenError) {
         const disambiguated = `${baseSlug}-${Math.random().toString(36).slice(2, 6)}`;
-        await OrganizationService.createWithOwner(user.id, { slug: disambiguated, name: organizationName });
+        const org = await OrganizationService.createWithOwner(user.id, {
+          slug: disambiguated,
+          name: organizationName,
+        });
+        orgSlug = org.slug;
       } else {
         throw error;
       }
@@ -49,5 +55,9 @@ export async function registerAction(formData: FormData): Promise<void> {
     throw error;
   }
 
-  redirect("/login?registered=1");
+  // Straight to the onboarding wizard once signed in — a brand-new org only
+  // has the two starter system accounts (see OrganizationService), so
+  // linking a bank account would otherwise be blocked until the user finds
+  // Chart of Accounts on their own.
+  redirect(`/login?registered=1&next=${encodeURIComponent(`/${orgSlug}/onboarding`)}`);
 }

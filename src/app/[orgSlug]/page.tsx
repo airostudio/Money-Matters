@@ -2,19 +2,32 @@ import Link from "next/link";
 import { requireOrgAndActor } from "@/lib/session";
 import { LedgerService } from "@/domain/ledger/ledger-service";
 import { Money } from "@/domain/money/money";
+import { AccountService } from "@/domain/accounts/account-service";
+import { roleHasPermission } from "@/domain/permissions/roles";
 import { MetricCard } from "@/components/accounting/metric-card";
 import { MoneyDisplay } from "@/components/accounting/money-display";
 import { StatusBadge } from "@/components/accounting/status-badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Bot } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Bot, Sparkles } from "lucide-react";
 
-export default async function OrgHomePage({ params }: { params: { orgSlug: string } }) {
+export default async function OrgHomePage({
+  params,
+  searchParams,
+}: {
+  params: { orgSlug: string };
+  searchParams: { onboarded?: string };
+}) {
   const { org, actor } = await requireOrgAndActor(params.orgSlug);
 
-  const [trialBalance, recentEntries] = await Promise.all([
+  const [trialBalance, recentEntries, accounts] = await Promise.all([
     LedgerService.getTrialBalance(actor),
     LedgerService.listJournalEntries(actor, { limit: 5 }),
+    AccountService.list(actor),
   ]);
+
+  const needsOnboarding =
+    roleHasPermission(actor.role, "onboarding:manage") && !accounts.some((a) => !a.isSystemAccount);
 
   const sum = (types: string[]) =>
     trialBalance
@@ -34,6 +47,32 @@ export default async function OrgHomePage({ params }: { params: { orgSlug: strin
         <h1 className="text-2xl font-semibold tracking-tight">Good to see you.</h1>
         <p className="text-sm text-muted-foreground">Here&apos;s where {org.name} stands right now.</p>
       </div>
+
+      {searchParams.onboarded && (
+        <p className="rounded-md bg-success/10 px-3 py-2 text-sm text-success">
+          You&apos;re all set up — chart of accounts ready and your first bank account linked.
+        </p>
+      )}
+
+      {needsOnboarding && (
+        <Card className="border-primary/30 bg-primary/5">
+          <CardContent className="flex flex-col items-start justify-between gap-4 p-6 sm:flex-row sm:items-center">
+            <div className="flex items-start gap-3">
+              <Sparkles className="mt-0.5 size-5 shrink-0 text-primary" />
+              <div>
+                <p className="font-medium">Finish setting up your chart of accounts</p>
+                <p className="text-sm text-muted-foreground">
+                  {org.name} only has the default starter accounts so far — a couple of minutes will get you a real
+                  chart of accounts and your first bank account linked.
+                </p>
+              </div>
+            </div>
+            <Button asChild>
+              <Link href={`/${org.slug}/onboarding`}>Finish setup</Link>
+            </Button>
+          </CardContent>
+        </Card>
+      )}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <MetricCard label="Assets" value={<MoneyDisplay amount={assets.toString()} currency={org.baseCurrency} />} />
