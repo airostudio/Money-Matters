@@ -95,6 +95,16 @@ but while `MM_APP_DB_PASSWORD` is set the role and password are always
 with row-level security disabled, so it is redirected rather than honoured,
 with a warning in the build log saying so.
 
+Optionally, set these two to turn on AI-assisted classification in the
+onboarding wizard (`docs/ai-agents.md`). Both are entirely optional — with
+`ANTHROPIC_API_KEY` unset, the wizard uses a deterministic keyword-based
+classifier instead, with no loss of functionality and no network call:
+
+| Variable | Value |
+|---|---|
+| `ANTHROPIC_API_KEY` | An Anthropic API key. Server-side only — never exposed to the client. |
+| `ANTHROPIC_ONBOARDING_MODEL` | Defaults to `claude-haiku-4-5-20251001` if unset. |
+
 Deploy. `npm run build` runs `npm run db:migrate:ci` first, which applies the
 schema and RLS policies, provisions the `mm_app` role, and then **connects
 with the application's own credentials to prove they work** — so a

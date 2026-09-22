@@ -79,6 +79,64 @@ document AI (receipt/invoice capture), expense management, object storage
 for documents, background job infrastructure (queue), Redis-compatible
 cache, Stripe.
 
+## Onboarding wizard (cross-cutting UX slice) — **complete**
+
+Not one of the master-spec §82 numbered phases — a UX slice that makes
+Phase 1's chart of accounts and Phase 2 Slice 1's bank linking actually
+reachable for a brand-new organization, which otherwise starts with only
+the two starter system equity accounts (see `OrganizationService`) and
+hits "No ASSET accounts exist yet" the moment it tries to link a bank
+account. Also reachable from an existing organization that registered
+before this shipped.
+
+- [x] `/[orgSlug]/onboarding`: a 4-step wizard (business basics → AI-assisted
+      chart-of-accounts recommendation → confirm & create → link first bank
+      account → done), gated on the new `onboarding:manage` permission
+      (OWNER/ADMINISTRATOR only, see `src/domain/permissions/roles.ts`)
+- [x] Curated, versioned chart-of-accounts template library
+      (`src/domain/onboarding/chart-of-accounts-templates.ts`): Trades &
+      Contracting, Professional Services, Retail & E-commerce, Hospitality,
+      General — realistic AU-style accounts in the spirit of the Northstar
+      seed data, parameterized by `sellsGoods`/`sellsServices`/
+      `hasEmployees`/`tracksInventory`
+- [x] Classify-then-expand AI integration (`@anthropic-ai/sdk`,
+      `claude-haiku-4-5-20251001` by default, overridable via
+      `ANTHROPIC_ONBOARDING_MODEL`): the model only ever picks a
+      `templateKey` + those 4 booleans via a schema-constrained tool call,
+      validated with zod before use — it never emits an account code or
+      name. See `docs/ai-agents.md` for why this shape is non-negotiable
+- [x] Mandatory, fully-tested deterministic fallback
+      (`DeterministicRecommender`, keyword-based): used automatically
+      whenever `ANTHROPIC_API_KEY` is unset, the API call fails/times out,
+      or the response fails schema validation — the wizard always works
+      with zero network access, and this is the only path exercised in
+      CI/tests
+- [x] Editable live preview before anything is created (grouped by account
+      type, collapsible, add/remove accounts) — nothing touches the ledger
+      until the user confirms
+- [x] Every account created through `AccountService.create` (never a direct
+      table write); safely re-runnable/resumable — accounts that already
+      exist (by code) are skipped, never duplicated or recreated, including
+      on an organization that already has some accounts
+- [x] Audit: `onboarding.chart_of_accounts_applied` records the template
+      key, flags, created/skipped account codes, and (when applicable) the
+      AI recommendation's model, confidence and reasoning — not just "accounts
+      were created"
+- [x] Registration redirects straight into the wizard instead of the bare
+      dashboard; existing organizations with no real chart of accounts see a
+      "Finish setting up your chart of accounts" banner on the dashboard
+      linking to the wizard
+- [x] `npm run typecheck`, `npm run lint`, `npm test` (188 tests, including
+      the deterministic classifier, template expansion per flag
+      combination, AI schema-validation failure → fallback with a mocked
+      SDK, and a full wizard-flow integration test against the real test
+      database) and `npm run build` all pass
+- [ ] Deferred, explicitly out of scope for this slice (see the master
+      spec's fuller §60 onboarding flow): live bank feed connection, data
+      migration/import from other software, invoice template customization,
+      team invites during onboarding, tax registration workflows beyond the
+      country/currency picked in step 1
+
 ## Phase 3 — Sales (in progress)
 
 ### Slice 1 — Customer invoicing & AR core — **complete**

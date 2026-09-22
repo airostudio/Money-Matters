@@ -1,8 +1,65 @@
-# AI Agents (architecture; implementation begins Phase 6)
+# AI Agents (architecture; the AI Financial Controller itself begins Phase 6)
 
-Phase 1 ships no AI functionality. This document records the architecture
-decisions made *now* so that Phase 1's domain layer doesn't have to be
-reshaped when the AI Financial Controller (master spec §7-9) is built.
+The AI Financial Controller, specialist agents and autonomy levels below are
+still Phase 6+ work. The onboarding wizard's chart-of-accounts recommender
+(§0) is the first real AI integration in the codebase, shipped ahead of
+Phase 6 as a small, tightly-scoped exception — see §0 for why it doesn't
+violate the rest of this document. Everything else here remains an
+architecture decision recorded *now* so Phase 1's domain layer doesn't have
+to be reshaped when the fuller AI layer is built.
+
+## 0. First AI integration: onboarding's chart-of-accounts recommender
+
+`src/domain/onboarding/chart-of-accounts-recommender.ts` (used by the
+onboarding wizard at `/[orgSlug]/onboarding`, see `docs/roadmap.md`)
+classifies a user's free-text business description into a chart-of-accounts
+template. It sets the precedent every future AI feature in this codebase
+should follow:
+
+**Classify, then deterministically expand — never generate.** The AI's
+entire output is a `templateKey` (one of a fixed, curated set) plus four
+booleans (`sellsGoods`, `sellsServices`, `hasEmployees`, `tracksInventory`),
+produced via Claude's tool-use feature so the response is schema-constrained
+at the API level, and then re-validated against the same schema in code with
+zod regardless — a schema constraint on the model side is never trusted as
+the only check. The AI **never** emits an account code, name, or number.
+Those come from `chart-of-accounts-templates.ts`, a hand-curated, versioned
+library of complete charts of accounts (Trades, Professional Services,
+Retail, Hospitality, General) that the wizard deterministically expands
+using the AI's flags — the same `expandTemplate()` function whether the
+`templateKey` came from the AI or from the fallback below. This is the
+concrete version of master spec §2/§87.2's "never allow AI to silently
+invent financial information": the model influences *which* pre-approved
+template and *which* subset of it apply, never what the template contains.
+
+**The fallback is not optional.** `DeterministicRecommender` is a plain
+keyword classifier with no network dependency at all. `recommendChartOfAccounts()`
+uses the AI path only when `ANTHROPIC_API_KEY` is set, and falls back to the
+deterministic classifier — silently, from the user's perspective ("using our
+standard template for your industry") — on a missing key, a network/timeout
+failure, or a schema validation failure. This means the wizard, and its full
+test suite, work with zero network access; only the deterministic path is
+ever exercised in CI. The AI path is covered by unit tests that mock the
+Anthropic client's `messages.create` response, never a real network call.
+
+**Human confirms, AI informs.** The account-creation step's audit event
+(`onboarding.chart_of_accounts_applied`) is recorded with `actorType: HUMAN`
+— it's the signed-in owner/administrator who clicks "Create accounts," and
+misrepresenting that as an AI-initiated action would be worse than not
+recording provenance at all. The AI's contribution (source, model,
+confidence, reasoning) is recorded as audit *metadata* on that same human
+action instead, alongside the accepted/edited account list — satisfying
+"every AI-influenced action needs a why, shown not hidden" (§6) without
+overstating who acted. `actorType: AI` (§2 below) is reserved for the AI
+literally being the actor performing an autonomous mutation, which this
+wizard step is not — a human always reviews and confirms the account list
+before anything is created.
+
+**Model choice.** `ANTHROPIC_ONBOARDING_MODEL` (default
+`claude-haiku-4-5-20251001`) is deliberately a fast/cheap model — this is a
+small structured-classification call with a handful of output fields, not a
+freeform reasoning task, so a larger model would add latency and cost with
+no accuracy benefit worth paying for at this step.
 
 ## 1. Why this belongs in the Phase 1 docs
 
