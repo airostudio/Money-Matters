@@ -5,11 +5,15 @@ platform combining accounting, banking, payroll, tax, billing, expenses,
 inventory, projects, and forecasting in one product.
 
 Phase 1 (Financial Foundation), Phase 2 Slice 1 (bank import,
-reconciliation, bank rules), and Phase 3 Slice 1 (customer invoicing & AR
-core — invoices, payments, aged receivables) are complete; Phase 4 Slice 1
+reconciliation, bank rules), Phase 3 Slice 1 (customer invoicing & AR
+core — invoices, payments, aged receivables), and Phase 4 Slice 1
 (suppliers & Accounts Payable core — bills, supplier payments, aged
-payables) is the most recently completed slice. See
-[`docs/roadmap.md`](docs/roadmap.md) for the full phase-by-phase status and
+payables) are complete. Phase 2 Slice 2 (AI-assisted fuzzy reconciliation,
+Document AI receipt/invoice capture, employee expense claims) is the most
+recently completed slice — see [`docs/roadmap.md`](docs/roadmap.md) for
+exactly what's built there vs. explicitly deferred (a live bank feed
+provider, Stripe, a background job queue, and a Redis cache all need real
+external accounts/credentials this environment doesn't have). See
 [`docs/architecture.md`](docs/architecture.md) for how it's put together.
 
 ## Stack
@@ -96,15 +100,20 @@ but while `MM_APP_DB_PASSWORD` is set the role and password are always
 with row-level security disabled, so it is redirected rather than honoured,
 with a warning in the build log saying so.
 
-Optionally, set these two to turn on AI-assisted classification in the
-onboarding wizard (`docs/ai-agents.md`). Both are entirely optional — with
-`ANTHROPIC_API_KEY` unset, the wizard uses a deterministic keyword-based
-classifier instead, with no loss of functionality and no network call:
+Optionally, set `ANTHROPIC_API_KEY` to turn on every AI-assisted feature in
+this codebase: the onboarding wizard's chart-of-accounts classification,
+AI-assisted fuzzy bank reconciliation, and Document AI receipt/invoice
+extraction (see `docs/ai-agents.md`). All three are entirely optional — with
+it unset, each falls back silently (a deterministic classifier, no AI
+suggestions section, a blank draft to fill in manually) with no loss of
+core functionality and no network call:
 
 | Variable | Value |
 |---|---|
 | `ANTHROPIC_API_KEY` | An Anthropic API key. Server-side only — never exposed to the client. |
 | `ANTHROPIC_ONBOARDING_MODEL` | Defaults to `claude-haiku-4-5-20251001` if unset. |
+| `ANTHROPIC_RECONCILIATION_MODEL` | Defaults to `claude-haiku-4-5-20251001` if unset. |
+| `ANTHROPIC_DOCUMENT_AI_MODEL` | Defaults to `claude-sonnet-4-5-20250929` if unset (vision extraction benefits from a stronger model than the other two classification-only calls). |
 
 Deploy. `npm run build` runs `npm run db:migrate:ci` first, which applies the
 schema and RLS policies, provisions the `mm_app` role, and then **connects

@@ -25,7 +25,7 @@ const MAX_ACCOUNT_CANDIDATES = 25;
  * since an id an AI response merely claims is never trusted on its own —
  * only a member of the pool we ourselves queried can ever be returned.
  */
-const FuzzySuggestionItemSchema = z
+export const FuzzySuggestionItemSchema = z
   .object({
     candidateJournalLineId: z.string().uuid().optional(),
     candidateAccountId: z.string().uuid().optional(),
@@ -36,7 +36,7 @@ const FuzzySuggestionItemSchema = z
     message: "exactly one of candidateJournalLineId or candidateAccountId must be set",
   });
 
-const FuzzySuggestionsSchema = z.object({
+export const FuzzySuggestionsSchema = z.object({
   suggestions: z.array(FuzzySuggestionItemSchema).max(5),
 });
 

@@ -4,13 +4,15 @@ import { closeTestPools, createTestOrg, resetDatabase } from "../helpers/db";
 import { createSampleAccounts } from "../helpers/ledger";
 import { createSalesFixtures } from "../helpers/sales";
 import { createPurchasesFixtures } from "../helpers/purchases";
-import { accounts, auditLogs, bills, invoices } from "@/db/schema";
+import { accounts, auditLogs, bills, expenseClaims, invoices } from "@/db/schema";
 import { db } from "@/db/client";
 import { withTenant } from "@/db/tenant";
 import { AccountService } from "@/domain/accounts/account-service";
 import { PostingService } from "@/domain/ledger/posting-service";
 import { InvoiceService } from "@/domain/sales/invoice-service";
 import { BillService } from "@/domain/purchases/bill-service";
+import { ExpenseClaimService } from "@/domain/expenses/expense-claim-service";
+import { createExpenseFixtures } from "../helpers/expenses";
 
 /**
  * Master spec §48 / §87 non-negotiable #7: "A coding mistake must not allow
@@ -118,6 +120,9 @@ describe("Tenant isolation", () => {
       "bill_lines",
       "supplier_payments",
       "supplier_payment_allocations",
+      "expense_claims",
+      "expense_claim_lines",
+      "uploaded_receipts",
     ];
 
     const rows = await db.execute<{
@@ -176,6 +181,26 @@ describe("Tenant isolation", () => {
     expect(rowsAsOrgB.some((r) => r.id === created.id)).toBe(false);
 
     const rowsWithNoTenantContext = await db.select().from(bills);
+    expect(rowsWithNoTenantContext).toHaveLength(0);
+  });
+
+  it("an expense claim created under org A is invisible to org B, even by direct query with no filter", async () => {
+    const fixturesA = await createExpenseFixtures(orgA.owner, orgA.baseCurrency);
+    const created = await ExpenseClaimService.create(orgA.owner, {
+      employeeUserId: orgA.owner.userId,
+      claimDate: new Date(),
+      description: "x",
+      currency: "AUD",
+      payableAccountId: fixturesA.payableAccountId,
+      lines: [{ description: "x", amount: "10.00", expenseAccountId: fixturesA.expenseAccountId }],
+    });
+
+    expect(await ExpenseClaimService.get(orgB.owner, created.id)).toBeNull();
+
+    const rowsAsOrgB = await withTenant(orgB.organizationId, (tx) => tx.select().from(expenseClaims));
+    expect(rowsAsOrgB.some((r) => r.id === created.id)).toBe(false);
+
+    const rowsWithNoTenantContext = await db.select().from(expenseClaims);
     expect(rowsWithNoTenantContext).toHaveLength(0);
   });
 

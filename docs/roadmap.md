@@ -72,12 +72,107 @@ at once — see `docs/decisions/0006-bank-feed-abstraction.md`.
       (register → link account → import CSV → post → Trial Balance
       reflects it → re-import is a no-op → create a bank rule)
 
-### Slice 2 — not started
-Live bank feed provider (Basiq, most likely — AU open banking), AI-assisted
-fuzzy reconciliation for transactions with no exact-amount candidate,
-document AI (receipt/invoice capture), expense management, object storage
-for documents, background job infrastructure (queue), Redis-compatible
-cache, Stripe.
+### Slice 2 — scoped down, partially complete
+
+The original scope (`docs/decisions/0006-bank-feed-abstraction.md` and the
+line above, kept for history) bundled a live bank feed provider,
+AI-assisted fuzzy reconciliation, document AI, expense management, object
+storage, background jobs, a Redis cache, and Stripe into one slice. Building
+that in full would mean either faking external accounts this environment
+doesn't have, or shipping shallow stubs — both against master spec §82/§85.
+The user explicitly deferred the parts that need real external
+accounts/credentials; everything else is built to the same bar as every
+other slice.
+
+**Built:**
+- [x] AI-assisted fuzzy reconciliation (`FuzzyReconciliationService`,
+      `src/domain/banking/fuzzy-reconciliation-service.ts`): a user-triggered
+      ("Get AI suggestions") second pass over transactions with no
+      exact-amount deterministic candidate — widens `findCandidateMatches`'s
+      exact-amount/±10-day window to a near-amount (±20%) / ±30-day pool of
+      journal lines, plus a list of active GL accounts to categorize
+      against, and asks Claude to rank plausible matches with a
+      plain-language reason via a schema-constrained tool call, re-validated
+      with zod. Every returned id is checked against the actual candidate
+      pool the model was given — an id it merely claims is never trusted.
+      Never posts or confirms anything itself; every suggestion still goes
+      through the existing `confirmMatch`/`createJournalFromTransaction`
+      paths a human clicks. New `bank_transaction:ai_suggest` permission.
+      Silently falls back to "no AI section, deterministic candidates only"
+      on a missing `ANTHROPIC_API_KEY`, a failed/timed-out call, or a schema
+      validation failure — see `docs/ai-agents.md`
+- [x] Document AI receipt/invoice capture (`src/domain/documents/`):
+      `AiReceiptExtractor` sends an uploaded image or PDF to Claude with
+      vision, via a schema-constrained tool call extracting
+      `{supplierName, date, subtotal, taxAmount, total, currency,
+      lineItems, suggestedCategory, confidence, reasoning}`, zod-validated.
+      Reachable from `/[orgSlug]/expenses/capture`. Never silently posts —
+      the result only ever pre-fills an editable draft expense claim
+      (`/[orgSlug]/expenses/new?receiptId=...`) that a human reviews and
+      confirms; a missing API key or failed call still lets the upload
+      succeed with a blank draft. File storage is bytea in Postgres (the
+      `uploaded_receipts` table) behind a small `DocumentStorageProvider`
+      interface — a deliberate, temporary decision, see
+      `docs/decisions/0007-document-storage-bytea.md`. 10MB size limit,
+      server-side MIME allowlist (JPEG/PNG/WebP/GIF/PDF). Not yet wired into
+      the Purchases/bill-capture side mentioned in the original scope — the
+      extraction service and storage are equally usable there, but only the
+      expense-claim integration was built this slice
+- [x] Expense management (master spec §19): `expense_claims`/
+      `expense_claim_lines` tables (RLS-enabled and FORCEd, `mm_app`-granted
+      — verified by the `db:migrate` tenant-isolation audit, 27 of 31
+      tables now organization-scoped). `ExpenseClaimService`
+      (`src/domain/expenses/expense-claim-service.ts`, the mirror of
+      `BillService`): draft (with lines, computed subtotal/tax/total via
+      `expense-claim-calculations.ts`, never floating point) → submit →
+      approve (posts: debit each line's expense account + tax input-credit
+      account, credit an "Employee Reimbursements Payable" liability, via
+      `PostingService.postJournal`) or reject (no ledger effect) → mark
+      reimbursed (a second journal debiting the payable and crediting the
+      paying bank account — kept separate from approval the same way
+      bills/invoices separate posting from payment) → void (reverses the
+      approval journal via `PostingService.reverseEntry`, refused once
+      reimbursed). New permissions `expense_claim:read/manage/approve`,
+      `expense_receipt:manage`, wired into every role (every role can
+      create/submit their own claims; approval needs a manager-level role —
+      a simple single-approver workflow, the full amount-tiered approval
+      engine is Phase 9/10, out of scope here). UI under
+      `/[orgSlug]/expenses` (list filtered to "mine" for non-approvers,
+      create/edit draft with lines and optional receipt capture,
+      submit/approve/reject/mark-reimbursed/void), added to nav under
+      Purchases per master spec §59
+- [x] `npm run typecheck`, `npm run lint`, `npm test` (298 tests) and
+      `npm run build` all pass; smoke-tested end-to-end against a real local
+      Postgres and a running production server (`next start`) driven via
+      raw HTTP (React Server Action form submissions): register → chart of
+      accounts (payable liability, expense, bank asset) → create a draft
+      expense claim → submit → approve & post → Trial Balance reflects the
+      $110 debit/credit exactly → mark reimbursed → Trial Balance shows the
+      payable back at $0 and the bank account down $110; separately,
+      imported a bank transaction with no exact-amount candidate and
+      confirmed the "Get AI suggestions" affordance renders and, with no
+      `ANTHROPIC_API_KEY` configured, resolves silently to the
+      deterministic-only view with no error and no AI section
+
+**Explicitly still not started, named plainly rather than dropped silently:**
+- [ ] **Live bank feed provider** (Basiq, most likely — AU open banking).
+      The abstraction point already exists and is unchanged by this slice:
+      `bankAccounts.provider`/`externalAccountId` and
+      `ParsedStatementRow` (see `docs/decisions/0006-bank-feed-abstraction.md`)
+      mean a live provider is an additive `BankFeedProvider` implementation
+      later, not a rework of import/reconciliation. Needs a real Basiq
+      account and API credentials this environment doesn't have
+- [ ] **Stripe** (billing/payments). No abstraction point built yet; needs a
+      real Stripe account and API keys
+- [ ] **Background job queue.** Needed for anything that shouldn't block a
+      request (e.g. a live feed sync, a scheduled `OVERDUE` status sweep —
+      see the `invoice_status`/`bill_status` enum doc comments in
+      `src/db/schema.ts` for why "overdue" is computed at read time instead).
+      No queue infrastructure (e.g. a hosted queue or a self-hosted worker)
+      is available in this environment yet
+- [ ] **Redis-compatible cache.** Nothing in this codebase depends on it yet;
+      would need a real Redis-compatible instance to build against
+      meaningfully rather than an untested abstraction
 
 ## Onboarding wizard (cross-cutting UX slice) — **complete**
 

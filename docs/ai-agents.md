@@ -61,6 +61,69 @@ small structured-classification call with a handful of output fields, not a
 freeform reasoning task, so a larger model would add latency and cost with
 no accuracy benefit worth paying for at this step.
 
+## 0a. Second and third AI integrations: fuzzy reconciliation and Document AI
+
+Phase 2 Slice 2 adds two more AI integrations, both following the same
+"classify/extract, never auto-post" discipline §0 established, extended to
+their own shape of the problem.
+
+**Fuzzy reconciliation
+(`src/domain/banking/fuzzy-reconciliation-service.ts`).**
+`ReconciliationService.findCandidateMatches` (§0's sibling, deterministic
+exact-amount matching — see `docs/decisions/0006-bank-feed-abstraction.md`)
+is augmented, not replaced, by `FuzzyReconciliationService.suggestMatches`
+for the case it was always meant to hand off to: a transaction with no
+exact-amount candidate. The AI's entire output is a ranked list of
+`{candidateJournalLineId | candidateAccountId, confidence, reasoning}`
+entries, produced via a schema-constrained tool call and re-validated with
+zod. The extra check this integration needs, that §0's fixed-enum
+`templateKey` didn't: the candidate ids are not a small closed set known in
+advance, so **every returned id is checked against the actual candidate pool
+handed to the model in that call** — a journal-line or account id the model
+merely claims, but that wasn't in the list it was given, is silently
+dropped rather than trusted. This is the concrete version of "never allow
+AI to silently invent financial information" for a case where the invented
+thing would be an id rather than a number.
+
+This is a **user-triggered action** ("Get AI suggestions" per bank
+transaction), never a background/automatic pass over every transaction —
+gated behind its own `bank_transaction:ai_suggest` permission, distinct from
+`bank_transaction:reconcile`. It never posts or confirms a match itself:
+every suggestion is surfaced exactly like a deterministic candidate, through
+the same `confirmMatch`/`createJournalFromTransaction` calls a human clicks,
+with its reasoning shown next to it (master spec §6). Missing
+`ANTHROPIC_API_KEY`, a failed/timed-out call, or a schema validation failure
+all resolve to an empty suggestion list — the deterministic candidates (if
+any) still show, with no error and no AI section, exactly like §0's
+fallback UX.
+
+**Document AI (`src/domain/documents/receipt-extraction-service.ts`).**
+`AiReceiptExtractor` sends an uploaded receipt/invoice image or PDF to
+Claude using its vision capability (a base64-encoded image or document
+content block), via a schema-constrained tool call extracting
+`{supplierName, date, subtotal, taxAmount, total, currency, lineItems,
+suggestedCategory, confidence, reasoning}`, re-validated with zod exactly
+like every other AI response in this codebase. This is master spec §17's
+"never silently post uncertain OCR results" made concrete: the extraction
+result is never written onto an expense claim or bill directly — it only
+ever pre-fills an editable draft (`/[orgSlug]/expenses/new?receiptId=...`)
+that a human reviews, edits, and explicitly confirms via the same
+`ExpenseClaimService.create` call an unassisted draft would use, which does
+its own independent validation regardless of what the AI produced. A
+missing API key, an unsupported file type, a network failure, or a schema
+validation failure all resolve to `null` — the upload still succeeds, the
+user just gets a blank draft to fill in manually rather than a pre-filled
+one, per the task's explicit requirement that the feature never blocks
+entirely on AI being configured.
+
+The uploaded file itself is stored as `bytea` in Postgres
+(`uploaded_receipts`) behind a small `DocumentStorageProvider` interface —
+a deliberate, temporary decision (no object-storage credentials are
+available in this environment) recorded in
+`docs/decisions/0007-document-storage-bytea.md`, the same shape as the bank
+feed provider abstraction: ship the credential-free path now, make a real
+object-storage provider (S3, Vercel Blob) an additive swap later.
+
 ## 1. Why this belongs in the Phase 1 docs
 
 The single most important constraint on the AI layer is: **it must never see
