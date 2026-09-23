@@ -123,6 +123,25 @@ export const paymentMethodEnum = pgEnum("payment_method", [
   "OTHER",
 ]);
 
+/**
+ * Phase 4 Slice 1 (Purchases — supplier bills & AP core), the mirror image
+ * of `invoice_status`. There is no SENT/VIEWED equivalent — a bill is
+ * something the organization receives, not delivers — so a bill goes
+ * straight from DRAFT to APPROVED (posted: debit expense/asset + tax input
+ * credit, credit Accounts Payable) via `PostingService`. PART_PAID/PAID are
+ * derived from `supplier_payment_allocations` and kept in sync by
+ * `SupplierPaymentAllocationService`, never a stored counter. VOID means the
+ * posting journal was reversed (never edited) — see
+ * `src/domain/purchases/bill-service.ts`.
+ */
+export const billStatusEnum = pgEnum("bill_status", [
+  "DRAFT",
+  "APPROVED",
+  "PART_PAID",
+  "PAID",
+  "VOID",
+]);
+
 // ---------------------------------------------------------------------------
 // Identity & tenancy
 // ---------------------------------------------------------------------------
@@ -272,6 +291,17 @@ export const taxCodes = pgTable("tax_codes", {
    * tax code with no `payableAccountId` configured.
    */
   payableAccountId: uuid("payable_account_id").references((): AnyPgColumn => accounts.id),
+  /**
+   * The asset account tax paid under this code is debited to (e.g. "GST
+   * Receivable" / input tax credit) — the purchase-side mirror of
+   * `payableAccountId`, set once per tax code. Added in Phase 4 Slice 1;
+   * nullable for the same reason `payableAccountId` is — `BillService`
+   * rejects posting a bill line that uses a tax code with no
+   * `receivableAccountId` configured. A tax code can carry both fields at
+   * once (the common case for a single GST rate used on both sales and
+   * purchases).
+   */
+  receivableAccountId: uuid("receivable_account_id").references((): AnyPgColumn => accounts.id),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
@@ -737,6 +767,166 @@ export const paymentAllocations = pgTable("payment_allocations", {
 }));
 
 // ---------------------------------------------------------------------------
+// Purchases (Phase 4 Slice 1) — supplier bills & AP core, the mirror image
+// of Sales above. See docs/accounting-engine.md and src/domain/purchases/*.
+// ---------------------------------------------------------------------------
+
+/**
+ * A supplier bill. `apAccountId` names the specific Accounts Payable control
+ * account this bill posts to, chosen explicitly the same way `invoices.arAccountId`
+ * is — no per-organization "default account" magic. `billNumber` is this
+ * organization's own sequential reference (e.g. "BILL-000001"); `supplierReference`
+ * is the supplier's own invoice number, purely informational and never used
+ * for uniqueness or posting. `subtotal`/`taxTotal`/`total` are denormalized
+ * from `bill_lines` for cheap list/aging queries, but are only ever written
+ * by `BillService` in the same transaction as the lines that justify them.
+ */
+export const bills = pgTable("bills", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  supplierContactId: uuid("supplier_contact_id")
+    .notNull()
+    .references(() => contacts.id),
+  billNumber: text("bill_number").notNull(),
+  supplierReference: text("supplier_reference"),
+  issueDate: timestamp("issue_date", { withTimezone: true, mode: "date" }).notNull(),
+  dueDate: timestamp("due_date", { withTimezone: true, mode: "date" }).notNull(),
+  currency: text("currency").notNull(),
+  memo: text("memo"),
+  apAccountId: uuid("ap_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  status: billStatusEnum("status").notNull().default("DRAFT"),
+  subtotal: numeric("subtotal", { precision: 19, scale: 4 }).notNull().default("0"),
+  taxTotal: numeric("tax_total", { precision: 19, scale: 4 }).notNull().default("0"),
+  total: numeric("total", { precision: 19, scale: 4 }).notNull().default("0"),
+  /** Set once, when `BillService.approveAndPost` posts the balanced journal. Never re-pointed. */
+  journalEntryId: uuid("journal_entry_id").references((): AnyPgColumn => journalEntries.id),
+  /** Set once, when `BillService.voidBill` reverses that journal — the original is never edited. */
+  voidJournalEntryId: uuid("void_journal_entry_id").references((): AnyPgColumn => journalEntries.id),
+  postedAt: timestamp("posted_at", { withTimezone: true }),
+  postedById: uuid("posted_by_id"),
+  voidedAt: timestamp("voided_at", { withTimezone: true }),
+  voidedById: uuid("voided_by_id"),
+  voidReason: text("void_reason"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+  updatedById: uuid("updated_by_id"),
+}, (table) => ({
+  orgBillNumberUnique: uniqueIndex("bills_org_bill_number_unique").on(
+    table.organizationId,
+    table.billNumber,
+  ),
+  orgStatusIdx: index("bills_org_status_idx").on(table.organizationId, table.status),
+  orgSupplierIdx: index("bills_org_supplier_idx").on(table.organizationId, table.supplierContactId),
+  orgDueDateIdx: index("bills_org_due_date_idx").on(table.organizationId, table.dueDate),
+}));
+
+/**
+ * One line of a bill. `accountId` is the expense/asset account this line's
+ * `lineAmount` (quantity × unit price) is debited to on posting; `taxCodeId`
+ * is optional. `lineAmount`/`taxAmount` are computed and stored by
+ * `BillService` using `Money`/`decimal.js` — never floating point.
+ */
+export const billLines = pgTable("bill_lines", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  billId: uuid("bill_id")
+    .notNull()
+    .references(() => bills.id, { onDelete: "cascade" }),
+  lineNumber: integer("line_number").notNull(),
+  description: text("description").notNull(),
+  quantity: numeric("quantity", { precision: 19, scale: 4 }).notNull(),
+  unitPrice: numeric("unit_price", { precision: 19, scale: 4 }).notNull(),
+  accountId: uuid("account_id")
+    .notNull()
+    .references(() => accounts.id),
+  taxCodeId: uuid("tax_code_id").references(() => taxCodes.id),
+  lineAmount: numeric("line_amount", { precision: 19, scale: 4 }).notNull(),
+  taxAmount: numeric("tax_amount", { precision: 19, scale: 4 }).notNull().default("0"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  billLineUnique: uniqueIndex("bill_lines_bill_line_unique").on(table.billId, table.lineNumber),
+  orgBillIdx: index("bill_lines_org_bill_idx").on(table.organizationId, table.billId),
+}));
+
+/**
+ * A payment made to a supplier, which may fund one or more bills'
+ * `supplier_payment_allocations`. `paymentAccountId` is the ASSET account
+ * credited on posting — a bank's own `glAccountId` for a direct bank
+ * payment; `bankAccountId` is an optional informational link to Phase 2's
+ * `bank_accounts` for a payment that will later reconcile against an
+ * imported bank transaction.
+ */
+export const supplierPayments = pgTable("supplier_payments", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  supplierContactId: uuid("supplier_contact_id")
+    .notNull()
+    .references(() => contacts.id),
+  paymentDate: timestamp("payment_date", { withTimezone: true, mode: "date" }).notNull(),
+  amount: numeric("amount", { precision: 19, scale: 4 }).notNull(),
+  currency: text("currency").notNull(),
+  method: paymentMethodEnum("method").notNull().default("BANK_TRANSFER"),
+  paymentAccountId: uuid("payment_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  bankAccountId: uuid("bank_account_id").references(() => bankAccounts.id),
+  reference: text("reference"),
+  /** Set once, when `SupplierPaymentAllocationService.recordPayment` posts the balanced journal. */
+  journalEntryId: uuid("journal_entry_id").references((): AnyPgColumn => journalEntries.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+}, (table) => ({
+  orgSupplierIdx: index("supplier_payments_org_supplier_idx").on(
+    table.organizationId,
+    table.supplierContactId,
+  ),
+  orgDateIdx: index("supplier_payments_org_date_idx").on(table.organizationId, table.paymentDate),
+}));
+
+/**
+ * How much of a `supplier_payment` was applied to a given `bill` — the join
+ * that makes partial payments and one-payment-to-many-bills both work.
+ * `SupplierPaymentAllocationService` is the only writer, and it enforces the
+ * invariant that the sum of a payment's allocations never exceeds the
+ * payment's own amount, and that a single allocation never exceeds the
+ * bill's outstanding balance at the moment it's recorded.
+ */
+export const supplierPaymentAllocations = pgTable("supplier_payment_allocations", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  paymentId: uuid("payment_id")
+    .notNull()
+    .references(() => supplierPayments.id, { onDelete: "cascade" }),
+  billId: uuid("bill_id")
+    .notNull()
+    .references(() => bills.id),
+  amount: numeric("amount", { precision: 19, scale: 4 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+}, (table) => ({
+  paymentBillUnique: uniqueIndex("supplier_payment_allocations_payment_bill_unique").on(
+    table.paymentId,
+    table.billId,
+  ),
+  orgBillIdx: index("supplier_payment_allocations_org_bill_idx").on(table.organizationId, table.billId),
+  orgPaymentIdx: index("supplier_payment_allocations_org_payment_idx").on(
+    table.organizationId,
+    table.paymentId,
+  ),
+}));
+
+// ---------------------------------------------------------------------------
 // Governance
 // ---------------------------------------------------------------------------
 
@@ -813,6 +1003,8 @@ export const organizationsRelations = relations(organizations, ({ many }) => ({
   bankRules: many(bankRules),
   invoices: many(invoices),
   payments: many(payments),
+  bills: many(bills),
+  supplierPayments: many(supplierPayments),
 }));
 
 export const bankAccountsRelations = relations(bankAccounts, ({ one, many }) => ({
@@ -938,8 +1130,13 @@ export const taxCodesRelations = relations(taxCodes, ({ one, many }) => ({
     fields: [taxCodes.payableAccountId],
     references: [accounts.id],
   }),
+  receivableAccount: one(accounts, {
+    fields: [taxCodes.receivableAccountId],
+    references: [accounts.id],
+  }),
   journalLines: many(journalLines),
   invoiceLines: many(invoiceLines),
+  billLines: many(billLines),
 }));
 
 export const dimensionsRelations = relations(dimensions, ({ one, many }) => ({
@@ -1099,5 +1296,86 @@ export const paymentAllocationsRelations = relations(paymentAllocations, ({ one 
   invoice: one(invoices, {
     fields: [paymentAllocations.invoiceId],
     references: [invoices.id],
+  }),
+}));
+
+export const billsRelations = relations(bills, ({ one, many }) => ({
+  organization: one(organizations, {
+    fields: [bills.organizationId],
+    references: [organizations.id],
+  }),
+  supplier: one(contacts, {
+    fields: [bills.supplierContactId],
+    references: [contacts.id],
+  }),
+  apAccount: one(accounts, {
+    fields: [bills.apAccountId],
+    references: [accounts.id],
+  }),
+  journalEntry: one(journalEntries, {
+    fields: [bills.journalEntryId],
+    references: [journalEntries.id],
+    relationName: "bill_journal",
+  }),
+  voidJournalEntry: one(journalEntries, {
+    fields: [bills.voidJournalEntryId],
+    references: [journalEntries.id],
+    relationName: "bill_void_journal",
+  }),
+  lines: many(billLines),
+  allocations: many(supplierPaymentAllocations),
+}));
+
+export const billLinesRelations = relations(billLines, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [billLines.organizationId],
+    references: [organizations.id],
+  }),
+  bill: one(bills, {
+    fields: [billLines.billId],
+    references: [bills.id],
+  }),
+  account: one(accounts, {
+    fields: [billLines.accountId],
+    references: [accounts.id],
+  }),
+  taxCode: one(taxCodes, {
+    fields: [billLines.taxCodeId],
+    references: [taxCodes.id],
+  }),
+}));
+
+export const supplierPaymentsRelations = relations(supplierPayments, ({ one, many }) => ({
+  organization: one(organizations, {
+    fields: [supplierPayments.organizationId],
+    references: [organizations.id],
+  }),
+  supplier: one(contacts, {
+    fields: [supplierPayments.supplierContactId],
+    references: [contacts.id],
+  }),
+  paymentAccount: one(accounts, {
+    fields: [supplierPayments.paymentAccountId],
+    references: [accounts.id],
+  }),
+  bankAccount: one(bankAccounts, {
+    fields: [supplierPayments.bankAccountId],
+    references: [bankAccounts.id],
+  }),
+  allocations: many(supplierPaymentAllocations),
+}));
+
+export const supplierPaymentAllocationsRelations = relations(supplierPaymentAllocations, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [supplierPaymentAllocations.organizationId],
+    references: [organizations.id],
+  }),
+  payment: one(supplierPayments, {
+    fields: [supplierPaymentAllocations.paymentId],
+    references: [supplierPayments.id],
+  }),
+  bill: one(bills, {
+    fields: [supplierPaymentAllocations.billId],
+    references: [bills.id],
   }),
 }));

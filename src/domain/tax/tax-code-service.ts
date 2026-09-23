@@ -14,6 +14,8 @@ export interface CreateTaxCodeInput {
   effectiveTo?: Date;
   /** The liability account tax collected under this code is credited to — see src/domain/sales/invoice-service.ts. */
   payableAccountId?: string;
+  /** The asset account tax paid under this code is debited to (input tax credit) — see src/domain/purchases/bill-service.ts. */
+  receivableAccountId?: string;
 }
 
 /**
@@ -50,6 +52,7 @@ export const TaxCodeService = {
           effectiveFrom: input.effectiveFrom,
           effectiveTo: input.effectiveTo ?? null,
           payableAccountId: input.payableAccountId ?? null,
+          receivableAccountId: input.receivableAccountId ?? null,
         })
         .returning();
       if (!taxCode) throw new Error("Failed to create tax code.");

@@ -50,6 +50,20 @@
       "when": 1789967646146,
       "tag": "0006_sales_row_level_security",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1790121122728,
+      "tag": "0007_adorable_manta",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1790121123728,
+      "tag": "0008_purchases_row_level_security",
+      "breakpoints": true
     }
   ]
 }
