@@ -43,7 +43,17 @@ export const NAV_ITEMS: NavItem[] = [
       { label: "Aged Receivables", href: "/sales/aged-receivables", permission: "customer_invoice:read" },
     ],
   },
-  { label: "Purchases", href: "/purchases", icon: ShoppingCart },
+  {
+    label: "Purchases",
+    href: "/purchases",
+    icon: ShoppingCart,
+    permission: "supplier_bill:read",
+    children: [
+      { label: "Bills", href: "/purchases/bills", permission: "supplier_bill:read" },
+      { label: "Suppliers", href: "/purchases/suppliers", permission: "supplier_bill:read" },
+      { label: "Aged Payables", href: "/purchases/aged-payables", permission: "supplier_bill:read" },
+    ],
+  },
   { label: "People", href: "/people", icon: Users },
   { label: "Operations", href: "/operations", icon: Package },
   {

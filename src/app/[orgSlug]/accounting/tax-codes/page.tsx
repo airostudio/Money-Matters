@@ -12,6 +12,7 @@ export default async function TaxCodesPage({ params }: { params: { orgSlug: stri
   const taxCodes = await TaxCodeService.list(actor);
   const accounts = await AccountService.list(actor);
   const liabilityAccounts = accounts.filter((a) => a.type === "LIABILITY");
+  const assetAccounts = accounts.filter((a) => a.type === "ASSET");
   const boundCreate = createTaxCodeAction.bind(null, org.slug);
 
   return (
@@ -36,11 +37,13 @@ export default async function TaxCodesPage({ params }: { params: { orgSlug: stri
                   <th className="px-6 py-2 font-medium">Jurisdiction</th>
                   <th className="px-6 py-2 text-right font-medium">Rate</th>
                   <th className="px-6 py-2 font-medium">Payable account</th>
+                  <th className="px-6 py-2 font-medium">Receivable account</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
                 {taxCodes.map((tc) => {
                   const payableAccount = accounts.find((a) => a.id === tc.payableAccountId);
+                  const receivableAccount = accounts.find((a) => a.id === tc.receivableAccountId);
                   return (
                     <tr key={tc.id}>
                       <td className="px-6 py-2.5 font-mono text-xs">{tc.code}</td>
@@ -49,6 +52,9 @@ export default async function TaxCodesPage({ params }: { params: { orgSlug: stri
                       <td className="px-6 py-2.5 text-right">{(Number(tc.rate) * 100).toFixed(2)}%</td>
                       <td className="px-6 py-2.5 text-muted-foreground">
                         {payableAccount ? `${payableAccount.code} · ${payableAccount.name}` : "Not configured"}
+                      </td>
+                      <td className="px-6 py-2.5 text-muted-foreground">
+                        {receivableAccount ? `${receivableAccount.code} · ${receivableAccount.name}` : "Not configured"}
                       </td>
                     </tr>
                   );
@@ -97,6 +103,24 @@ export default async function TaxCodesPage({ params }: { params: { orgSlug: stri
               </select>
               <p className="text-xs text-muted-foreground">
                 Tax collected under this code is credited here on a posted invoice — required before this code can be used on one.
+              </p>
+            </div>
+            <div className="col-span-2 space-y-2">
+              <Label htmlFor="receivableAccountId">Receivable account (for bills)</Label>
+              <select
+                id="receivableAccountId"
+                name="receivableAccountId"
+                className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+              >
+                <option value="">Not configured yet</option>
+                {assetAccounts.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.code} · {a.name}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-muted-foreground">
+                Tax paid under this code (input tax credit) is debited here on a posted bill — required before this code can be used on one.
               </p>
             </div>
           </CardContent>

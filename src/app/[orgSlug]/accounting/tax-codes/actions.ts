@@ -12,6 +12,7 @@ const CreateTaxCodeSchema = z.object({
   ratePercent: z.coerce.number().min(0).max(100),
   jurisdiction: z.string().trim().min(1).max(10),
   payableAccountId: z.string().uuid().optional(),
+  receivableAccountId: z.string().uuid().optional(),
 });
 
 export async function createTaxCodeAction(orgSlug: string, formData: FormData): Promise<void> {
@@ -23,6 +24,7 @@ export async function createTaxCodeAction(orgSlug: string, formData: FormData): 
     ratePercent: formData.get("ratePercent"),
     jurisdiction: formData.get("jurisdiction"),
     payableAccountId: formData.get("payableAccountId") || undefined,
+    receivableAccountId: formData.get("receivableAccountId") || undefined,
   });
   if (!parsed.success) return;
 
@@ -33,6 +35,7 @@ export async function createTaxCodeAction(orgSlug: string, formData: FormData): 
     jurisdiction: parsed.data.jurisdiction.toUpperCase(),
     effectiveFrom: new Date("2000-01-01"),
     payableAccountId: parsed.data.payableAccountId,
+    receivableAccountId: parsed.data.receivableAccountId,
   });
 
   revalidatePath(`/${orgSlug}/accounting/tax-codes`);
