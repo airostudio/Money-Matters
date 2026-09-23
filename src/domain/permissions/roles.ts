@@ -35,6 +35,11 @@ export const PERMISSIONS = [
   "supplier_payment:read",
   "supplier_payment:manage",
   "onboarding:manage",
+  "bank_transaction:ai_suggest",
+  "expense_claim:read",
+  "expense_claim:manage",
+  "expense_claim:approve",
+  "expense_receipt:manage",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -80,6 +85,11 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "supplier_bill:void",
     "supplier_payment:read",
     "supplier_payment:manage",
+    "bank_transaction:ai_suggest",
+    "expense_claim:read",
+    "expense_claim:manage",
+    "expense_claim:approve",
+    "expense_receipt:manage",
   ]),
   BOOKKEEPER: new Set<Permission>([
     "account:read",
@@ -102,6 +112,11 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "supplier_bill:post",
     "supplier_payment:read",
     "supplier_payment:manage",
+    "bank_transaction:ai_suggest",
+    "expense_claim:read",
+    "expense_claim:manage",
+    "expense_claim:approve",
+    "expense_receipt:manage",
   ]),
   ACCOUNTS_RECEIVABLE: new Set<Permission>([
     "account:read",
@@ -115,6 +130,9 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "customer_invoice:void",
     "customer_payment:read",
     "customer_payment:manage",
+    "expense_claim:read",
+    "expense_claim:manage",
+    "expense_receipt:manage",
   ]),
   ACCOUNTS_PAYABLE: new Set<Permission>([
     "account:read",
@@ -128,8 +146,19 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "supplier_bill:void",
     "supplier_payment:read",
     "supplier_payment:manage",
+    "expense_claim:read",
+    "expense_claim:manage",
+    "expense_receipt:manage",
   ]),
-  PAYROLL_MANAGER: new Set<Permission>(["account:read", "journal:read", "contact:read"]),
+  PAYROLL_MANAGER: new Set<Permission>([
+    "account:read",
+    "journal:read",
+    "contact:read",
+    "expense_claim:read",
+    "expense_claim:manage",
+    "expense_claim:approve",
+    "expense_receipt:manage",
+  ]),
   MANAGER: new Set<Permission>([
     "account:read",
     "journal:read",
@@ -140,8 +169,12 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "customer_payment:read",
     "supplier_bill:read",
     "supplier_payment:read",
+    "expense_claim:read",
+    "expense_claim:manage",
+    "expense_claim:approve",
+    "expense_receipt:manage",
   ]),
-  EMPLOYEE: new Set<Permission>([]),
+  EMPLOYEE: new Set<Permission>(["expense_claim:read", "expense_claim:manage", "expense_receipt:manage"]),
   READ_ONLY: new Set<Permission>([
     "account:read",
     "journal:read",
@@ -152,6 +185,7 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "customer_payment:read",
     "supplier_bill:read",
     "supplier_payment:read",
+    "expense_claim:read",
   ]),
 };
 

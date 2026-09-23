@@ -20,7 +20,11 @@ export function NavLinks({
 
   return (
     <nav className="flex flex-col gap-0.5 px-2">
-      {NAV_ITEMS.filter((item) => !item.permission || roleHasPermission(role, item.permission)).map(
+      {NAV_ITEMS.filter(
+        (item) =>
+          (!item.permission || roleHasPermission(role, item.permission)) &&
+          (!item.anyPermission || item.anyPermission.some((p) => roleHasPermission(role, p))),
+      ).map(
         (item) => {
           const href = `${basePath}${item.href}`;
           const isActive = item.href === "" ? pathname === basePath : pathname.startsWith(href);

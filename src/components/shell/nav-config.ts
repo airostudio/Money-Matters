@@ -20,6 +20,8 @@ export interface NavItem {
   icon: LucideIcon;
   /** Hidden from the nav entirely if the actor's role lacks this permission. Omit to show to every member. */
   permission?: Permission;
+  /** Shown if the actor's role holds ANY of these — used when a section covers more than one permission domain (e.g. Purchases also covers Expenses, which an EMPLOYEE role can reach without `supplier_bill:read`). */
+  anyPermission?: Permission[];
   children?: Array<{ label: string; href: string; permission?: Permission }>;
 }
 
@@ -47,11 +49,12 @@ export const NAV_ITEMS: NavItem[] = [
     label: "Purchases",
     href: "/purchases",
     icon: ShoppingCart,
-    permission: "supplier_bill:read",
+    anyPermission: ["supplier_bill:read", "expense_claim:read"],
     children: [
       { label: "Bills", href: "/purchases/bills", permission: "supplier_bill:read" },
       { label: "Suppliers", href: "/purchases/suppliers", permission: "supplier_bill:read" },
       { label: "Aged Payables", href: "/purchases/aged-payables", permission: "supplier_bill:read" },
+      { label: "Expenses", href: "/expenses", permission: "expense_claim:read" },
     ],
   },
   { label: "People", href: "/people", icon: Users },

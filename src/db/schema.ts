@@ -15,9 +15,22 @@ import {
   jsonb,
   uniqueIndex,
   index,
+  customType,
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
+
+/**
+ * Raw binary storage for uploaded documents (receipts/invoices) —
+ * `bytea` in Postgres. See docs/decisions/0007-document-storage-bytea.md
+ * for why this is a deliberate, temporary choice pending real object
+ * storage (S3/Vercel Blob) credentials.
+ */
+const bytea = customType<{ data: Buffer; driverData: Buffer }>({
+  dataType() {
+    return "bytea";
+  },
+});
 
 // ---------------------------------------------------------------------------
 // Enums
@@ -140,6 +153,43 @@ export const billStatusEnum = pgEnum("bill_status", [
   "PART_PAID",
   "PAID",
   "VOID",
+]);
+
+/**
+ * Phase 2 Slice 2 (expense management, master spec §19). `DRAFT` has no
+ * ledger effect and is fully editable/deletable. `SUBMITTED` is a simple
+ * single-approver gate (the tiered/segregated approval engine is Phase
+ * 9/10 — out of scope here); an approver either `APPROVED`s it (which
+ * posts: debit each line's expense/tax account, credit the "Employee
+ * Reimbursements Payable" liability, via `PostingService`) or `REJECTED`s
+ * it (no ledger effect). `REIMBURSED` means a second journal has moved the
+ * payable to the paying bank/asset account — posting and payment are kept
+ * separate the same way bills/invoices separate approval from payment.
+ * `VOID` means a posted claim's journal was reversed (never edited), same
+ * discipline as `bill_status`/`invoice_status`.
+ */
+export const expenseClaimStatusEnum = pgEnum("expense_claim_status", [
+  "DRAFT",
+  "SUBMITTED",
+  "APPROVED",
+  "REJECTED",
+  "REIMBURSED",
+  "VOID",
+]);
+
+/**
+ * Document AI extraction outcome for an uploaded receipt/invoice image or
+ * PDF (master spec §17). `NOT_ATTEMPTED` covers both "no API key
+ * configured" and "extraction hasn't run yet" — in both cases the upload
+ * still succeeds and the user gets a blank draft to fill in manually.
+ * `EXTRACTED` data is always a *suggestion*: nothing here is ever posted or
+ * saved onto an expense claim/bill without a human reviewing and
+ * confirming it first, per docs/ai-agents.md.
+ */
+export const documentExtractionStatusEnum = pgEnum("document_extraction_status", [
+  "NOT_ATTEMPTED",
+  "EXTRACTED",
+  "FAILED",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -927,6 +977,144 @@ export const supplierPaymentAllocations = pgTable("supplier_payment_allocations"
 }));
 
 // ---------------------------------------------------------------------------
+// Documents (Phase 2 Slice 2 — receipt/invoice capture, master spec §17)
+// ---------------------------------------------------------------------------
+
+/**
+ * An uploaded receipt/invoice image or PDF, stored as `bytea` directly in
+ * Postgres — a deliberate, temporary decision (no object-storage
+ * credentials are available in this environment) behind a small storage
+ * abstraction so swapping to real object storage later is additive, not a
+ * rework. See docs/decisions/0007-document-storage-bytea.md.
+ *
+ * `extractedData` is Document AI's raw, schema-validated output (see
+ * `src/domain/documents/receipt-extraction-service.ts`) — always a
+ * *suggestion* a human reviews before it becomes an expense claim line or
+ * bill; nothing here is ever posted automatically.
+ */
+export const uploadedReceipts = pgTable("uploaded_receipts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  uploadedById: uuid("uploaded_by_id").notNull(),
+  fileName: text("file_name").notNull(),
+  mimeType: text("mime_type").notNull(),
+  fileSize: integer("file_size").notNull(),
+  fileData: bytea("file_data").notNull(),
+  extractionStatus: documentExtractionStatusEnum("extraction_status").notNull().default("NOT_ATTEMPTED"),
+  extractedData: jsonb("extracted_data"),
+  extractionModel: text("extraction_model"),
+  extractionConfidence: numeric("extraction_confidence", { precision: 4, scale: 3 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  orgIdx: index("uploaded_receipts_org_idx").on(table.organizationId),
+}));
+
+// ---------------------------------------------------------------------------
+// Expenses (Phase 2 Slice 2 — employee expense claims, master spec §19)
+// ---------------------------------------------------------------------------
+
+/**
+ * An employee's expense claim. `employeeUserId` (like every other
+ * actor-derived column in this schema — `createdById`, `postedById`, etc.)
+ * is a plain uuid with no FK: the organizational relationship is via
+ * `organization_memberships`, and the user row itself is global, not
+ * tenant-scoped. `payableAccountId` is the liability control account
+ * ("Employee Reimbursements Payable") credited on approval;
+ * `reimbursementAccountId` is the bank/asset account credited when the
+ * claim is later marked reimbursed — set at that step, not before, mirroring
+ * how bills/invoices keep posting and payment separate.
+ */
+export const expenseClaims = pgTable("expense_claims", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  employeeUserId: uuid("employee_user_id").notNull(),
+  claimNumber: text("claim_number").notNull(),
+  claimDate: timestamp("claim_date", { withTimezone: true, mode: "date" }).notNull(),
+  description: text("description").notNull(),
+  currency: text("currency").notNull(),
+  memo: text("memo"),
+  status: expenseClaimStatusEnum("status").notNull().default("DRAFT"),
+  payableAccountId: uuid("payable_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  subtotal: numeric("subtotal", { precision: 19, scale: 4 }).notNull().default("0"),
+  taxTotal: numeric("tax_total", { precision: 19, scale: 4 }).notNull().default("0"),
+  total: numeric("total", { precision: 19, scale: 4 }).notNull().default("0"),
+  /** Set once, when `ExpenseClaimService.approve` posts the balanced journal. Never re-pointed. */
+  journalEntryId: uuid("journal_entry_id").references((): AnyPgColumn => journalEntries.id),
+  /** Set once, when `ExpenseClaimService.markReimbursed` posts the payable→bank journal. */
+  reimbursementJournalEntryId: uuid("reimbursement_journal_entry_id").references(
+    (): AnyPgColumn => journalEntries.id,
+  ),
+  reimbursementAccountId: uuid("reimbursement_account_id").references((): AnyPgColumn => accounts.id),
+  /** Set once, when `ExpenseClaimService.voidClaim` reverses the approval journal — the original is never edited. */
+  voidJournalEntryId: uuid("void_journal_entry_id").references((): AnyPgColumn => journalEntries.id),
+  submittedAt: timestamp("submitted_at", { withTimezone: true }),
+  submittedById: uuid("submitted_by_id"),
+  approvedAt: timestamp("approved_at", { withTimezone: true }),
+  approvedById: uuid("approved_by_id"),
+  rejectedAt: timestamp("rejected_at", { withTimezone: true }),
+  rejectedById: uuid("rejected_by_id"),
+  rejectionReason: text("rejection_reason"),
+  reimbursedAt: timestamp("reimbursed_at", { withTimezone: true }),
+  reimbursedById: uuid("reimbursed_by_id"),
+  voidedAt: timestamp("voided_at", { withTimezone: true }),
+  voidedById: uuid("voided_by_id"),
+  voidReason: text("void_reason"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+  updatedById: uuid("updated_by_id"),
+}, (table) => ({
+  orgClaimNumberUnique: uniqueIndex("expense_claims_org_claim_number_unique").on(
+    table.organizationId,
+    table.claimNumber,
+  ),
+  orgStatusIdx: index("expense_claims_org_status_idx").on(table.organizationId, table.status),
+  orgEmployeeIdx: index("expense_claims_org_employee_idx").on(table.organizationId, table.employeeUserId),
+}));
+
+/**
+ * One line of an expense claim. `expenseAccountId` is the expense account
+ * debited on approval; `taxCodeId` is optional, following the same input
+ * tax credit pattern as `bill_lines` (the receivable account is looked up
+ * from the tax code, not stored per line). `receiptId` optionally links the
+ * uploaded receipt (Document AI) this line's data was captured/prefilled
+ * from — informational only, never a source of truth for the amount once a
+ * human has confirmed the line.
+ */
+export const expenseClaimLines = pgTable("expense_claim_lines", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  expenseClaimId: uuid("expense_claim_id")
+    .notNull()
+    .references(() => expenseClaims.id, { onDelete: "cascade" }),
+  lineNumber: integer("line_number").notNull(),
+  description: text("description").notNull(),
+  amount: numeric("amount", { precision: 19, scale: 4 }).notNull(),
+  expenseAccountId: uuid("expense_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  taxCodeId: uuid("tax_code_id").references(() => taxCodes.id),
+  taxAmount: numeric("tax_amount", { precision: 19, scale: 4 }).notNull().default("0"),
+  category: text("category"),
+  receiptId: uuid("receipt_id").references(() => uploadedReceipts.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  expenseClaimLineUnique: uniqueIndex("expense_claim_lines_claim_line_unique").on(
+    table.expenseClaimId,
+    table.lineNumber,
+  ),
+  orgClaimIdx: index("expense_claim_lines_org_claim_idx").on(table.organizationId, table.expenseClaimId),
+}));
+
+// ---------------------------------------------------------------------------
 // Governance
 // ---------------------------------------------------------------------------
 
@@ -1377,5 +1565,68 @@ export const supplierPaymentAllocationsRelations = relations(supplierPaymentAllo
   bill: one(bills, {
     fields: [supplierPaymentAllocations.billId],
     references: [bills.id],
+  }),
+}));
+
+export const uploadedReceiptsRelations = relations(uploadedReceipts, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [uploadedReceipts.organizationId],
+    references: [organizations.id],
+  }),
+}));
+
+export const expenseClaimsRelations = relations(expenseClaims, ({ one, many }) => ({
+  organization: one(organizations, {
+    fields: [expenseClaims.organizationId],
+    references: [organizations.id],
+  }),
+  payableAccount: one(accounts, {
+    fields: [expenseClaims.payableAccountId],
+    references: [accounts.id],
+    relationName: "expense_claim_payable_account",
+  }),
+  reimbursementAccount: one(accounts, {
+    fields: [expenseClaims.reimbursementAccountId],
+    references: [accounts.id],
+    relationName: "expense_claim_reimbursement_account",
+  }),
+  journalEntry: one(journalEntries, {
+    fields: [expenseClaims.journalEntryId],
+    references: [journalEntries.id],
+    relationName: "expense_claim_journal",
+  }),
+  reimbursementJournalEntry: one(journalEntries, {
+    fields: [expenseClaims.reimbursementJournalEntryId],
+    references: [journalEntries.id],
+    relationName: "expense_claim_reimbursement_journal",
+  }),
+  voidJournalEntry: one(journalEntries, {
+    fields: [expenseClaims.voidJournalEntryId],
+    references: [journalEntries.id],
+    relationName: "expense_claim_void_journal",
+  }),
+  lines: many(expenseClaimLines),
+}));
+
+export const expenseClaimLinesRelations = relations(expenseClaimLines, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [expenseClaimLines.organizationId],
+    references: [organizations.id],
+  }),
+  expenseClaim: one(expenseClaims, {
+    fields: [expenseClaimLines.expenseClaimId],
+    references: [expenseClaims.id],
+  }),
+  expenseAccount: one(accounts, {
+    fields: [expenseClaimLines.expenseAccountId],
+    references: [accounts.id],
+  }),
+  taxCode: one(taxCodes, {
+    fields: [expenseClaimLines.taxCodeId],
+    references: [taxCodes.id],
+  }),
+  receipt: one(uploadedReceipts, {
+    fields: [expenseClaimLines.receiptId],
+    references: [uploadedReceipts.id],
   }),
 }));

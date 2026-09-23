@@ -6,6 +6,9 @@ import type { Actor } from "@/domain/permissions/permission-service";
 
 const TENANT_TABLES = [
   "audit_logs",
+  "expense_claim_lines",
+  "expense_claims",
+  "uploaded_receipts",
   "supplier_payment_allocations",
   "supplier_payments",
   "bill_lines",

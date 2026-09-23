@@ -14,6 +14,12 @@ const STATUS_STYLES: Record<string, string> = {
   PAID: "bg-success/10 text-success",
   VOID: "bg-destructive/10 text-destructive",
   OVERDUE: "bg-destructive/10 text-destructive",
+  SUBMITTED: "bg-sky-500/10 text-sky-600 dark:text-sky-400",
+  REJECTED: "bg-destructive/10 text-destructive",
+  REIMBURSED: "bg-success/10 text-success",
+  EXTRACTED: "bg-success/10 text-success",
+  FAILED: "bg-destructive/10 text-destructive",
+  NOT_ATTEMPTED: "bg-muted text-muted-foreground",
 };
 
 export function StatusBadge({ status }: { status: string }) {

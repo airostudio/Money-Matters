@@ -4,6 +4,7 @@ import { Upload } from "lucide-react";
 import { requireOrgAndActor } from "@/lib/session";
 import { BankAccountService } from "@/domain/banking/bank-account-service";
 import { ReconciliationService } from "@/domain/banking/reconciliation-service";
+import { FuzzyReconciliationService } from "@/domain/banking/fuzzy-reconciliation-service";
 import { AccountService } from "@/domain/accounts/account-service";
 import { roleHasPermission } from "@/domain/permissions/roles";
 import { Button } from "@/components/ui/button";
@@ -25,7 +26,13 @@ export default async function BankAccountPage({
   searchParams,
 }: {
   params: { orgSlug: string; bankAccountId: string };
-  searchParams: { imported?: string; duplicates?: string; warnings?: string; error?: string };
+  searchParams: {
+    imported?: string;
+    duplicates?: string;
+    warnings?: string;
+    error?: string;
+    aiSuggest?: string;
+  };
 }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
   const bankAccount = await BankAccountService.get(actor, params.bankAccountId);
@@ -33,6 +40,7 @@ export default async function BankAccountPage({
 
   const canReconcile = roleHasPermission(actor.role, "bank_transaction:reconcile");
   const canImport = roleHasPermission(actor.role, "bank_transaction:import");
+  const canAiSuggest = roleHasPermission(actor.role, "bank_transaction:ai_suggest");
 
   const [unreconciled, categorizeAccounts] = await Promise.all([
     ReconciliationService.listUnreconciled(actor, bankAccount.id),
@@ -43,6 +51,14 @@ export default async function BankAccountPage({
     unreconciled.map(async (transaction) => ({
       transaction,
       candidates: canReconcile ? await ReconciliationService.findCandidateMatches(actor, transaction.id) : [],
+      // AI suggestions are fetched only for the one transaction the user
+      // just clicked "Get AI suggestions" on (searchParams.aiSuggest) —
+      // never automatically for every row on page load. See
+      // docs/ai-agents.md's fuzzy reconciliation section.
+      aiSuggestions:
+        canAiSuggest && searchParams.aiSuggest === transaction.id
+          ? await FuzzyReconciliationService.suggestMatches(actor, transaction.id)
+          : [],
     })),
   );
 
@@ -96,8 +112,9 @@ export default async function BankAccountPage({
           </CardContent>
         ) : (
           <div className="divide-y divide-border">
-            {rows.map(({ transaction, candidates }) => {
+            {rows.map(({ transaction, candidates, aiSuggestions }) => {
               const topCandidate = candidates[0];
+              const showAiPrompt = canAiSuggest && candidates.length === 0 && aiSuggestions.length === 0;
               return (
                 <div key={transaction.id} className="space-y-3 px-6 py-4">
                   <div className="flex items-start justify-between gap-4">
@@ -139,6 +156,75 @@ export default async function BankAccountPage({
                           Confirm match
                         </Button>
                       </form>
+                    </div>
+                  )}
+
+                  {showAiPrompt && (
+                    <div className="flex items-center justify-between gap-4 rounded-md border border-dashed border-border px-3 py-2">
+                      <p className="text-xs text-muted-foreground">
+                        No exact-amount match found. Try an AI-assisted fuzzy search over near-amount
+                        transactions and likely GL categories.
+                      </p>
+                      <Button asChild size="sm" variant="outline">
+                        <Link
+                          href={`/${org.slug}/money/${bankAccount.id}?aiSuggest=${transaction.id}#txn-${transaction.id}`}
+                        >
+                          Get AI suggestions
+                        </Link>
+                      </Button>
+                    </div>
+                  )}
+
+                  {aiSuggestions.length > 0 && (
+                    <div id={`txn-${transaction.id}`} className="space-y-2">
+                      <p className="text-xs font-medium text-muted-foreground">
+                        AI-suggested matches — review before confirming, none of these are posted automatically:
+                      </p>
+                      {aiSuggestions.map((suggestion, i) => (
+                        <div
+                          key={suggestion.journalLineId ?? suggestion.categorizedAccountId ?? i}
+                          className="flex items-center justify-between gap-4 rounded-md bg-violet-50 px-3 py-2 dark:bg-violet-950/30"
+                        >
+                          <div className="text-xs">
+                            <span className="font-medium">
+                              {suggestion.journalLineId
+                                ? `Journal entry ${suggestion.entryNumber}`
+                                : `Categorize to ${suggestion.categorizedAccountName}`}{" "}
+                              ({Math.round(suggestion.confidence * 100)}% — AI, {suggestion.model})
+                            </span>
+                            <p className="text-muted-foreground">{suggestion.explanation}</p>
+                          </div>
+                          {suggestion.journalLineId ? (
+                            <form
+                              action={confirmMatchAction.bind(
+                                null,
+                                org.slug,
+                                bankAccount.id,
+                                transaction.id,
+                                suggestion.journalLineId,
+                              )}
+                            >
+                              <Button type="submit" size="sm" variant="outline">
+                                Confirm match
+                              </Button>
+                            </form>
+                          ) : (
+                            <form
+                              action={createJournalFromTransactionAction.bind(
+                                null,
+                                org.slug,
+                                bankAccount.id,
+                                transaction.id,
+                              )}
+                            >
+                              <input type="hidden" name="categorizedAccountId" value={suggestion.categorizedAccountId} />
+                              <Button type="submit" size="sm" variant="outline">
+                                Post to this account
+                              </Button>
+                            </form>
+                          )}
+                        </div>
+                      ))}
                     </div>
                   )}
 
