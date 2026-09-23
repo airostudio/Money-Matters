@@ -28,6 +28,12 @@ export const PERMISSIONS = [
   "customer_invoice:void",
   "customer_payment:read",
   "customer_payment:manage",
+  "supplier_bill:read",
+  "supplier_bill:manage",
+  "supplier_bill:post",
+  "supplier_bill:void",
+  "supplier_payment:read",
+  "supplier_payment:manage",
   "onboarding:manage",
 ] as const;
 
@@ -68,6 +74,12 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "customer_invoice:void",
     "customer_payment:read",
     "customer_payment:manage",
+    "supplier_bill:read",
+    "supplier_bill:manage",
+    "supplier_bill:post",
+    "supplier_bill:void",
+    "supplier_payment:read",
+    "supplier_payment:manage",
   ]),
   BOOKKEEPER: new Set<Permission>([
     "account:read",
@@ -85,6 +97,11 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "customer_invoice:post",
     "customer_payment:read",
     "customer_payment:manage",
+    "supplier_bill:read",
+    "supplier_bill:manage",
+    "supplier_bill:post",
+    "supplier_payment:read",
+    "supplier_payment:manage",
   ]),
   ACCOUNTS_RECEIVABLE: new Set<Permission>([
     "account:read",
@@ -105,6 +122,12 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "contact:read",
     "contact:manage",
     "bank_account:read",
+    "supplier_bill:read",
+    "supplier_bill:manage",
+    "supplier_bill:post",
+    "supplier_bill:void",
+    "supplier_payment:read",
+    "supplier_payment:manage",
   ]),
   PAYROLL_MANAGER: new Set<Permission>(["account:read", "journal:read", "contact:read"]),
   MANAGER: new Set<Permission>([
@@ -115,6 +138,8 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "bank_account:read",
     "customer_invoice:read",
     "customer_payment:read",
+    "supplier_bill:read",
+    "supplier_payment:read",
   ]),
   EMPLOYEE: new Set<Permission>([]),
   READ_ONLY: new Set<Permission>([
@@ -125,6 +150,8 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "bank_account:read",
     "customer_invoice:read",
     "customer_payment:read",
+    "supplier_bill:read",
+    "supplier_payment:read",
   ]),
 };
 
