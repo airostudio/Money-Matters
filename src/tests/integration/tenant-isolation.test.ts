@@ -3,12 +3,14 @@ import { eq, sql } from "drizzle-orm";
 import { closeTestPools, createTestOrg, resetDatabase } from "../helpers/db";
 import { createSampleAccounts } from "../helpers/ledger";
 import { createSalesFixtures } from "../helpers/sales";
-import { accounts, auditLogs, invoices } from "@/db/schema";
+import { createPurchasesFixtures } from "../helpers/purchases";
+import { accounts, auditLogs, bills, invoices } from "@/db/schema";
 import { db } from "@/db/client";
 import { withTenant } from "@/db/tenant";
 import { AccountService } from "@/domain/accounts/account-service";
 import { PostingService } from "@/domain/ledger/posting-service";
 import { InvoiceService } from "@/domain/sales/invoice-service";
+import { BillService } from "@/domain/purchases/bill-service";
 
 /**
  * Master spec §48 / §87 non-negotiable #7: "A coding mistake must not allow
@@ -112,6 +114,10 @@ describe("Tenant isolation", () => {
       "invoice_lines",
       "payments",
       "payment_allocations",
+      "bills",
+      "bill_lines",
+      "supplier_payments",
+      "supplier_payment_allocations",
     ];
 
     const rows = await db.execute<{
@@ -150,6 +156,26 @@ describe("Tenant isolation", () => {
     expect(rowsAsOrgB.some((r) => r.id === created.id)).toBe(false);
 
     const rowsWithNoTenantContext = await db.select().from(invoices);
+    expect(rowsWithNoTenantContext).toHaveLength(0);
+  });
+
+  it("a bill created under org A is invisible to org B, even by direct query with no filter", async () => {
+    const fixturesA = await createPurchasesFixtures(orgA.owner, orgA.baseCurrency);
+    const created = await BillService.create(orgA.owner, {
+      supplierContactId: fixturesA.supplierContactId,
+      issueDate: new Date(),
+      dueDate: new Date(),
+      currency: "AUD",
+      apAccountId: fixturesA.apAccountId,
+      lines: [{ description: "x", quantity: "1", unitPrice: "10.00", accountId: fixturesA.expenseAccountId }],
+    });
+
+    expect(await BillService.get(orgB.owner, created.id)).toBeNull();
+
+    const rowsAsOrgB = await withTenant(orgB.organizationId, (tx) => tx.select().from(bills));
+    expect(rowsAsOrgB.some((r) => r.id === created.id)).toBe(false);
+
+    const rowsWithNoTenantContext = await db.select().from(bills);
     expect(rowsWithNoTenantContext).toHaveLength(0);
   });
 
