@@ -225,6 +225,49 @@ never a direct `journal_lines` write, exactly like Phase 2's banking
 reconciliation. Same for `PaymentAllocationService.recordPayment` (debit
 deposit account, credit AR).
 
+## 2e. Phase 4 Slice 1 entity groups: purchases (supplier bills & AP)
+
+The purchase-side mirror of §2d above. Suppliers are not a new table:
+`Contact.kind` already distinguishes `CUSTOMER`/`SUPPLIER`/`BOTH` (Phase 1),
+so `BillService`/`SupplierPaymentAllocationService` reuse `ContactService`
+and its RLS as-is.
+
+- `Bill` — a supplier bill. `apAccountId` names the specific Accounts
+  Payable control account it posts to, chosen explicitly (the same
+  convention as `Invoice.arAccountId`). `billNumber` is this organization's
+  own sequential reference (e.g. "BILL-000001"); `supplierReference` is the
+  supplier's own invoice number, purely informational and never used for
+  uniqueness or posting. `subtotal`/`taxTotal`/`total` are denormalized
+  from `BillLine`s for cheap list/aging queries, but only ever written by
+  `BillService` in the same transaction as the lines that justify them.
+  `status` is `DRAFT → APPROVED → PART_PAID → PAID`, or `VOID` — no
+  SENT/VIEWED equivalent, since a bill is received, not delivered.
+- `BillLine` — `accountId` is the expense/asset account debited on posting;
+  `taxCodeId` is optional. `lineAmount`/`taxAmount` are computed and stored
+  by `BillService` via `Money`/`decimal.js`, never floating point.
+- `SupplierPayment` — a payment made to a supplier. `paymentAccountId` is
+  the ASSET account credited on posting (a bank's own `glAccountId`);
+  `bankAccountId` is an optional informational link to Phase 2's
+  `BankAccount` for later reconciliation.
+- `SupplierPaymentAllocation` — how much of a `SupplierPayment` was applied
+  to a given `Bill`. The join that makes partial payments and
+  one-payment-to-many-bills both work. A bill's "amount paid"/"outstanding"
+  is never a denormalized column — it's computed fresh from this table's
+  rows every time (`BillService.loadAllocatedTotal`), so it can't drift.
+- `TaxCode.receivableAccountId` (added in this slice) — the asset account
+  tax paid under a code (input tax credit, e.g. "GST Receivable") is
+  debited to on a posted bill. The purchase-side mirror of
+  `payableAccountId`; a tax code can carry both fields at once. Nullable
+  for the same reason `payableAccountId` is; `BillService` rejects posting
+  a line whose tax code has none configured.
+
+A `Bill`'s only path to the ledger is `BillService.approveAndPost` (debit
+expense/asset + tax receivable, credit AP) and `BillService.voidBill` (a
+full reversal of that same entry) — both go through `PostingService`, never
+a direct `journal_lines` write. Same for
+`SupplierPaymentAllocationService.recordPayment` (debit AP, credit payment
+account).
+
 ## 3. Row-Level Security
 
 Every tenant table gets an RLS policy of the shape:

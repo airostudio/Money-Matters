@@ -4,12 +4,13 @@ The financial operating system for business — an AI-assisted accounting
 platform combining accounting, banking, payroll, tax, billing, expenses,
 inventory, projects, and forecasting in one product.
 
-Phase 1 (Financial Foundation) and Phase 2 Slice 1 (bank import,
-reconciliation, bank rules) are complete; Phase 3 Slice 1 (customer
-invoicing & AR core — invoices, payments, aged receivables) is the most
-recently completed slice. See [`docs/roadmap.md`](docs/roadmap.md) for the
-full phase-by-phase status and [`docs/architecture.md`](docs/architecture.md)
-for how it's put together.
+Phase 1 (Financial Foundation), Phase 2 Slice 1 (bank import,
+reconciliation, bank rules), and Phase 3 Slice 1 (customer invoicing & AR
+core — invoices, payments, aged receivables) are complete; Phase 4 Slice 1
+(suppliers & Accounts Payable core — bills, supplier payments, aged
+payables) is the most recently completed slice. See
+[`docs/roadmap.md`](docs/roadmap.md) for the full phase-by-phase status and
+[`docs/architecture.md`](docs/architecture.md) for how it's put together.
 
 ## Stack
 

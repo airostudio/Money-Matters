@@ -211,10 +211,90 @@ before this shipped.
 Quotes, recurring/progress/milestone invoicing, customer portal, smart debt
 collection.
 
-## Phase 4 — Purchases (not started)
+## Phase 4 — Purchases (in progress)
 
-Suppliers, purchase orders, bills, three-way matching, AP, payment runs,
-approval engine.
+### Slice 1 — Suppliers & Accounts Payable core — **complete**
+
+- [x] Schema: `bills`, `bill_lines`, `supplier_payments`,
+      `supplier_payment_allocations` (plus a `receivable_account_id` column
+      added to `tax_codes`, the input-tax-credit mirror of Phase 3's
+      `payable_account_id`), each RLS-enabled and FORCEd, `mm_app`-granted
+      (verified by the `db:migrate` tenant-isolation audit — 24 of 28 tables
+      now organization-scoped). Suppliers are not a new table: `contacts`
+      already carried a `kind` enum (`CUSTOMER`/`SUPPLIER`/`BOTH`) from
+      Phase 1, so this slice reuses `ContactService` and its RLS as-is,
+      exactly the way Phase 3 reused it for customers
+- [x] `BillService` (`src/domain/purchases/bill-service.ts`, the mirror of
+      `src/domain/sales/invoice-service.ts`): create/edit/delete a draft
+      bill with computed line/tax/subtotal/total (never floating point —
+      `src/domain/purchases/bill-calculations.ts`); approve-and-post debits
+      each line's expense/asset account plus each tax code's *receivable*
+      (input tax credit) account and credits the bill's AP control account,
+      all through `PostingService.postJournal` — never a direct
+      `journal_lines` write; void reverses the posting journal via
+      `PostingService.reverseEntry` rather than editing the original
+      (refused while any payment is still allocated)
+- [x] `SupplierPaymentAllocationService`
+      (`src/domain/purchases/supplier-payment-service.ts`): records a
+      payment made to a supplier and allocates it across one or more bills
+      in one transaction, posts the ledger effect (debit each allocated
+      bill's AP account, credit the payment account) via `PostingService`,
+      and recomputes each bill's PART_PAID/PAID status from
+      `supplier_payment_allocations` (never a denormalized counter).
+      Enforces explicitly: an allocation can never exceed its bill's
+      outstanding balance, and a payment's allocations can never exceed the
+      payment's own amount
+- [x] `AgedPayablesService` (`src/domain/purchases/aged-payables-service.ts`):
+      current/1-30/31-60/61-90/90+ buckets per supplier per master spec
+      §32/§16, computed from `dueDate` and live allocation totals — the
+      mirror of `AgedReceivablesService`
+- [x] New permissions: `supplier_bill:read/manage/post/void`,
+      `supplier_payment:read/manage`, wired into the existing
+      `ROLE_PERMISSIONS` matrix (ACCOUNTS_PAYABLE gets full access, matching
+      its name; MANAGER/READ_ONLY get read-only)
+- [x] `AuditService` wired into every bill/payment mutation
+- [x] UI under `/[orgSlug]/purchases` (replacing the Phase-1 "coming soon"
+      placeholder): dashboard, bill list (status filter) and
+      create/edit/detail (post/void/record-payment actions), a minimal
+      suppliers list/create/detail (reusing the Contacts/`ContactService`
+      infrastructure Phase 3 built, not a parallel CRM), Aged Payables
+      report with drill-down links to bills — added to the role-aware nav
+      under "Purchases" per master spec §59. The Tax Codes page gained a
+      "receivable account" field alongside Phase 3's "payable account"
+      field, required before a tax code can be used on a bill line
+- [x] Tests: unit (`src/tests/unit/purchases/bill-calculations.test.ts` — 11
+      cases incl. Decimal-exact tax rounding, mirroring the invoice
+      calculation tests), property-based (`src/tests/property/purchases/*`
+      — every approved bill's journal balances; payment allocation
+      accept/reject always matches the arithmetic truth), integration
+      (`src/tests/integration/purchases/bill-and-payments.test.ts` — 12
+      cases: draft → approve/post → trial balance reflects it →
+      full/partial payment → status updates → multi-bill allocation →
+      void/credit-note path → double-post rejected → over-allocation
+      rejected), and a tenant-isolation case added to the existing suite
+- [x] `npm run typecheck`, `npm run lint`, `npm test` (240 tests) and
+      `npm run build` all pass; smoke-tested end-to-end against a real
+      local Postgres and a running production server (`next start`) driven
+      via raw HTTP (React Server Action form submissions, not a browser —
+      same approach as Phase 3 Slice 1's smoke test): register → add a
+      chart-of-accounts (expense, AP liability, bank asset, GST receivable)
+      and a tax code with a receivable account → add a supplier → create a
+      draft bill with a taxed line → approve & post it → Trial Balance
+      reflects the debit/credit exactly (expense $1,000 dr, GST receivable
+      $100 dr, AP $1,100 cr) → record a full payment → bill status becomes
+      PAID and AP/bank balances update → a second bill's void correctly
+      reverses its journal and AP returns to $0.00 → Aged Payables correctly
+      shows nothing outstanding once both bills are settled
+- Deferred to later Purchases slices (explicitly out of scope for this
+  one, per master spec §82): purchase orders, goods-received matching,
+  three-way PO/receipt/invoice matching, recurring bills, supplier credits,
+  scheduled/batch payment runs, segregation-of-duties approval workflow for
+  payments (creator ≠ approver), document/receipt capture (OCR)
+
+### Slice 2 — not started
+Purchase orders, goods-received matching, three-way matching, recurring
+bills, supplier credits, batch payment runs, payment approval workflow,
+document/receipt capture.
 
 ## Phase 5 — Reporting (not started)
 

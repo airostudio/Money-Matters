@@ -125,7 +125,9 @@ entry with `reversalOfId` set → mark the original `reversedById` → audit.
   "request override / approve override" workflow is Phase 9 (Close).
 - Sub-ledger reconciliation to control accounts — implemented for AR in
   Phase 3 Slice 1 (`src/domain/sales/invoice-service.ts`,
-  `src/domain/sales/payment-service.ts`): every invoice/payment posting
-  goes through this same `PostingService`, so an invoice's AR control
-  account balance is always exactly the sum of its own postings, never a
-  parallel ledger. The AP side (Phase 4) is still unbuilt.
+  `src/domain/sales/payment-service.ts`) and for AP in Phase 4 Slice 1
+  (`src/domain/purchases/bill-service.ts`,
+  `src/domain/purchases/supplier-payment-service.ts`): every invoice/bill
+  and payment posting goes through this same `PostingService`, so an
+  invoice's AR (or a bill's AP) control account balance is always exactly
+  the sum of its own postings, never a parallel ledger.
