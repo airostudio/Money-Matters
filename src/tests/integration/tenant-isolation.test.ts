@@ -31,6 +31,7 @@ import { SupplierCreditService } from "@/domain/purchases/supplier-credit-servic
 import { PaymentRunService } from "@/domain/purchases/payment-run-service";
 import { ExpenseClaimService } from "@/domain/expenses/expense-claim-service";
 import { createExpenseFixtures } from "../helpers/expenses";
+import { ReportingService } from "@/domain/reporting/reporting-service";
 
 /**
  * Master spec §48 / §87 non-negotiable #7: "A coding mistake must not allow
@@ -352,6 +353,35 @@ describe("Tenant isolation", () => {
 
     const rowsWithNoTenantContext = await db.select().from(recurringInvoiceTemplates);
     expect(rowsWithNoTenantContext).toHaveLength(0);
+  });
+
+  it("org B's financial statements never include org A's posted activity", async () => {
+    const fixturesA = await createSalesFixtures(orgA.owner, orgA.baseCurrency);
+    const invoiceA = await InvoiceService.create(orgA.owner, {
+      customerContactId: fixturesA.customerContactId,
+      issueDate: new Date("2026-05-01"),
+      dueDate: new Date("2026-05-15"),
+      currency: "AUD",
+      arAccountId: fixturesA.arAccountId,
+      lines: [
+        { description: "Org A revenue", quantity: "1", unitPrice: "9999.00", accountId: fixturesA.revenueAccountId },
+      ],
+    });
+    await InvoiceService.approveAndPost(orgA.owner, invoiceA.id);
+
+    const orgBPnl = await ReportingService.getProfitAndLoss(orgB.owner, {
+      from: new Date("2026-05-01"),
+      to: new Date("2026-05-31"),
+    });
+    expect(orgBPnl.totalRevenue).toBe("0.0000");
+
+    const orgBBalanceSheet = await ReportingService.getBalanceSheet(orgB.owner, new Date("2026-05-31"));
+    expect(orgBBalanceSheet.assets.some((l) => l.accountId === fixturesA.arAccountId)).toBe(false);
+
+    // Even a drill-down request for org A's own account, made as org B,
+    // finds nothing — the account itself doesn't resolve cross-tenant.
+    const crossTenantAccount = await ReportingService.getAccount(orgB.owner, fixturesA.arAccountId);
+    expect(crossTenantAccount).toBeNull();
   });
 
   it("RLS rejects an INSERT for an org other than the one scoped on the connection", async () => {

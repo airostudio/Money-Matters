@@ -692,11 +692,176 @@ procure-to-pay cycles a real small business needs, which is what makes
 meaningful financial reporting (P&L, balance sheet, cash flow, aged
 schedules across both AR and AP) worth building next rather than earlier.
 
-## Phase 5 — Reporting (not started)
+## Phase 5 — Reporting (in progress)
 
-Financial statements (P&L, Balance Sheet, Cash Flow), dimensional reporting,
-report builder, natural-language reporting (structured-query path, not
-free-text LLM math), management report packs.
+### Slice 1 — Core financial statements — **complete**
+
+- [x] Shared aggregation query (`src/domain/ledger/gl-aggregation.ts`,
+      `sumPostedActivityByAccount`): every account's posted (non-DRAFT)
+      debit/credit activity over an optional date range, extracted from
+      `LedgerService.getTrialBalance`'s own query (refactored to call it,
+      output unchanged) so the Trial Balance and every Phase 5 report share
+      one query instead of four near-duplicates — see
+      `docs/accounting-engine.md` §8a. Structured so a future dimension
+      filter (master spec §4; `journal_line_dimensions` already exists in
+      the schema from Phase 1, unused by reporting yet — Slice 2) is one
+      more clause here, not a rewrite.
+- [x] **Profit & Loss** (`ReportingService.getProfitAndLoss`,
+      `buildProfitAndLoss` in `src/domain/reporting/financial-statements.ts`):
+      revenue/expense accounts for a selected date range, grouped with Total
+      Revenue/Total Expenses/Net Profit subtotals, plus an optional
+      comparison period (default: previous calendar month, also selectable
+      as "same period last year" or none —
+      `src/domain/reporting/period-presets.ts`) with a per-line variance
+      column. Reflects only posted, non-draft, non-void journal lines.
+- [x] **Balance Sheet** (`ReportingService.getBalanceSheet`,
+      `buildBalanceSheet`): assets/liabilities/equity as of a selected date,
+      with the fundamental accounting equation (Assets = Liabilities +
+      Equity) explicitly verified and displayed — a green/red banner, not
+      just cosmetic totals — plus an optional comparison as-of date. Since
+      there is still no period-close process in this codebase, cumulative
+      net profit is carried as two computed equity lines ("Retained
+      Earnings (prior periods)" and "Current Year Earnings", split at the
+      calendar year boundary) rather than a real closed Retained Earnings
+      balance — the extended accounting equation this relies on, and why
+      the split holds by construction, is written up in
+      `docs/accounting-engine.md` §8b.
+- [x] **Cash Flow Statement** (`ReportingService.getCashFlowStatement`,
+      `buildCashFlowStatement`): indirect method, starting from the P&L's
+      own Net Profit and adjusting for the period's change in every
+      non-cash balance-sheet account, classified Operating/Investing/
+      Financing (`classifyNonCashAccount`). Cash accounts are identified via
+      `bank_accounts.glAccountId` (the same explicit link Phase 2's banking
+      module already uses), never a free-text guess. Why the indirect
+      method and not the direct method (this codebase has no
+      transaction-level cash-vs-non-cash tagging), the classification rules,
+      and the algebraic identity that guarantees the statement's own
+      `reconciles` check always passes for a correctly posted ledger, are
+      all written up in `docs/accounting-engine.md` §8c.
+- [x] **Drill-down** (master spec §32: "Revenue → Account → Transaction →
+      Invoice → Source Document"): every report line links to a new
+      `/[orgSlug]/accounting/accounts/[accountId]/transactions` page
+      (`ReportingService.getAccountTransactions`) listing that account's
+      posted lines in range, each resolved to its source document (invoice/
+      bill/supplier credit note/expense claim, by reverse `journalEntryId`
+      lookup — `resolveSourceDocument`) with a link through to that
+      document's existing detail page. The existing Trial Balance report
+      and the Journal Entry detail page (which now also shows its own
+      source-document link, via `getSourceDocumentForJournalEntry`) were
+      both extended to link into this same drill-down page — see
+      `docs/accounting-engine.md` §8d for the exact reverse-lookup tables
+      and why `CUSTOMER_PAYMENT`/`SUPPLIER_PAYMENT` render as a label with
+      no link (no dedicated payment detail page exists yet).
+- [x] **CSV export** (`src/domain/reporting/csv-export.ts`, one export route
+      handler per report under `.../export`): a plain, dependency-free CSV
+      of exactly what the page shows, decimal strings never reformatted
+      through a float. PDF/Excel export and the full report builder are
+      explicitly Slice 2 (see below) — CSV was judged worth including as a
+      low-effort baseline; the others are not.
+- [x] New permission `financial_report:read`, gated **more narrowly** than
+      Trial Balance's `journal:read` (OWNER/ADMINISTRATOR always; ACCOUNTANT/
+      BOOKKEEPER/MANAGER/READ_ONLY explicitly granted; deliberately **not**
+      granted to ACCOUNTS_PAYABLE/ACCOUNTS_RECEIVABLE/PAYROLL_MANAGER/
+      EMPLOYEE) — a documented, deliberate divergence from Trial Balance's
+      sensitivity level: the three new reports reveal whole-of-organization
+      profitability and balance-sheet position, which is more sensitive than
+      a subledger role's day-to-day AR/AP/payroll transaction access. The
+      account-transactions drill-down page and the Journal Entry detail
+      page's source-document link are gated on the existing, broader
+      `journal:read` instead (see `docs/accounting-engine.md` §8d for why).
+- [x] `AuditService` is **not** wired into this slice — every new service
+      method is read-only (`assertPermission` then a `SELECT`-only
+      `withTenant` block, never a write), so there is nothing to audit; this
+      is intentional, not an oversight.
+- [x] UI: `/[orgSlug]/accounting/reports/{profit-and-loss,balance-sheet,
+      cash-flow}`, each with a date-range/comparison picker and an Export
+      CSV button, added to the role-aware nav under "Accounting" alongside
+      Trial Balance; the drill-down page at
+      `/[orgSlug]/accounting/accounts/[accountId]/transactions`, reachable
+      from every report line, Trial Balance, and (for its own account
+      balances) nowhere else yet.
+- [x] Tests: unit (`src/tests/unit/reporting/financial-statements.test.ts` —
+      16 cases: P&L subtotals/comparison/variance with hand-computed
+      numbers, Balance Sheet equation verification (balanced and
+      deliberately unbalanced inputs), `classifyNonCashAccount` for every
+      type/subtype combination, indirect-method cash flow reconciliation
+      incl. a deliberately-broken reconciliation case; plus
+      `period-presets.test.ts` — 6 cases incl. December→January rollback and
+      a leap-year February; `csv-export.test.ts` — 2 cases incl. comma
+      escaping), property-based
+      (`src/tests/property/reporting/balance-sheet-invariant.property.test.ts`
+      — for any sequence of random balanced postings across
+      ASSET/LIABILITY/EQUITY/REVENUE/EXPENSE accounts, posted through the
+      real `PostingService` against a real Postgres instance, the resulting
+      `ReportingService.getBalanceSheet` always balances exactly — the
+      double-entry invariant already proven at the posting layer, proven
+      again end-to-end through the reporting layer), integration
+      (`src/tests/integration/reporting/financial-statements.test.ts` —
+      posts a hand-computable mix of invoices, bills, and an expense claim
+      across January/February 2026 through a single shared bank account,
+      then verifies the P&L's Feb-vs-Jan revenue/expense/net-profit figures,
+      the Balance Sheet's exact AR/AP/equity balances and its balanced
+      check, and the Cash Flow Statement's reconciliation against the
+      actual bank account balance move — all by hand-computed expectation,
+      not just "a number came back"; plus a drill-down case confirming an
+      account transaction resolves to its real source invoice), and a new
+      tenant-isolation case (`src/tests/integration/tenant-isolation.test.ts`)
+      confirming org B's reports and drill-down never include org A's
+      posted activity or accounts
+- [x] `npm run typecheck`, `npm run lint`, `npm test` (403 tests) and
+      `npm run build` all pass; smoke-tested against a real local Postgres
+      and a running production server (`next start`): registered a real
+      user via `UserService`/`OrganizationService`, posted the same
+      Jan/Feb invoice/bill/expense-claim mix as the integration test
+      directly through the domain services (confirming the real dev
+      database, not just the isolated test database, produces the same
+      hand-verified figures: Feb Net Profit $6,390.00, Balance Sheet
+      balanced at $30,690.00 both sides, Cash Flow net change -$3,960.00
+      reconciling exactly to the bank account's actual balance move from
+      $25,500.00 to $21,540.00), then logged in via the real NextAuth
+      credentials flow (cookie-based session, not a bypass) and confirmed
+      over HTTP: the Profit & Loss, Balance Sheet, and Cash Flow pages each
+      return HTTP 200 with those exact figures rendered ("$6,390.00" net
+      profit, "$30,690.00" balanced total, "($3,960.00)" net change, all
+      literally present in the response HTML); the CSV export endpoint
+      returns the same Feb-vs-Jan P&L numbers as CSV rows; the
+      account-transactions drill-down page for the revenue account renders
+      a link through to the real source invoice ("Invoice INV-000002"); and
+      the Journal Entry detail page for that invoice's posting shows the
+      same source-document link and the correct AR $8,800.00 debit /
+      Revenue $8,000.00 credit / GST Payable $800.00 credit lines. A full
+      browser click-through was not additionally performed in this
+      environment, matching prior slices' documented smoke-test scope.
+- **Deferred to Slice 2, explicitly, with reasons:**
+  - **Dimensional reporting** (slicing any report by the `dimensions`/
+    `dimension_values`/`journal_line_dimensions` tables Phase 1 already
+    schema'd) — this slice's aggregation query is deliberately structured so
+    adding a dimension filter is one more join/`and()` clause, not a
+    rewrite, but actually exposing it as a UI filter is real, separate
+    scope (which dimension, which values, how it composes with a
+    comparison period) better done once the core statements exist to slice.
+  - **Report builder** (a general "pick accounts/columns/filters and save a
+    custom report" tool) — needs its own data model (saved report
+    definitions) and UI, and is explicitly the next thing to build *on top
+    of* this slice's reporting data model per the master spec's own
+    phrasing, not alongside it.
+  - **Natural-language reporting** (a structured-query path from a plain-
+    English question to one of these reports/a report-builder query — never
+    free-text LLM arithmetic on money, per docs/ai-agents.md's existing
+    non-negotiables) — depends on the report builder's query representation
+    existing first; there is nothing yet for an NL layer to translate into.
+  - **Management report packs** (bundling multiple reports with commentary
+    into one shareable document) — a packaging feature over reports that,
+    before this slice, didn't exist yet to package.
+  - **PDF/Excel export** — CSV was judged a reasonable low-effort baseline
+    for this slice; a formatted PDF/Excel export is more UI/formatting work
+    than this slice's scope justified, and fits naturally alongside the
+    report builder in Slice 2.
+  - **A configurable fiscal-year start** — the Balance Sheet's Retained
+    Earnings/Current Year Earnings split currently assumes a calendar-year
+    fiscal year (see `docs/accounting-engine.md` §8b); a true
+    organization-level setting belongs with Phase 9's period-lock/close
+    workflow, which is where fiscal-year semantics get defined properly.
 
 ## Phase 6 — AI (not started)
 

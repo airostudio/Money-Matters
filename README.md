@@ -12,14 +12,20 @@ deterministic Collection Priority Score), and Phase 4 (purchases —
 supplier bills & Accounts Payable core plus purchase orders with
 three-way matching, recurring bills, supplier credits, and payment runs
 with segregation-of-duties approval) are all complete, each as a core
-slice plus one extension slice. See [`docs/roadmap.md`](docs/roadmap.md)
-for exactly what's built vs. explicitly deferred in each (a customer
-portal, AI-drafted collection reminders, a live bank feed provider,
-Stripe, a background job queue, a Redis cache, real bank-file/payment-rail
-integration, and full inventory-backed goods receiving all need either
-infrastructure that doesn't exist yet or external accounts/credentials
-this environment doesn't have). Phase 5 (Reporting) is next. See
-[`docs/architecture.md`](docs/architecture.md) for how it's put together.
+slice plus one extension slice, and Phase 5 (Reporting) has its first
+slice — Profit & Loss, Balance Sheet, and a Cash Flow Statement (indirect
+method), each with comparison periods, CSV export, and drill-down from
+every line down to its source invoice/bill/expense claim. See
+[`docs/roadmap.md`](docs/roadmap.md) for exactly what's built vs.
+explicitly deferred in each (a customer portal, AI-drafted collection
+reminders, a live bank feed provider, Stripe, a background job queue, a
+Redis cache, real bank-file/payment-rail integration, full
+inventory-backed goods receiving, and dimensional reporting/report
+builder/natural-language reporting/management report packs all need
+either infrastructure that doesn't exist yet, external accounts/
+credentials this environment doesn't have, or are next up on top of what's
+built so far). See [`docs/architecture.md`](docs/architecture.md) for how
+it's put together.
 
 ## Stack
 
