@@ -3,16 +3,34 @@ import { closeDatabase, db } from "@/db/client";
 import { users } from "@/db/schema";
 import { OrganizationService } from "@/domain/organizations/organization-service";
 import type { Actor } from "@/domain/permissions/permission-service";
+import type { MembershipRole } from "@/domain/permissions/roles";
 
 const TENANT_TABLES = [
   "audit_logs",
   "expense_claim_lines",
   "expense_claims",
   "uploaded_receipts",
+  "payment_run_items",
+  "payment_runs",
+  "supplier_credit_allocations",
+  "supplier_credit_note_lines",
+  "supplier_credit_notes",
+  "bill_recurring_source",
+  "recurring_bill_template_lines",
+  "recurring_bill_templates",
+  "purchase_order_receipt_lines",
+  "purchase_order_receipts",
+  "purchase_order_lines",
+  "purchase_orders",
   "supplier_payment_allocations",
   "supplier_payments",
   "bill_lines",
   "bills",
+  "invoice_recurring_source",
+  "recurring_invoice_template_lines",
+  "recurring_invoice_templates",
+  "quote_lines",
+  "quotes",
   "payment_allocations",
   "payments",
   "invoice_lines",
@@ -85,4 +103,16 @@ export async function createTestOrg(
 
 export function actorWithRole(actor: Actor, role: Actor["role"]): Actor {
   return { ...actor, role };
+}
+
+/**
+ * Adds a second, distinct user as a member of the same organization as
+ * `ownerActor` and returns a ready-to-use Actor for them — for tests that
+ * need two genuinely different users in one org, e.g. payment run
+ * segregation of duties (creator ≠ approver).
+ */
+export async function addTestMember(ownerActor: Actor, role: MembershipRole, namePrefix = "Member"): Promise<Actor> {
+  const user = await createTestUser(namePrefix);
+  await OrganizationService.addMemberByEmail(ownerActor, user.email, role);
+  return { userId: user.id, organizationId: ownerActor.organizationId, role };
 }

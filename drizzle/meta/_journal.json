@@ -92,6 +92,20 @@
       "when": 1790208133048,
       "tag": "0012_sales_slice2_row_level_security",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1790210091412,
+      "tag": "0013_purchases_slice2_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1790210091413,
+      "tag": "0014_purchases_slice2_row_level_security",
+      "breakpoints": true
     }
   ]
 }

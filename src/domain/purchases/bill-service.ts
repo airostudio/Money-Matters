@@ -27,7 +27,7 @@ import {
 import { calculateBillTotals } from "./bill-calculations";
 import { nextBillNumber } from "./numbering";
 import type { CreateBillInput, UpdateBillInput } from "./types";
-import { supplierPaymentAllocations } from "@/db/schema";
+import { supplierCreditAllocations, supplierPaymentAllocations } from "@/db/schema";
 
 type BillStatus = (typeof billStatusEnum.enumValues)[number];
 
@@ -81,15 +81,34 @@ async function loadBillOr404(tx: TenantDb, organizationId: string, billId: strin
   return bill;
 }
 
-/** Sum of everything ever allocated against this bill — the source of truth for "outstanding", never a denormalized counter. */
+/**
+ * Sum of everything ever allocated against this bill — the source of truth
+ * for "outstanding", never a denormalized counter. Combines cash payment
+ * allocations (`supplier_payment_allocations`) *and* supplier credit
+ * allocations (`supplier_credit_allocations`, Phase 4 Slice 2): both reduce
+ * what's owed identically, so anything that needs "how much of this bill is
+ * settled" must look at both, not just payments — otherwise a credit and a
+ * payment could independently believe there's still balance to allocate and
+ * together over-allocate past the bill's total.
+ */
 export async function loadAllocatedTotal(tx: TenantDb, organizationId: string, billId: string): Promise<string> {
-  const rows = await tx
-    .select({ amount: supplierPaymentAllocations.amount })
-    .from(supplierPaymentAllocations)
-    .where(and(eq(supplierPaymentAllocations.organizationId, organizationId), eq(supplierPaymentAllocations.billId, billId)));
   const [bill] = await tx.select({ currency: bills.currency }).from(bills).where(eq(bills.id, billId));
   const currency = bill?.currency ?? "AUD";
-  return rows.reduce((sum, r) => sum.add(Money.of(r.amount, currency)), Money.zero(currency)).toString();
+
+  const [paymentRows, creditRows] = await Promise.all([
+    tx
+      .select({ amount: supplierPaymentAllocations.amount })
+      .from(supplierPaymentAllocations)
+      .where(and(eq(supplierPaymentAllocations.organizationId, organizationId), eq(supplierPaymentAllocations.billId, billId))),
+    tx
+      .select({ amount: supplierCreditAllocations.amount })
+      .from(supplierCreditAllocations)
+      .where(and(eq(supplierCreditAllocations.organizationId, organizationId), eq(supplierCreditAllocations.billId, billId))),
+  ]);
+
+  return [...paymentRows, ...creditRows]
+    .reduce((sum, r) => sum.add(Money.of(r.amount, currency)), Money.zero(currency))
+    .toString();
 }
 
 async function persistBillWithLines(
@@ -129,6 +148,7 @@ async function persistBillWithLines(
         total: totals.total,
         updatedById: actor.userId,
         updatedAt: new Date(),
+        // purchaseOrderId is set once at creation (see below) and never re-pointed by an edit.
       })
       .where(eq(bills.id, existingId))
       .returning({ id: bills.id, billNumber: bills.billNumber });
@@ -154,6 +174,7 @@ async function persistBillWithLines(
         subtotal: totals.subtotal,
         taxTotal: totals.taxTotal,
         total: totals.total,
+        purchaseOrderId: input.purchaseOrderId ?? null,
         createdById: actor.userId,
         updatedById: actor.userId,
       })
@@ -174,6 +195,7 @@ async function persistBillWithLines(
       taxCodeId: line.taxCodeId,
       lineAmount: line.lineAmount,
       taxAmount: line.taxAmount,
+      receiptId: input.lines[i]?.receiptId ?? null,
     })),
   );
 

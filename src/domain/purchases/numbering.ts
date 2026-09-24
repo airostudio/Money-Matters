@@ -1,5 +1,5 @@
 import { sql, eq } from "drizzle-orm";
-import { bills } from "@/db/schema";
+import { bills, paymentRuns, purchaseOrders, supplierCreditNotes } from "@/db/schema";
 import type { TenantDb } from "@/db/tenant";
 
 /**
@@ -17,4 +17,37 @@ export async function nextBillNumber(tx: TenantDb, organizationId: string): Prom
 
   const count = row?.count ?? 0;
   return `BILL-${String(count + 1).padStart(6, "0")}`;
+}
+
+/** Sequential per-organization purchase order numbers, e.g. "PO-000123" — same approach and caveat as `nextBillNumber`. */
+export async function nextPurchaseOrderNumber(tx: TenantDb, organizationId: string): Promise<string> {
+  const [row] = await tx
+    .select({ count: sql<number>`count(*)::int` })
+    .from(purchaseOrders)
+    .where(eq(purchaseOrders.organizationId, organizationId));
+
+  const count = row?.count ?? 0;
+  return `PO-${String(count + 1).padStart(6, "0")}`;
+}
+
+/** Sequential per-organization supplier credit note numbers, e.g. "SCN-000123". */
+export async function nextSupplierCreditNumber(tx: TenantDb, organizationId: string): Promise<string> {
+  const [row] = await tx
+    .select({ count: sql<number>`count(*)::int` })
+    .from(supplierCreditNotes)
+    .where(eq(supplierCreditNotes.organizationId, organizationId));
+
+  const count = row?.count ?? 0;
+  return `SCN-${String(count + 1).padStart(6, "0")}`;
+}
+
+/** Sequential per-organization payment run numbers, e.g. "RUN-000123". */
+export async function nextPaymentRunNumber(tx: TenantDb, organizationId: string): Promise<string> {
+  const [row] = await tx
+    .select({ count: sql<number>`count(*)::int` })
+    .from(paymentRuns)
+    .where(eq(paymentRuns.organizationId, organizationId));
+
+  const count = row?.count ?? 0;
+  return `RUN-${String(count + 1).padStart(6, "0")}`;
 }

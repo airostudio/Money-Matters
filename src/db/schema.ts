@@ -190,6 +190,65 @@ export const billStatusEnum = pgEnum("bill_status", [
 ]);
 
 /**
+ * Phase 4 Slice 2 (Purchases — purchase orders). A PO never touches the
+ * ledger — see `src/domain/purchases/purchase-order-service.ts` — so this is
+ * a pure workflow status, the purchase-side mirror of `quote_status`. `DRAFT`
+ * is fully editable. `SENT` is informational (sent to the supplier).
+ * `PARTIALLY_RECEIVED`/`RECEIVED` are derived from
+ * `purchase_order_lines.quantityReceived` vs. `quantity` and kept in sync by
+ * `PurchaseOrderReceiptService`, never a stored belief. `CLOSED` is a manual
+ * terminal state for a PO that won't receive any more goods (e.g. the
+ * supplier under-shipped and the rest was cancelled). `CANCELLED` means the
+ * PO was abandoned before any goods arrived.
+ */
+export const purchaseOrderStatusEnum = pgEnum("purchase_order_status", [
+  "DRAFT",
+  "SENT",
+  "PARTIALLY_RECEIVED",
+  "RECEIVED",
+  "CLOSED",
+  "CANCELLED",
+]);
+
+/**
+ * Phase 4 Slice 2 (Purchases — supplier credit notes), the mirror image of
+ * `bill_status`. A credit note posts the reverse of a bill (credit the
+ * expense/asset account, debit Accounts Payable) via `PostingService` on
+ * approval, then can be applied against one or more outstanding bills
+ * through `SupplierCreditService.applyToBill` — the mirror of
+ * `supplier_payment_allocations`, tracked in `supplier_credit_allocations`.
+ * PART_APPLIED/APPLIED are derived from those allocations, never a stored
+ * counter.
+ */
+export const supplierCreditStatusEnum = pgEnum("supplier_credit_status", [
+  "DRAFT",
+  "APPROVED",
+  "PART_APPLIED",
+  "APPLIED",
+  "VOID",
+]);
+
+/**
+ * Phase 4 Slice 2 (Purchases — payment runs). Segregation of duties (master
+ * spec §52) is enforced in `PaymentRunService`, not just this status column:
+ * DRAFT is the run being assembled by its creator; AWAITING_APPROVAL is
+ * submitted and waiting on a *different* user; APPROVED means a different
+ * user approved it and `PaymentRunService` has generated the underlying
+ * `supplier_payments` via `SupplierPaymentAllocationService`; PAID is
+ * reached immediately alongside APPROVED in this slice, since there is no
+ * real bank-file/payment-rail integration yet (see docs/roadmap.md) — the
+ * "payment" step records the payments in the ledger exactly like a manual
+ * supplier payment, just batched and approval-gated.
+ */
+export const paymentRunStatusEnum = pgEnum("payment_run_status", [
+  "DRAFT",
+  "AWAITING_APPROVAL",
+  "APPROVED",
+  "PAID",
+  "CANCELLED",
+]);
+
+/**
  * Phase 2 Slice 2 (expense management, master spec §19). `DRAFT` has no
  * ledger effect and is fully editable/deletable. `SUBMITTED` is a simple
  * single-approver gate (the tiered/segregated approval engine is Phase
@@ -1065,6 +1124,8 @@ export const bills = pgTable("bills", {
   subtotal: numeric("subtotal", { precision: 19, scale: 4 }).notNull().default("0"),
   taxTotal: numeric("tax_total", { precision: 19, scale: 4 }).notNull().default("0"),
   total: numeric("total", { precision: 19, scale: 4 }).notNull().default("0"),
+  /** Set once, when `PurchaseOrderService.convertToBill` creates this bill from a received PO. Never re-pointed. Null for a bill entered directly, the common case. */
+  purchaseOrderId: uuid("purchase_order_id").references((): AnyPgColumn => purchaseOrders.id),
   /** Set once, when `BillService.approveAndPost` posts the balanced journal. Never re-pointed. */
   journalEntryId: uuid("journal_entry_id").references((): AnyPgColumn => journalEntries.id),
   /** Set once, when `BillService.voidBill` reverses that journal — the original is never edited. */
@@ -1112,6 +1173,14 @@ export const billLines = pgTable("bill_lines", {
   taxCodeId: uuid("tax_code_id").references(() => taxCodes.id),
   lineAmount: numeric("line_amount", { precision: 19, scale: 4 }).notNull(),
   taxAmount: numeric("tax_amount", { precision: 19, scale: 4 }).notNull().default("0"),
+  /**
+   * Optional link to Phase 2 Slice 2's Document AI capture
+   * (`src/domain/documents/receipt-service.ts`), reused as-is for bill
+   * capture — the same "upload a photo/PDF, pre-fill an editable draft"
+   * flow expense claims already have, informational only, never a source of
+   * truth once a human has confirmed the line.
+   */
+  receiptId: uuid("receipt_id").references((): AnyPgColumn => uploadedReceipts.id),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   billLineUnique: uniqueIndex("bill_lines_bill_line_unique").on(table.billId, table.lineNumber),
@@ -1187,6 +1256,408 @@ export const supplierPaymentAllocations = pgTable("supplier_payment_allocations"
     table.organizationId,
     table.paymentId,
   ),
+}));
+
+// ---------------------------------------------------------------------------
+// Purchases (Phase 4 Slice 2) — purchase orders, three-way matching,
+// recurring bills, supplier credits, payment runs. See
+// src/domain/purchases/* and docs/roadmap.md for scope.
+// ---------------------------------------------------------------------------
+
+/**
+ * A purchase order — never posts to the ledger (see `purchase_order_status`
+ * above and `src/domain/purchases/purchase-order-service.ts`), the mirror of
+ * `quotes` on the buy side. `PurchaseOrderReceiptService` records deliveries
+ * against `purchase_order_lines.quantityReceived`; once every line is fully
+ * received the PO's own `status` advances to RECEIVED.
+ * `PurchaseOrderService.convertToBill` turns a received (or
+ * partially-received) PO into a normal draft `bills` row via
+ * `BillService.create`, comparing ordered/received/billed quantities and
+ * prices first (three-way match) and surfacing any mismatch to the human
+ * confirming the bill — never silently auto-accepting or auto-rejecting it.
+ */
+export const purchaseOrders = pgTable("purchase_orders", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  supplierContactId: uuid("supplier_contact_id")
+    .notNull()
+    .references(() => contacts.id),
+  poNumber: text("po_number").notNull(),
+  issueDate: timestamp("issue_date", { withTimezone: true, mode: "date" }).notNull(),
+  expectedDate: timestamp("expected_date", { withTimezone: true, mode: "date" }),
+  currency: text("currency").notNull(),
+  memo: text("memo"),
+  status: purchaseOrderStatusEnum("status").notNull().default("DRAFT"),
+  subtotal: numeric("subtotal", { precision: 19, scale: 4 }).notNull().default("0"),
+  taxTotal: numeric("tax_total", { precision: 19, scale: 4 }).notNull().default("0"),
+  total: numeric("total", { precision: 19, scale: 4 }).notNull().default("0"),
+  sentAt: timestamp("sent_at", { withTimezone: true }),
+  closedAt: timestamp("closed_at", { withTimezone: true }),
+  closedById: uuid("closed_by_id"),
+  cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+  cancelledById: uuid("cancelled_by_id"),
+  cancelReason: text("cancel_reason"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+  updatedById: uuid("updated_by_id"),
+}, (table) => ({
+  orgPoNumberUnique: uniqueIndex("purchase_orders_org_po_number_unique").on(
+    table.organizationId,
+    table.poNumber,
+  ),
+  orgStatusIdx: index("purchase_orders_org_status_idx").on(table.organizationId, table.status),
+  orgSupplierIdx: index("purchase_orders_org_supplier_idx").on(table.organizationId, table.supplierContactId),
+}));
+
+/**
+ * One line of a purchase order. `quantityReceived` is maintained only by
+ * `PurchaseOrderReceiptService.recordReceipt` (never edited directly) and is
+ * the source of truth the PO's own status and the three-way match are
+ * derived from — never a value trusted from the caller.
+ */
+export const purchaseOrderLines = pgTable("purchase_order_lines", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  purchaseOrderId: uuid("purchase_order_id")
+    .notNull()
+    .references(() => purchaseOrders.id, { onDelete: "cascade" }),
+  lineNumber: integer("line_number").notNull(),
+  description: text("description").notNull(),
+  quantity: numeric("quantity", { precision: 19, scale: 4 }).notNull(),
+  unitPrice: numeric("unit_price", { precision: 19, scale: 4 }).notNull(),
+  accountId: uuid("account_id")
+    .notNull()
+    .references(() => accounts.id),
+  taxCodeId: uuid("tax_code_id").references(() => taxCodes.id),
+  lineAmount: numeric("line_amount", { precision: 19, scale: 4 }).notNull(),
+  taxAmount: numeric("tax_amount", { precision: 19, scale: 4 }).notNull().default("0"),
+  quantityReceived: numeric("quantity_received", { precision: 19, scale: 4 }).notNull().default("0"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  poLineUnique: uniqueIndex("purchase_order_lines_po_line_unique").on(table.purchaseOrderId, table.lineNumber),
+  orgPoIdx: index("purchase_order_lines_org_po_idx").on(table.organizationId, table.purchaseOrderId),
+}));
+
+/**
+ * A goods-received event against a PO — deliberately lightweight (no
+ * warehouse/inventory location, no serial/lot tracking; that needs Phase 7's
+ * inventory system, see docs/roadmap.md). Recording a receipt only advances
+ * `purchase_order_lines.quantityReceived` and the PO's own status; it never
+ * posts to the ledger (there is no inventory asset account to debit without
+ * a real inventory module — the financial effect happens once, when the
+ * resulting bill is approved and posted).
+ */
+export const purchaseOrderReceipts = pgTable("purchase_order_receipts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  purchaseOrderId: uuid("purchase_order_id")
+    .notNull()
+    .references(() => purchaseOrders.id, { onDelete: "cascade" }),
+  receivedDate: timestamp("received_date", { withTimezone: true, mode: "date" }).notNull(),
+  memo: text("memo"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+}, (table) => ({
+  orgPoIdx: index("purchase_order_receipts_org_po_idx").on(table.organizationId, table.purchaseOrderId),
+}));
+
+/** How much of one PO line a given receipt event covered. */
+export const purchaseOrderReceiptLines = pgTable("purchase_order_receipt_lines", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  receiptId: uuid("receipt_id")
+    .notNull()
+    .references(() => purchaseOrderReceipts.id, { onDelete: "cascade" }),
+  purchaseOrderLineId: uuid("purchase_order_line_id")
+    .notNull()
+    .references(() => purchaseOrderLines.id),
+  quantityReceived: numeric("quantity_received", { precision: 19, scale: 4 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  orgReceiptIdx: index("purchase_order_receipt_lines_org_receipt_idx").on(table.organizationId, table.receiptId),
+}));
+
+/**
+ * A recurring bill template — the purchase-side mirror of
+ * `recurring_invoice_templates`; see
+ * `src/domain/purchases/recurring-bill-service.ts`. Reuses
+ * `recurring_frequency` and the same `advanceRecurringDate` pure function
+ * (`src/domain/sales/recurring-schedule.ts`) since the date-advancement math
+ * has nothing sales-specific about it.
+ */
+export const recurringBillTemplates = pgTable("recurring_bill_templates", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  supplierContactId: uuid("supplier_contact_id")
+    .notNull()
+    .references(() => contacts.id),
+  name: text("name").notNull(),
+  currency: text("currency").notNull(),
+  apAccountId: uuid("ap_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  memo: text("memo"),
+  frequency: recurringFrequencyEnum("frequency").notNull(),
+  startDate: timestamp("start_date", { withTimezone: true, mode: "date" }).notNull(),
+  endDate: timestamp("end_date", { withTimezone: true, mode: "date" }),
+  maxOccurrences: integer("max_occurrences"),
+  occurrencesGenerated: integer("occurrences_generated").notNull().default(0),
+  nextRunDate: timestamp("next_run_date", { withTimezone: true, mode: "date" }).notNull(),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+  updatedById: uuid("updated_by_id"),
+}, (table) => ({
+  orgActiveNextRunIdx: index("recurring_bill_templates_org_active_next_run_idx").on(
+    table.organizationId,
+    table.isActive,
+    table.nextRunDate,
+  ),
+  orgSupplierIdx: index("recurring_bill_templates_org_supplier_idx").on(
+    table.organizationId,
+    table.supplierContactId,
+  ),
+}));
+
+/** One line of a recurring bill template — copied verbatim onto each generated bill. */
+export const recurringBillTemplateLines = pgTable("recurring_bill_template_lines", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  templateId: uuid("template_id")
+    .notNull()
+    .references(() => recurringBillTemplates.id, { onDelete: "cascade" }),
+  lineNumber: integer("line_number").notNull(),
+  description: text("description").notNull(),
+  quantity: numeric("quantity", { precision: 19, scale: 4 }).notNull(),
+  unitPrice: numeric("unit_price", { precision: 19, scale: 4 }).notNull(),
+  accountId: uuid("account_id")
+    .notNull()
+    .references(() => accounts.id),
+  taxCodeId: uuid("tax_code_id").references(() => taxCodes.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  templateLineUnique: uniqueIndex("recurring_bill_template_lines_template_line_unique").on(
+    table.templateId,
+    table.lineNumber,
+  ),
+  orgTemplateIdx: index("recurring_bill_template_lines_org_template_idx").on(
+    table.organizationId,
+    table.templateId,
+  ),
+}));
+
+/** Traces a generated bill back to the recurring template that produced it — informational only, mirrors `invoice_recurring_source`. */
+export const billRecurringSource = pgTable("bill_recurring_source", {
+  billId: uuid("bill_id")
+    .primaryKey()
+    .references(() => bills.id, { onDelete: "cascade" }),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  templateId: uuid("template_id")
+    .notNull()
+    .references(() => recurringBillTemplates.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  orgTemplateIdx: index("bill_recurring_source_org_template_idx").on(table.organizationId, table.templateId),
+}));
+
+/**
+ * A supplier credit note — a reduction in what's owed to a supplier (a
+ * return, a pricing correction). Shaped like `bills` so
+ * `SupplierCreditService` can reuse `calculateBillTotals` verbatim; on
+ * approval it posts the mirror image of a bill (credit the expense/asset
+ * account, debit Accounts Payable) via `PostingService`, then can be applied
+ * against outstanding bills — recorded in `supplier_credit_allocations`,
+ * which reduces those bills' balances exactly like a cash payment would.
+ */
+export const supplierCreditNotes = pgTable("supplier_credit_notes", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  supplierContactId: uuid("supplier_contact_id")
+    .notNull()
+    .references(() => contacts.id),
+  creditNoteNumber: text("credit_note_number").notNull(),
+  issueDate: timestamp("issue_date", { withTimezone: true, mode: "date" }).notNull(),
+  currency: text("currency").notNull(),
+  memo: text("memo"),
+  apAccountId: uuid("ap_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  status: supplierCreditStatusEnum("status").notNull().default("DRAFT"),
+  subtotal: numeric("subtotal", { precision: 19, scale: 4 }).notNull().default("0"),
+  taxTotal: numeric("tax_total", { precision: 19, scale: 4 }).notNull().default("0"),
+  total: numeric("total", { precision: 19, scale: 4 }).notNull().default("0"),
+  journalEntryId: uuid("journal_entry_id").references((): AnyPgColumn => journalEntries.id),
+  voidJournalEntryId: uuid("void_journal_entry_id").references((): AnyPgColumn => journalEntries.id),
+  postedAt: timestamp("posted_at", { withTimezone: true }),
+  postedById: uuid("posted_by_id"),
+  voidedAt: timestamp("voided_at", { withTimezone: true }),
+  voidedById: uuid("voided_by_id"),
+  voidReason: text("void_reason"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+  updatedById: uuid("updated_by_id"),
+}, (table) => ({
+  orgCreditNumberUnique: uniqueIndex("supplier_credit_notes_org_number_unique").on(
+    table.organizationId,
+    table.creditNoteNumber,
+  ),
+  orgStatusIdx: index("supplier_credit_notes_org_status_idx").on(table.organizationId, table.status),
+  orgSupplierIdx: index("supplier_credit_notes_org_supplier_idx").on(table.organizationId, table.supplierContactId),
+}));
+
+/** One line of a supplier credit note — same shape as `bill_lines`. */
+export const supplierCreditNoteLines = pgTable("supplier_credit_note_lines", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  creditNoteId: uuid("credit_note_id")
+    .notNull()
+    .references(() => supplierCreditNotes.id, { onDelete: "cascade" }),
+  lineNumber: integer("line_number").notNull(),
+  description: text("description").notNull(),
+  quantity: numeric("quantity", { precision: 19, scale: 4 }).notNull(),
+  unitPrice: numeric("unit_price", { precision: 19, scale: 4 }).notNull(),
+  accountId: uuid("account_id")
+    .notNull()
+    .references(() => accounts.id),
+  taxCodeId: uuid("tax_code_id").references(() => taxCodes.id),
+  lineAmount: numeric("line_amount", { precision: 19, scale: 4 }).notNull(),
+  taxAmount: numeric("tax_amount", { precision: 19, scale: 4 }).notNull().default("0"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  creditLineUnique: uniqueIndex("supplier_credit_note_lines_credit_line_unique").on(
+    table.creditNoteId,
+    table.lineNumber,
+  ),
+  orgCreditIdx: index("supplier_credit_note_lines_org_credit_idx").on(table.organizationId, table.creditNoteId),
+}));
+
+/**
+ * How much of a `supplier_credit_note` was applied against a given `bill` —
+ * the mirror of `supplier_payment_allocations`, but the credit applies
+ * directly to a bill rather than through a payment. `SupplierCreditService`
+ * is the only writer and enforces the same invariants: an allocation never
+ * exceeds the credit note's own remaining balance, nor the bill's
+ * outstanding balance.
+ */
+export const supplierCreditAllocations = pgTable("supplier_credit_allocations", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  creditNoteId: uuid("credit_note_id")
+    .notNull()
+    .references(() => supplierCreditNotes.id, { onDelete: "cascade" }),
+  billId: uuid("bill_id")
+    .notNull()
+    .references(() => bills.id),
+  amount: numeric("amount", { precision: 19, scale: 4 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+}, (table) => ({
+  creditBillUnique: uniqueIndex("supplier_credit_allocations_credit_bill_unique").on(
+    table.creditNoteId,
+    table.billId,
+  ),
+  orgBillIdx: index("supplier_credit_allocations_org_bill_idx").on(table.organizationId, table.billId),
+  orgCreditIdx: index("supplier_credit_allocations_org_credit_idx").on(table.organizationId, table.creditNoteId),
+}));
+
+/**
+ * A batch of approved bills prepared for payment together. Segregation of
+ * duties (master spec §52) is enforced in `PaymentRunService`, not derivable
+ * from this row alone: `createdById` prepares the run, and a *different*
+ * user must be the one who approves it — `PaymentRunService.approve` rejects
+ * an approval attempt where `approvedById === createdById`, unless the
+ * organization has only one member holding `payment_run:approve` (documented
+ * limitation for a one-person/two-person org, see docs/roadmap.md).
+ * Approving generates real `supplier_payments` via
+ * `SupplierPaymentAllocationService.recordPayment` (one per distinct
+ * supplier in the run) — this slice has no real bank-file/payment-rail
+ * integration, so "PAID" here means "posted to the ledger", the same
+ * financial effect a manual supplier payment already has today, just
+ * batched and approval-gated.
+ */
+export const paymentRuns = pgTable("payment_runs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  runNumber: text("run_number").notNull(),
+  status: paymentRunStatusEnum("status").notNull().default("DRAFT"),
+  paymentDate: timestamp("payment_date", { withTimezone: true, mode: "date" }).notNull(),
+  currency: text("currency").notNull(),
+  /** The ASSET account credited for every payment this run generates. */
+  paymentAccountId: uuid("payment_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  memo: text("memo"),
+  totalAmount: numeric("total_amount", { precision: 19, scale: 4 }).notNull().default("0"),
+  submittedAt: timestamp("submitted_at", { withTimezone: true }),
+  submittedById: uuid("submitted_by_id"),
+  approvedAt: timestamp("approved_at", { withTimezone: true }),
+  approvedById: uuid("approved_by_id"),
+  paidAt: timestamp("paid_at", { withTimezone: true }),
+  cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+  cancelledById: uuid("cancelled_by_id"),
+  cancelReason: text("cancel_reason"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id").notNull(),
+  updatedById: uuid("updated_by_id"),
+}, (table) => ({
+  orgRunNumberUnique: uniqueIndex("payment_runs_org_run_number_unique").on(
+    table.organizationId,
+    table.runNumber,
+  ),
+  orgStatusIdx: index("payment_runs_org_status_idx").on(table.organizationId, table.status),
+}));
+
+/**
+ * One bill included in a payment run, with the amount to pay it (defaults to
+ * the bill's full outstanding balance at the moment it's added, but is
+ * re-validated against the bill's *current* outstanding balance at
+ * approval time — never trusted stale). `supplierPaymentId` is set once
+ * `PaymentRunService.approve` generates the underlying `supplier_payments`
+ * row for this bill's supplier group.
+ */
+export const paymentRunItems = pgTable("payment_run_items", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  paymentRunId: uuid("payment_run_id")
+    .notNull()
+    .references(() => paymentRuns.id, { onDelete: "cascade" }),
+  billId: uuid("bill_id")
+    .notNull()
+    .references(() => bills.id),
+  amount: numeric("amount", { precision: 19, scale: 4 }).notNull(),
+  supplierPaymentId: uuid("supplier_payment_id").references((): AnyPgColumn => supplierPayments.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  runBillUnique: uniqueIndex("payment_run_items_run_bill_unique").on(table.paymentRunId, table.billId),
+  orgRunIdx: index("payment_run_items_org_run_idx").on(table.organizationId, table.paymentRunId),
 }));
 
 // ---------------------------------------------------------------------------
