@@ -2,6 +2,8 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireOrgAndActor } from "@/lib/session";
 import { LedgerService } from "@/domain/ledger/ledger-service";
+import { ReportingService } from "@/domain/reporting/reporting-service";
+import { sourceDocumentHref, SOURCE_DOCUMENT_LABEL } from "@/domain/reporting/source-document-links";
 import { roleHasPermission } from "@/domain/permissions/roles";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -18,6 +20,7 @@ export default async function JournalEntryDetailPage({
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
   const entry = await LedgerService.getJournalEntry(actor, params.entryId);
   if (!entry) notFound();
+  const sourceDocument = await ReportingService.getSourceDocumentForJournalEntry(actor, entry.id);
 
   const canPost = roleHasPermission(actor.role, "journal:post");
   const canReverse = roleHasPermission(actor.role, "journal:reverse");
@@ -42,6 +45,22 @@ export default async function JournalEntryDetailPage({
             })}
             {entry.memo && <> · {entry.memo}</>}
           </p>
+          {sourceDocument && (
+            <p className="mt-1 text-sm">
+              Source document:{" "}
+              {(() => {
+                const href = sourceDocumentHref(org.slug, sourceDocument);
+                const label = `${SOURCE_DOCUMENT_LABEL[sourceDocument.type]} ${sourceDocument.label}`;
+                return href ? (
+                  <Link href={href} className="text-primary hover:underline">
+                    {label}
+                  </Link>
+                ) : (
+                  <span className="text-muted-foreground">{label}</span>
+                );
+              })()}
+            </p>
+          )}
           {entry.reversalOf && (
             <p className="mt-1 text-sm">
               Reverses{" "}

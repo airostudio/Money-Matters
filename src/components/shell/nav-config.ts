@@ -74,6 +74,13 @@ export const NAV_ITEMS: NavItem[] = [
       { label: "Chart of Accounts", href: "/accounting/chart-of-accounts", permission: "account:read" },
       { label: "Journals", href: "/accounting/journals", permission: "journal:read" },
       { label: "Trial Balance", href: "/accounting/trial-balance", permission: "journal:read" },
+      {
+        label: "Profit & Loss",
+        href: "/accounting/reports/profit-and-loss",
+        permission: "financial_report:read",
+      },
+      { label: "Balance Sheet", href: "/accounting/reports/balance-sheet", permission: "financial_report:read" },
+      { label: "Cash Flow Statement", href: "/accounting/reports/cash-flow", permission: "financial_report:read" },
       { label: "Tax Codes", href: "/accounting/tax-codes", permission: "tax_code:manage" },
     ],
   },
