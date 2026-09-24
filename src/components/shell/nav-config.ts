@@ -38,9 +38,11 @@ export const NAV_ITEMS: NavItem[] = [
     label: "Sales",
     href: "/sales",
     icon: LineChart,
-    permission: "customer_invoice:read",
+    anyPermission: ["customer_invoice:read", "customer_quote:read", "recurring_invoice:read"],
     children: [
+      { label: "Quotes", href: "/sales/quotes", permission: "customer_quote:read" },
       { label: "Invoices", href: "/sales/invoices", permission: "customer_invoice:read" },
+      { label: "Recurring Invoices", href: "/sales/recurring-invoices", permission: "recurring_invoice:read" },
       { label: "Customers", href: "/sales/customers", permission: "customer_invoice:read" },
       { label: "Aged Receivables", href: "/sales/aged-receivables", permission: "customer_invoice:read" },
     ],

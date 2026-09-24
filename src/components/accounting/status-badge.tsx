@@ -20,6 +20,10 @@ const STATUS_STYLES: Record<string, string> = {
   EXTRACTED: "bg-success/10 text-success",
   FAILED: "bg-destructive/10 text-destructive",
   NOT_ATTEMPTED: "bg-muted text-muted-foreground",
+  ACCEPTED: "bg-success/10 text-success",
+  DECLINED: "bg-destructive/10 text-destructive",
+  CONVERTED: "bg-sky-500/10 text-sky-600 dark:text-sky-400",
+  EXPIRED: "bg-destructive/10 text-destructive",
 };
 
 export function StatusBadge({ status }: { status: string }) {

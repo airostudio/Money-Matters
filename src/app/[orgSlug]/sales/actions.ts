@@ -7,8 +7,10 @@ import { requireOrgAndActor } from "@/lib/session";
 import { ContactService } from "@/domain/contacts/contact-service";
 import { InvoiceService } from "@/domain/sales/invoice-service";
 import { PaymentAllocationService } from "@/domain/sales/payment-service";
-import { paymentMethodEnum } from "@/db/schema";
-import type { InvoiceLineInput } from "@/domain/sales/types";
+import { QuoteService } from "@/domain/sales/quote-service";
+import { RecurringInvoiceService } from "@/domain/sales/recurring-invoice-service";
+import { paymentMethodEnum, recurringFrequencyEnum } from "@/db/schema";
+import type { InvoiceLineInput, RecurringInvoiceTemplateLineInput } from "@/domain/sales/types";
 
 function redirectWithError(path: string, error: unknown): never {
   const message = error instanceof Error ? error.message : "Something went wrong.";
@@ -196,4 +198,215 @@ export async function recordPaymentAction(orgSlug: string, formData: FormData): 
   revalidatePath(returnPath);
   revalidatePath(`/${orgSlug}/sales/invoices`);
   redirect(returnPath);
+}
+
+// ---------------------------------------------------------------------------
+// Quotes (Phase 3 Slice 2)
+// ---------------------------------------------------------------------------
+
+function parseQuoteHeader(formData: FormData, currency: string) {
+  return {
+    customerContactId: String(formData.get("customerContactId") ?? ""),
+    issueDate: new Date(String(formData.get("issueDate") ?? "")),
+    expiryDate: new Date(String(formData.get("expiryDate") ?? "")),
+    currency,
+    memo: (formData.get("memo") ? String(formData.get("memo")).trim() : undefined) || undefined,
+    lines: parseLinesFromFormData(formData),
+  };
+}
+
+export async function createQuoteAction(orgSlug: string, formData: FormData): Promise<void> {
+  const { actor, org } = await requireOrgAndActor(orgSlug);
+  const input = parseQuoteHeader(formData, org.baseCurrency);
+
+  let created;
+  try {
+    created = await QuoteService.create(actor, input);
+  } catch (error) {
+    if (error && typeof error === "object" && "digest" in error) throw error;
+    const message = error instanceof Error ? error.message : "Failed to create quote.";
+    redirect(`/${orgSlug}/sales/quotes/new?error=${encodeURIComponent(message)}`);
+  }
+
+  revalidatePath(`/${orgSlug}/sales/quotes`);
+  redirect(`/${orgSlug}/sales/quotes/${created.id}`);
+}
+
+export async function updateQuoteAction(orgSlug: string, quoteId: string, formData: FormData): Promise<void> {
+  const { actor, org } = await requireOrgAndActor(orgSlug);
+  const input = parseQuoteHeader(formData, org.baseCurrency);
+  const returnPath = `/${orgSlug}/sales/quotes/${quoteId}`;
+
+  try {
+    await QuoteService.update(actor, quoteId, input);
+  } catch (error) {
+    if (error && typeof error === "object" && "digest" in error) throw error;
+    const message = error instanceof Error ? error.message : "Failed to update quote.";
+    redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+  }
+
+  revalidatePath(returnPath);
+  redirect(returnPath);
+}
+
+export async function deleteDraftQuoteAction(orgSlug: string, quoteId: string): Promise<void> {
+  const { actor } = await requireOrgAndActor(orgSlug);
+  await QuoteService.deleteDraft(actor, quoteId);
+  revalidatePath(`/${orgSlug}/sales/quotes`);
+  redirect(`/${orgSlug}/sales/quotes`);
+}
+
+export async function sendQuoteAction(orgSlug: string, quoteId: string): Promise<void> {
+  const { actor } = await requireOrgAndActor(orgSlug);
+  await QuoteService.markSent(actor, quoteId);
+  revalidatePath(`/${orgSlug}/sales/quotes/${quoteId}`);
+}
+
+export async function acceptQuoteAction(orgSlug: string, quoteId: string): Promise<void> {
+  const { actor } = await requireOrgAndActor(orgSlug);
+  const returnPath = `/${orgSlug}/sales/quotes/${quoteId}`;
+  try {
+    await QuoteService.accept(actor, quoteId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to accept quote.";
+    redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+  }
+  revalidatePath(returnPath);
+  redirect(returnPath);
+}
+
+export async function declineQuoteAction(orgSlug: string, quoteId: string, formData: FormData): Promise<void> {
+  const { actor } = await requireOrgAndActor(orgSlug);
+  const reason = String(formData.get("reason") ?? "").trim() || "No reason given";
+  const returnPath = `/${orgSlug}/sales/quotes/${quoteId}`;
+  try {
+    await QuoteService.decline(actor, quoteId, reason);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to decline quote.";
+    redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+  }
+  revalidatePath(returnPath);
+  redirect(returnPath);
+}
+
+export async function convertQuoteToInvoiceAction(orgSlug: string, quoteId: string, formData: FormData): Promise<void> {
+  const { actor } = await requireOrgAndActor(orgSlug);
+  const returnPath = `/${orgSlug}/sales/quotes/${quoteId}`;
+
+  let result;
+  try {
+    result = await QuoteService.convertToInvoice(actor, quoteId, {
+      issueDate: new Date(String(formData.get("issueDate") ?? "")),
+      dueDate: new Date(String(formData.get("dueDate") ?? "")),
+      arAccountId: String(formData.get("arAccountId") ?? ""),
+    });
+  } catch (error) {
+    if (error && typeof error === "object" && "digest" in error) throw error;
+    const message = error instanceof Error ? error.message : "Failed to convert quote to an invoice.";
+    redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+  }
+
+  revalidatePath(returnPath);
+  revalidatePath(`/${orgSlug}/sales/invoices`);
+  redirect(`/${orgSlug}/sales/invoices/${result.invoiceId}`);
+}
+
+// ---------------------------------------------------------------------------
+// Recurring invoicing (Phase 3 Slice 2)
+// ---------------------------------------------------------------------------
+
+const RECURRING_FREQUENCIES = new Set(recurringFrequencyEnum.enumValues);
+
+function parseRecurringTemplateLinesFromFormData(formData: FormData): RecurringInvoiceTemplateLineInput[] {
+  return parseLinesFromFormData(formData);
+}
+
+function parseRecurringTemplateHeader(formData: FormData, currency: string) {
+  const frequencyRaw = String(formData.get("frequency") ?? "MONTHLY");
+  const frequency = (RECURRING_FREQUENCIES.has(frequencyRaw as never) ? frequencyRaw : "MONTHLY") as (typeof recurringFrequencyEnum.enumValues)[number];
+  const endDateRaw = String(formData.get("endDate") ?? "").trim();
+  const maxOccurrencesRaw = String(formData.get("maxOccurrences") ?? "").trim();
+
+  return {
+    customerContactId: String(formData.get("customerContactId") ?? ""),
+    name: String(formData.get("name") ?? "").trim(),
+    currency,
+    arAccountId: String(formData.get("arAccountId") ?? ""),
+    memo: (formData.get("memo") ? String(formData.get("memo")).trim() : undefined) || undefined,
+    frequency,
+    startDate: new Date(String(formData.get("startDate") ?? "")),
+    endDate: endDateRaw ? new Date(endDateRaw) : undefined,
+    maxOccurrences: maxOccurrencesRaw ? Number(maxOccurrencesRaw) : undefined,
+    lines: parseRecurringTemplateLinesFromFormData(formData),
+  };
+}
+
+export async function createRecurringTemplateAction(orgSlug: string, formData: FormData): Promise<void> {
+  const { actor, org } = await requireOrgAndActor(orgSlug);
+  const input = parseRecurringTemplateHeader(formData, org.baseCurrency);
+
+  let created;
+  try {
+    created = await RecurringInvoiceService.create(actor, input);
+  } catch (error) {
+    if (error && typeof error === "object" && "digest" in error) throw error;
+    const message = error instanceof Error ? error.message : "Failed to create recurring invoice template.";
+    redirect(`/${orgSlug}/sales/recurring-invoices/new?error=${encodeURIComponent(message)}`);
+  }
+
+  revalidatePath(`/${orgSlug}/sales/recurring-invoices`);
+  redirect(`/${orgSlug}/sales/recurring-invoices/${created.id}`);
+}
+
+export async function updateRecurringTemplateAction(orgSlug: string, templateId: string, formData: FormData): Promise<void> {
+  const { actor, org } = await requireOrgAndActor(orgSlug);
+  const input = parseRecurringTemplateHeader(formData, org.baseCurrency);
+  const returnPath = `/${orgSlug}/sales/recurring-invoices/${templateId}`;
+
+  try {
+    await RecurringInvoiceService.update(actor, templateId, input);
+  } catch (error) {
+    if (error && typeof error === "object" && "digest" in error) throw error;
+    const message = error instanceof Error ? error.message : "Failed to update recurring invoice template.";
+    redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+  }
+
+  revalidatePath(returnPath);
+  redirect(returnPath);
+}
+
+export async function setRecurringTemplateActiveAction(orgSlug: string, templateId: string, isActive: boolean): Promise<void> {
+  const { actor } = await requireOrgAndActor(orgSlug);
+  const returnPath = `/${orgSlug}/sales/recurring-invoices/${templateId}`;
+  await RecurringInvoiceService.setActive(actor, templateId, isActive);
+  revalidatePath(returnPath);
+  redirect(returnPath);
+}
+
+export async function deleteRecurringTemplateAction(orgSlug: string, templateId: string): Promise<void> {
+  const { actor } = await requireOrgAndActor(orgSlug);
+  const returnPath = `/${orgSlug}/sales/recurring-invoices/${templateId}`;
+  try {
+    await RecurringInvoiceService.deleteTemplate(actor, templateId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to delete recurring invoice template.";
+    redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+  }
+  revalidatePath(`/${orgSlug}/sales/recurring-invoices`);
+  redirect(`/${orgSlug}/sales/recurring-invoices`);
+}
+
+export async function generateDueInvoicesAction(orgSlug: string): Promise<void> {
+  const { actor } = await requireOrgAndActor(orgSlug);
+  const returnPath = `/${orgSlug}/sales/recurring-invoices`;
+  let generated: Awaited<ReturnType<typeof RecurringInvoiceService.generateDue>> = [];
+  try {
+    generated = await RecurringInvoiceService.generateDue(actor);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to generate due invoices.";
+    redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+  }
+  revalidatePath(returnPath);
+  revalidatePath(`/${orgSlug}/sales/invoices`);
+  redirect(`${returnPath}?generated=${generated.length}`);
 }

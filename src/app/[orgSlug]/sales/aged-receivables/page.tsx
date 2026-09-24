@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { requireOrgAndActor } from "@/lib/session";
 import { AgedReceivablesService, AGING_BUCKETS, type AgingBucket } from "@/domain/sales/aged-receivables-service";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { MoneyDisplay } from "@/components/accounting/money-display";
 
 const BUCKET_LABELS: Record<AgingBucket, string> = {
@@ -14,7 +14,10 @@ const BUCKET_LABELS: Record<AgingBucket, string> = {
 
 export default async function AgedReceivablesPage({ params }: { params: { orgSlug: string } }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
-  const rows = await AgedReceivablesService.get(actor);
+  const [rows, prioritized] = await Promise.all([
+    AgedReceivablesService.get(actor),
+    AgedReceivablesService.getWithPriority(actor),
+  ]);
 
   const grandTotals = AGING_BUCKETS.reduce(
     (acc, bucket) => {
@@ -31,6 +34,57 @@ export default async function AgedReceivablesPage({ params }: { params: { orgSlu
         <h1 className="text-2xl font-semibold tracking-tight">Aged Receivables</h1>
         <p className="text-sm text-muted-foreground">Who owes what, bucketed by how overdue it is.</p>
       </div>
+
+      {prioritized.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Who to chase first</CardTitle>
+            <p className="text-sm text-muted-foreground">
+              A Collection Priority Score (0–100) per overdue invoice, from its amount, how overdue it is, and this
+              customer&rsquo;s own history of paying late — highest first. See docs/roadmap.md: AI-drafted reminder emails
+              are deferred, this is the deterministic ranking only.
+            </p>
+          </CardHeader>
+          <CardContent className="p-0">
+            <table className="w-full text-sm">
+              <thead className="border-b border-border text-left text-xs text-muted-foreground">
+                <tr>
+                  <th className="px-6 py-2 font-medium">Invoice</th>
+                  <th className="px-6 py-2 font-medium">Customer</th>
+                  <th className="px-6 py-2 text-right font-medium">Days overdue</th>
+                  <th className="px-6 py-2 text-right font-medium">Customer avg. days late</th>
+                  <th className="px-6 py-2 text-right font-medium">Outstanding</th>
+                  <th className="px-6 py-2 text-right font-medium">Priority score</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {prioritized.slice(0, 15).map((row) => (
+                  <tr key={row.invoiceId}>
+                    <td className="px-6 py-2.5">
+                      <Link href={`/${org.slug}/sales/invoices/${row.invoiceId}`} className="font-medium hover:underline">
+                        {row.invoiceNumber}
+                      </Link>
+                    </td>
+                    <td className="px-6 py-2.5">
+                      <Link href={`/${org.slug}/sales/customers/${row.customerContactId}`} className="hover:underline">
+                        {row.customerName}
+                      </Link>
+                    </td>
+                    <td className="px-6 py-2.5 text-right">{row.daysPastDue}</td>
+                    <td className="px-6 py-2.5 text-right text-muted-foreground">
+                      {row.customerAvgDaysLate === null ? "No history" : `${row.customerAvgDaysLate.toFixed(1)}d`}
+                    </td>
+                    <td className="px-6 py-2.5 text-right">
+                      <MoneyDisplay amount={row.outstanding} currency={org.baseCurrency} />
+                    </td>
+                    <td className="px-6 py-2.5 text-right font-semibold">{row.priorityScore.toFixed(1)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </CardContent>
+        </Card>
+      )}
 
       {rows.length === 0 ? (
         <Card>

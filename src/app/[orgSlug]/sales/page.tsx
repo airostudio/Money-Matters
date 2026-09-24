@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { FileText, Plus, Receipt, Users } from "lucide-react";
+import { FileText, Plus, Receipt, RefreshCw, Users } from "lucide-react";
 import { requireOrgAndActor } from "@/lib/session";
 import { InvoiceService } from "@/domain/sales/invoice-service";
 import { roleHasPermission } from "@/domain/permissions/roles";
@@ -68,6 +68,17 @@ export default async function SalesPage({ params }: { params: { orgSlug: string 
       </div>
 
       <div className="grid gap-4 sm:grid-cols-3">
+        <Link href={`/${org.slug}/sales/quotes`}>
+          <Card className="h-full transition-colors hover:border-primary">
+            <CardContent className="flex items-center gap-3 p-5">
+              <FileText className="size-5 text-muted-foreground" />
+              <div>
+                <p className="font-medium">Quotes</p>
+                <p className="text-xs text-muted-foreground">Send a price, then convert straight to an invoice</p>
+              </div>
+            </CardContent>
+          </Card>
+        </Link>
         <Link href={`/${org.slug}/sales/invoices`}>
           <Card className="h-full transition-colors hover:border-primary">
             <CardContent className="flex items-center gap-3 p-5">
@@ -75,6 +86,17 @@ export default async function SalesPage({ params }: { params: { orgSlug: string 
               <div>
                 <p className="font-medium">Invoices</p>
                 <p className="text-xs text-muted-foreground">Create, post, and track invoices</p>
+              </div>
+            </CardContent>
+          </Card>
+        </Link>
+        <Link href={`/${org.slug}/sales/recurring-invoices`}>
+          <Card className="h-full transition-colors hover:border-primary">
+            <CardContent className="flex items-center gap-3 p-5">
+              <RefreshCw className="size-5 text-muted-foreground" />
+              <div>
+                <p className="font-medium">Recurring Invoices</p>
+                <p className="text-xs text-muted-foreground">Templates that generate draft invoices for review</p>
               </div>
             </CardContent>
           </Card>
@@ -96,7 +118,7 @@ export default async function SalesPage({ params }: { params: { orgSlug: string 
               <Receipt className="size-5 text-muted-foreground" />
               <div>
                 <p className="font-medium">Aged Receivables</p>
-                <p className="text-xs text-muted-foreground">Who owes what, and how overdue</p>
+                <p className="text-xs text-muted-foreground">Who owes what, how overdue, and who to chase first</p>
               </div>
             </CardContent>
           </Card>
