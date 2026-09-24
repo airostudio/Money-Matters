@@ -4,12 +4,14 @@ import { closeTestPools, createTestOrg, resetDatabase } from "../helpers/db";
 import { createSampleAccounts } from "../helpers/ledger";
 import { createSalesFixtures } from "../helpers/sales";
 import { createPurchasesFixtures } from "../helpers/purchases";
-import { accounts, auditLogs, bills, expenseClaims, invoices } from "@/db/schema";
+import { accounts, auditLogs, bills, expenseClaims, invoices, quotes, recurringInvoiceTemplates } from "@/db/schema";
 import { db } from "@/db/client";
 import { withTenant } from "@/db/tenant";
 import { AccountService } from "@/domain/accounts/account-service";
 import { PostingService } from "@/domain/ledger/posting-service";
 import { InvoiceService } from "@/domain/sales/invoice-service";
+import { QuoteService } from "@/domain/sales/quote-service";
+import { RecurringInvoiceService } from "@/domain/sales/recurring-invoice-service";
 import { BillService } from "@/domain/purchases/bill-service";
 import { ExpenseClaimService } from "@/domain/expenses/expense-claim-service";
 import { createExpenseFixtures } from "../helpers/expenses";
@@ -116,6 +118,11 @@ describe("Tenant isolation", () => {
       "invoice_lines",
       "payments",
       "payment_allocations",
+      "quotes",
+      "quote_lines",
+      "recurring_invoice_templates",
+      "recurring_invoice_template_lines",
+      "invoice_recurring_source",
       "bills",
       "bill_lines",
       "supplier_payments",
@@ -201,6 +208,46 @@ describe("Tenant isolation", () => {
     expect(rowsAsOrgB.some((r) => r.id === created.id)).toBe(false);
 
     const rowsWithNoTenantContext = await db.select().from(expenseClaims);
+    expect(rowsWithNoTenantContext).toHaveLength(0);
+  });
+
+  it("a quote created under org A is invisible to org B, even by direct query with no filter", async () => {
+    const fixturesA = await createSalesFixtures(orgA.owner, orgA.baseCurrency);
+    const created = await QuoteService.create(orgA.owner, {
+      customerContactId: fixturesA.customerContactId,
+      issueDate: new Date(),
+      expiryDate: new Date(),
+      currency: "AUD",
+      lines: [{ description: "x", quantity: "1", unitPrice: "10.00", accountId: fixturesA.revenueAccountId }],
+    });
+
+    expect(await QuoteService.get(orgB.owner, created.id)).toBeNull();
+
+    const rowsAsOrgB = await withTenant(orgB.organizationId, (tx) => tx.select().from(quotes));
+    expect(rowsAsOrgB.some((r) => r.id === created.id)).toBe(false);
+
+    const rowsWithNoTenantContext = await db.select().from(quotes);
+    expect(rowsWithNoTenantContext).toHaveLength(0);
+  });
+
+  it("a recurring invoice template created under org A is invisible to org B, even by direct query with no filter", async () => {
+    const fixturesA = await createSalesFixtures(orgA.owner, orgA.baseCurrency);
+    const created = await RecurringInvoiceService.create(orgA.owner, {
+      customerContactId: fixturesA.customerContactId,
+      name: "Monthly retainer",
+      currency: "AUD",
+      arAccountId: fixturesA.arAccountId,
+      frequency: "MONTHLY",
+      startDate: new Date("2026-01-01"),
+      lines: [{ description: "x", quantity: "1", unitPrice: "10.00", accountId: fixturesA.revenueAccountId }],
+    });
+
+    expect(await RecurringInvoiceService.get(orgB.owner, created.id)).toBeNull();
+
+    const rowsAsOrgB = await withTenant(orgB.organizationId, (tx) => tx.select().from(recurringInvoiceTemplates));
+    expect(rowsAsOrgB.some((r) => r.id === created.id)).toBe(false);
+
+    const rowsWithNoTenantContext = await db.select().from(recurringInvoiceTemplates);
     expect(rowsWithNoTenantContext).toHaveLength(0);
   });
 

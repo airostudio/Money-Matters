@@ -5,16 +5,21 @@ platform combining accounting, banking, payroll, tax, billing, expenses,
 inventory, projects, and forecasting in one product.
 
 Phase 1 (Financial Foundation), Phase 2 Slice 1 (bank import,
-reconciliation, bank rules), Phase 3 Slice 1 (customer invoicing & AR
-core — invoices, payments, aged receivables), and Phase 4 Slice 1
-(suppliers & Accounts Payable core — bills, supplier payments, aged
-payables) are complete. Phase 2 Slice 2 (AI-assisted fuzzy reconciliation,
-Document AI receipt/invoice capture, employee expense claims) is the most
-recently completed slice — see [`docs/roadmap.md`](docs/roadmap.md) for
-exactly what's built there vs. explicitly deferred (a live bank feed
-provider, Stripe, a background job queue, and a Redis cache all need real
-external accounts/credentials this environment doesn't have). See
-[`docs/architecture.md`](docs/architecture.md) for how it's put together.
+reconciliation, bank rules), Phase 2 Slice 2 (AI-assisted fuzzy
+reconciliation, Document AI receipt/invoice capture, employee expense
+claims), Phase 3 Slice 1 (customer invoicing & AR core — invoices,
+payments, aged receivables), and Phase 4 Slice 1 (suppliers & Accounts
+Payable core — bills, supplier payments, aged payables) are complete.
+Phase 3 Slice 2 (quotes with one-click conversion to a draft invoice,
+recurring invoicing, and a deterministic Collection Priority Score on top
+of Aged Receivables) is the most recently completed slice — see
+[`docs/roadmap.md`](docs/roadmap.md) for exactly what's built there vs.
+explicitly deferred (progress/milestone invoicing, a customer portal,
+AI-drafted collection reminders, a live bank feed provider, Stripe, a
+background job queue, and a Redis cache all need either infrastructure
+that doesn't exist yet or external accounts/credentials this environment
+doesn't have). See [`docs/architecture.md`](docs/architecture.md) for how
+it's put together.
 
 ## Stack
 

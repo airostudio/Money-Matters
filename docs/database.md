@@ -268,6 +268,44 @@ a direct `journal_lines` write. Same for
 `SupplierPaymentAllocationService.recordPayment` (debit AP, credit payment
 account).
 
+## 2f. Phase 3 Slice 2 entity groups: quotes & recurring invoicing
+
+Both extend the Phase 3 Slice 1 sales domain directly rather than
+duplicating it — see `docs/roadmap.md` for what's built vs. deferred
+(progress/milestone invoicing, the customer portal, AI-drafted collection
+reminders).
+
+- `Quote`/`QuoteLine` — shaped like `Invoice`/`InvoiceLine` on purpose
+  (`QuoteService` reuses `calculateInvoiceTotals` verbatim), so
+  `QuoteService.convertToInvoice` can copy a quote's customer and lines
+  straight onto a new draft `Invoice` with no field-by-field translation. A
+  quote has no `journalEntryId`/`postedAt` at all — it is pre-sale, not a
+  financial transaction, and never calls `PostingService`. `status` is
+  `DRAFT → SENT → ACCEPTED/DECLINED`, then `ACCEPTED → CONVERTED` once
+  `convertedInvoiceId` is set (once, never re-pointed). There is no stored
+  `EXPIRED` value, for the same reason `Invoice` has no stored `OVERDUE`:
+  it's a function of `expiryDate` vs. "now", computed at read time.
+- `RecurringInvoiceTemplate`/`RecurringInvoiceTemplateLine` — a customer,
+  line items, and a schedule (`frequency`, `startDate`, optional
+  `endDate`/`maxOccurrences`, `nextRunDate`, `occurrencesGenerated`,
+  `isActive`). Deliberately stores no totals: a template's lines are
+  recomputed against current tax rates every time it generates an invoice,
+  since a template can run for years. `RecurringInvoiceService.generateDue`
+  is an on-demand action (a human clicks "Generate due invoices"), not a
+  background job — Phase 2 Slice 2's job-queue infrastructure that a real
+  schedule would need isn't built yet. It always creates a normal DRAFT
+  `Invoice` via `InvoiceService.create` (never auto-approved/auto-posted)
+  and advances `nextRunDate` past the generated occurrence in the same
+  step, so running it twice the same day is a no-op the second time.
+- `InvoiceRecurringSource` — a one-row-per-invoice trace back to the
+  template that generated it (purely informational; the idempotency
+  guarantee lives entirely in `nextRunDate`, not here).
+
+Neither table changes how an `Invoice` reaches the ledger: a quote's
+converted invoice and a recurring template's generated invoice both go
+through `InvoiceService.approveAndPost` exactly like a manually created
+invoice — no parallel/shortcut posting path.
+
 ## 3. Row-Level Security
 
 Every tenant table gets an RLS policy of the shape:

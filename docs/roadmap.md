@@ -302,9 +302,128 @@ before this shipped.
   smart debt collection, a dedicated full Contacts/CRM UI (Phase 3 Slice 1
   added only the minimal customer list/create/detail invoicing needs)
 
-### Slice 2 — not started
-Quotes, recurring/progress/milestone invoicing, customer portal, smart debt
-collection.
+### Slice 2 — Quotes, recurring invoicing, collection priority — **complete**
+
+Scoped down from the full "quotes, recurring/progress/milestone invoicing,
+customer portal, smart debt collection" deferral above — see the explicit
+deferrals at the end of this section for why progress/milestone invoicing,
+the customer portal, and AI-drafted collection reminders are each a
+separate, later piece of work rather than a rushed shortcut here.
+
+- [x] **Quotes.** Schema: `quotes`, `quote_lines` (RLS-enabled and FORCEd,
+      `mm_app`-granted, verified by the `db:migrate` tenant-isolation audit
+      — 32 of 36 tables now organization-scoped). Shaped like
+      `invoices`/`invoice_lines` on purpose:
+      `QuoteService`(`src/domain/sales/quote-service.ts`) reuses
+      `calculateInvoiceTotals` verbatim rather than duplicating the line/
+      tax/total math. Status flow `DRAFT → SENT → ACCEPTED/DECLINED`, then
+      `ACCEPTED → CONVERTED`. A quote never calls `PostingService` and has
+      no `journalEntryId` at all — it's pre-sale, not a financial
+      transaction. The killer feature, `QuoteService.convertToInvoice`,
+      copies the quote's customer and every line's description/quantity/
+      unit price/account/tax code onto a brand-new **draft** invoice via
+      `InvoiceService.create` — the exact same call path a manually created
+      invoice uses, never a parallel/shortcut posting route — so the
+      resulting invoice still needs its own separate approval and posting.
+- [x] **Recurring invoicing.** Schema: `recurring_invoice_templates`,
+      `recurring_invoice_template_lines`, `invoice_recurring_source` (same
+      RLS treatment). `RecurringInvoiceService`
+      (`src/domain/sales/recurring-invoice-service.ts`) holds a customer,
+      line items, and a schedule (weekly/monthly/quarterly/annually, start
+      date, optional end date/occurrence cap). **There is no background job
+      queue** — Phase 2 Slice 2 explicitly deferred that infrastructure —
+      so `generateDue` is a manually-triggered "Generate due invoices"
+      action (reachable by OWNER/ADMINISTRATOR/ACCOUNTS_RECEIVABLE, and
+      ACCOUNTANT/BOOKKEEPER, matching the existing `customer_invoice:manage`
+      role pattern) that finds every active template with
+      `nextRunDate <= today`, generates a normal **DRAFT** invoice per due
+      occurrence via `InvoiceService.create` (never auto-approved or
+      auto-posted — a human still reviews and posts each one), and advances
+      `nextRunDate` past that occurrence in the same step — so running the
+      action twice on the same day is a no-op the second time, and a
+      template that hasn't been run in a while catches up on every missed
+      occurrence rather than just the most recent one. **This is explicitly
+      the manually-triggered precursor to real scheduling, not a fake
+      automation** — once Phase 2 Slice 2's job-queue gap is filled, the
+      same `generateDue` logic can be called from a scheduled worker instead
+      of a button with no change to its invariants.
+- [x] **Collection Priority Score (the deterministic core of "smart debt
+      collection").** `calculateCollectionPriorityScore`
+      (`src/domain/sales/collection-priority.ts`) is a pure, unit-tested
+      0–100 score per overdue invoice from master spec §15's formula
+      inputs — invoice amount, days overdue, and the customer's historical
+      average payment time (derived from that customer's own already-PAID
+      invoices' settlement dates vs. their due dates, `null` when there's
+      no history yet, scored as neutral risk rather than as either extreme).
+      `AgedReceivablesService.getWithPriority` extends the existing Aged
+      Receivables data (rather than duplicating the aging computation) with
+      this score, sorted highest-priority first, surfaced as a new "Who to
+      chase first" table on top of the existing Aged Receivables report.
+- [x] New permissions: `customer_quote:read/manage`,
+      `recurring_invoice:read/manage`, following the existing
+      `customer_invoice:*` naming convention, wired into `ROLE_PERMISSIONS`
+      the same way (ACCOUNTS_RECEIVABLE/ACCOUNTANT/BOOKKEEPER get full
+      access, MANAGER/READ_ONLY get read-only)
+- [x] `AuditService` wired into every quote/template mutation and every
+      generated invoice
+- [x] UI under `/[orgSlug]/sales`: Quotes list/create/edit-draft/detail
+      (send/accept/decline actions, and a prominent "Convert to invoice"
+      action once accepted), Recurring Invoices list (with the "Generate
+      due invoices" action and a due-count indicator) and create/edit/
+      detail (pause/resume/delete), and a "Who to chase first" table added
+      to the existing Aged Receivables page — all added to the role-aware
+      nav under "Sales"
+- [x] Tests: unit (`recurring-schedule.test.ts` — next-run-date advancement
+      across all four frequencies incl. month-end clamping and leap-year
+      handling; `collection-priority.test.ts` — score ordering and edge
+      cases), property-based
+      (`quote-conversion-balance.property.test.ts` — every accepted quote's
+      converted-and-posted invoice still balances, for arbitrary quote
+      shapes, proving the `InvoiceService` composition holds), integration
+      (`sales/quotes.test.ts` — full DRAFT→SENT→ACCEPTED→CONVERTED flow incl.
+      decline and double-convert rejection; `sales/recurring-invoices.test.ts`
+      — generation, no-double-generation same day, catch-up across missed
+      periods, `maxOccurrences`/`endDate` cutoffs, pause; `sales/
+      collection-priority.test.ts` — seeded customers with different payment
+      histories rank correctly), and two new tenant-isolation cases (quotes,
+      recurring templates)
+- [x] `npm run typecheck`, `npm run lint`, `npm test` (335 tests) and
+      `npm run build` all pass; smoke-tested end-to-end against a real local
+      Postgres and a running dev server driven via raw HTTP (React Server
+      Action form submissions): created a quote, sent it, accepted it,
+      converted it to a draft invoice with the customer/lines copied across
+      untouched, approved and posted that invoice, confirmed the resulting
+      journal balances (`SUM(debit) = SUM(credit) = 1000.0000`) and the
+      invoice's own status; separately created a recurring monthly template
+      dated in the past, ran "Generate due invoices" once to produce four
+      correctly-dated DRAFT invoices (none posted, none auto-approved) and
+      advance `nextRunDate` to the next unbilled period, then ran it again
+      the same day and confirmed zero invoices were generated the second
+      time; confirmed the "Who to chase first" table renders on Aged
+      Receivables
+- **Deferred, explicitly, with reasons (not silently dropped):**
+  - **Progress/milestone invoicing** — a distinct billing model tied to
+    projects/jobs, which don't exist in this codebase yet (Phase 7:
+    Operations). Recurring invoicing is the more common, higher-value case
+    for the businesses this product targets today; progress/milestone
+    billing doesn't have a sensible home until projects do.
+  - **Customer portal** — needs unauthenticated/customer-authenticated
+    external access, a fundamentally different auth model from the internal
+    org-member NextAuth flow this app has, plus e-signature and external
+    payment collection UI. It is a customer-facing surface that must never
+    leak cross-tenant data — real security-design work deserving its own
+    slice, not a shortcut bolted onto this one.
+  - **AI-drafted, tone-tiered collection reminder emails/sequences** — the
+    deterministic Collection Priority Score above is built and shown; the
+    AI-drafting half of master spec §15 needs an actual outbound email
+    integration (Gmail/Outlook connectors per the master spec), which this
+    codebase has no wiring for at all. A distinct, larger feature better
+    scoped on its own once that integration exists.
+  - A scheduled/automatic version of "Generate due invoices" — needs the
+    background job-queue infrastructure Phase 2 Slice 2 deferred. The
+    manually-triggered action built here is its precursor: same
+    `RecurringInvoiceService.generateDue` logic, just not yet callable from
+    a worker on a timer.
 
 ## Phase 4 — Purchases (in progress)
 
