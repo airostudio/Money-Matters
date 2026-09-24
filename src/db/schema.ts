@@ -137,6 +137,40 @@ export const paymentMethodEnum = pgEnum("payment_method", [
 ]);
 
 /**
+ * Phase 3 Slice 2 (Sales — quotes). A quote never touches the ledger — see
+ * `src/domain/sales/quote-service.ts` — so unlike `invoice_status` there is
+ * no APPROVED/posted state at all. `DRAFT` is fully editable. `SENT` is
+ * informational. `ACCEPTED`/`DECLINED` are the customer's answer (recorded
+ * by a human on the customer's behalf — there is no customer portal in this
+ * slice, see docs/roadmap.md). `CONVERTED` is set once, when
+ * `QuoteService.convertToInvoice` creates a draft invoice from an ACCEPTED
+ * quote — the quote itself is never edited again after that. `EXPIRED` is
+ * computed at read time from `expiryDate` vs. "now" for a quote still SENT,
+ * the same deliberate choice as `invoice_status`'s missing OVERDUE value —
+ * no background job infrastructure exists yet to flip it automatically.
+ */
+export const quoteStatusEnum = pgEnum("quote_status", [
+  "DRAFT",
+  "SENT",
+  "ACCEPTED",
+  "DECLINED",
+  "CONVERTED",
+]);
+
+/**
+ * Phase 3 Slice 2 (Sales — recurring invoicing). How often a
+ * `recurring_invoice_template` generates its next draft invoice — see
+ * `src/domain/sales/recurring-invoice-service.ts` for the next-run-date
+ * advancement logic per frequency.
+ */
+export const recurringFrequencyEnum = pgEnum("recurring_frequency", [
+  "WEEKLY",
+  "MONTHLY",
+  "QUARTERLY",
+  "ANNUALLY",
+]);
+
+/**
  * Phase 4 Slice 1 (Purchases — supplier bills & AP core), the mirror image
  * of `invoice_status`. There is no SENT/VIEWED equivalent — a bill is
  * something the organization receives, not delivers — so a bill goes
@@ -817,6 +851,185 @@ export const paymentAllocations = pgTable("payment_allocations", {
 }));
 
 // ---------------------------------------------------------------------------
+// Sales (Phase 3 Slice 2) — quotes and recurring invoicing. Both extend the
+// Phase 3 Slice 1 invoicing domain directly rather than duplicating it: a
+// quote converts straight into a draft `invoices` row (never posts on its
+// own), and a recurring template generates a draft `invoices` row too — see
+// src/domain/sales/quote-service.ts and recurring-invoice-service.ts.
+// ---------------------------------------------------------------------------
+
+/**
+ * A customer quote. Deliberately shaped like `invoices` (same line/tax/total
+ * approach, reusing `calculateInvoiceTotals`) so `QuoteService.convertToInvoice`
+ * can copy a quote's header and lines into a new draft invoice without
+ * retyping anything — but a quote is pre-sale, not a financial transaction,
+ * so unlike `invoices` there is no `journalEntryId`/`postedAt` here at all.
+ */
+export const quotes = pgTable("quotes", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  customerContactId: uuid("customer_contact_id")
+    .notNull()
+    .references(() => contacts.id),
+  quoteNumber: text("quote_number").notNull(),
+  issueDate: timestamp("issue_date", { withTimezone: true, mode: "date" }).notNull(),
+  expiryDate: timestamp("expiry_date", { withTimezone: true, mode: "date" }).notNull(),
+  currency: text("currency").notNull(),
+  memo: text("memo"),
+  status: quoteStatusEnum("status").notNull().default("DRAFT"),
+  subtotal: numeric("subtotal", { precision: 19, scale: 4 }).notNull().default("0"),
+  taxTotal: numeric("tax_total", { precision: 19, scale: 4 }).notNull().default("0"),
+  total: numeric("total", { precision: 19, scale: 4 }).notNull().default("0"),
+  sentAt: timestamp("sent_at", { withTimezone: true }),
+  acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+  acceptedById: uuid("accepted_by_id"),
+  declinedAt: timestamp("declined_at", { withTimezone: true }),
+  declinedById: uuid("declined_by_id"),
+  declineReason: text("decline_reason"),
+  /** Set once, when `QuoteService.convertToInvoice` creates the draft invoice. Never re-pointed. */
+  convertedInvoiceId: uuid("converted_invoice_id").references((): AnyPgColumn => invoices.id),
+  convertedAt: timestamp("converted_at", { withTimezone: true }),
+  convertedById: uuid("converted_by_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+  updatedById: uuid("updated_by_id"),
+}, (table) => ({
+  orgQuoteNumberUnique: uniqueIndex("quotes_org_quote_number_unique").on(
+    table.organizationId,
+    table.quoteNumber,
+  ),
+  orgStatusIdx: index("quotes_org_status_idx").on(table.organizationId, table.status),
+  orgCustomerIdx: index("quotes_org_customer_idx").on(table.organizationId, table.customerContactId),
+}));
+
+/** One line of a quote — same shape as `invoice_lines`, see `quotes` above. */
+export const quoteLines = pgTable("quote_lines", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  quoteId: uuid("quote_id")
+    .notNull()
+    .references(() => quotes.id, { onDelete: "cascade" }),
+  lineNumber: integer("line_number").notNull(),
+  description: text("description").notNull(),
+  quantity: numeric("quantity", { precision: 19, scale: 4 }).notNull(),
+  unitPrice: numeric("unit_price", { precision: 19, scale: 4 }).notNull(),
+  accountId: uuid("account_id")
+    .notNull()
+    .references(() => accounts.id),
+  taxCodeId: uuid("tax_code_id").references(() => taxCodes.id),
+  lineAmount: numeric("line_amount", { precision: 19, scale: 4 }).notNull(),
+  taxAmount: numeric("tax_amount", { precision: 19, scale: 4 }).notNull().default("0"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  quoteLineUnique: uniqueIndex("quote_lines_quote_line_unique").on(table.quoteId, table.lineNumber),
+  orgQuoteIdx: index("quote_lines_org_quote_idx").on(table.organizationId, table.quoteId),
+}));
+
+/**
+ * A recurring invoice template — customer, line items, and a schedule.
+ * `RecurringInvoiceService.generateDue` is an on-demand action (a human
+ * clicks "Generate due invoices"), not a background job — Phase 2 Slice 2's
+ * job-queue infrastructure that a real schedule would need isn't built yet,
+ * see docs/roadmap.md. Every generated invoice is a normal DRAFT `invoices`
+ * row created via `InvoiceService.create`, never auto-approved/auto-posted.
+ * `nextRunDate` is advanced past "today" immediately after generating that
+ * occurrence, in the same transaction, so re-running the action the same
+ * day never double-generates.
+ */
+export const recurringInvoiceTemplates = pgTable("recurring_invoice_templates", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  customerContactId: uuid("customer_contact_id")
+    .notNull()
+    .references(() => contacts.id),
+  name: text("name").notNull(),
+  currency: text("currency").notNull(),
+  arAccountId: uuid("ar_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  memo: text("memo"),
+  frequency: recurringFrequencyEnum("frequency").notNull(),
+  startDate: timestamp("start_date", { withTimezone: true, mode: "date" }).notNull(),
+  /** Null means "no end date" — runs until `maxOccurrences` (also null-able) or paused. */
+  endDate: timestamp("end_date", { withTimezone: true, mode: "date" }),
+  maxOccurrences: integer("max_occurrences"),
+  occurrencesGenerated: integer("occurrences_generated").notNull().default(0),
+  nextRunDate: timestamp("next_run_date", { withTimezone: true, mode: "date" }).notNull(),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+  updatedById: uuid("updated_by_id"),
+}, (table) => ({
+  orgActiveNextRunIdx: index("recurring_invoice_templates_org_active_next_run_idx").on(
+    table.organizationId,
+    table.isActive,
+    table.nextRunDate,
+  ),
+  orgCustomerIdx: index("recurring_invoice_templates_org_customer_idx").on(
+    table.organizationId,
+    table.customerContactId,
+  ),
+}));
+
+/** One line of a recurring invoice template — copied verbatim onto each generated invoice. */
+export const recurringInvoiceTemplateLines = pgTable("recurring_invoice_template_lines", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  templateId: uuid("template_id")
+    .notNull()
+    .references(() => recurringInvoiceTemplates.id, { onDelete: "cascade" }),
+  lineNumber: integer("line_number").notNull(),
+  description: text("description").notNull(),
+  quantity: numeric("quantity", { precision: 19, scale: 4 }).notNull(),
+  unitPrice: numeric("unit_price", { precision: 19, scale: 4 }).notNull(),
+  accountId: uuid("account_id")
+    .notNull()
+    .references(() => accounts.id),
+  taxCodeId: uuid("tax_code_id").references(() => taxCodes.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  templateLineUnique: uniqueIndex("recurring_invoice_template_lines_template_line_unique").on(
+    table.templateId,
+    table.lineNumber,
+  ),
+  orgTemplateIdx: index("recurring_invoice_template_lines_org_template_idx").on(
+    table.organizationId,
+    table.templateId,
+  ),
+}));
+
+/**
+ * Traces a generated invoice back to the recurring template that produced
+ * it — purely informational (shown on the invoice and the template), never
+ * used to gate anything; the idempotency guarantee lives entirely in
+ * `nextRunDate`, not here.
+ */
+export const invoiceRecurringSource = pgTable("invoice_recurring_source", {
+  invoiceId: uuid("invoice_id")
+    .primaryKey()
+    .references(() => invoices.id, { onDelete: "cascade" }),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  templateId: uuid("template_id")
+    .notNull()
+    .references(() => recurringInvoiceTemplates.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  orgTemplateIdx: index("invoice_recurring_source_org_template_idx").on(table.organizationId, table.templateId),
+}));
+
+// ---------------------------------------------------------------------------
 // Purchases (Phase 4 Slice 1) — supplier bills & AP core, the mirror image
 // of Sales above. See docs/accounting-engine.md and src/domain/purchases/*.
 // ---------------------------------------------------------------------------
@@ -1484,6 +1697,91 @@ export const paymentAllocationsRelations = relations(paymentAllocations, ({ one 
   invoice: one(invoices, {
     fields: [paymentAllocations.invoiceId],
     references: [invoices.id],
+  }),
+}));
+
+export const quotesRelations = relations(quotes, ({ one, many }) => ({
+  organization: one(organizations, {
+    fields: [quotes.organizationId],
+    references: [organizations.id],
+  }),
+  customer: one(contacts, {
+    fields: [quotes.customerContactId],
+    references: [contacts.id],
+  }),
+  convertedInvoice: one(invoices, {
+    fields: [quotes.convertedInvoiceId],
+    references: [invoices.id],
+  }),
+  lines: many(quoteLines),
+}));
+
+export const quoteLinesRelations = relations(quoteLines, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [quoteLines.organizationId],
+    references: [organizations.id],
+  }),
+  quote: one(quotes, {
+    fields: [quoteLines.quoteId],
+    references: [quotes.id],
+  }),
+  account: one(accounts, {
+    fields: [quoteLines.accountId],
+    references: [accounts.id],
+  }),
+  taxCode: one(taxCodes, {
+    fields: [quoteLines.taxCodeId],
+    references: [taxCodes.id],
+  }),
+}));
+
+export const recurringInvoiceTemplatesRelations = relations(recurringInvoiceTemplates, ({ one, many }) => ({
+  organization: one(organizations, {
+    fields: [recurringInvoiceTemplates.organizationId],
+    references: [organizations.id],
+  }),
+  customer: one(contacts, {
+    fields: [recurringInvoiceTemplates.customerContactId],
+    references: [contacts.id],
+  }),
+  arAccount: one(accounts, {
+    fields: [recurringInvoiceTemplates.arAccountId],
+    references: [accounts.id],
+  }),
+  lines: many(recurringInvoiceTemplateLines),
+}));
+
+export const recurringInvoiceTemplateLinesRelations = relations(recurringInvoiceTemplateLines, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [recurringInvoiceTemplateLines.organizationId],
+    references: [organizations.id],
+  }),
+  template: one(recurringInvoiceTemplates, {
+    fields: [recurringInvoiceTemplateLines.templateId],
+    references: [recurringInvoiceTemplates.id],
+  }),
+  account: one(accounts, {
+    fields: [recurringInvoiceTemplateLines.accountId],
+    references: [accounts.id],
+  }),
+  taxCode: one(taxCodes, {
+    fields: [recurringInvoiceTemplateLines.taxCodeId],
+    references: [taxCodes.id],
+  }),
+}));
+
+export const invoiceRecurringSourceRelations = relations(invoiceRecurringSource, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [invoiceRecurringSource.organizationId],
+    references: [organizations.id],
+  }),
+  invoice: one(invoices, {
+    fields: [invoiceRecurringSource.invoiceId],
+    references: [invoices.id],
+  }),
+  template: one(recurringInvoiceTemplates, {
+    fields: [invoiceRecurringSource.templateId],
+    references: [recurringInvoiceTemplates.id],
   }),
 }));
 

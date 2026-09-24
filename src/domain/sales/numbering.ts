@@ -1,5 +1,5 @@
 import { sql, eq } from "drizzle-orm";
-import { invoices } from "@/db/schema";
+import { invoices, quotes } from "@/db/schema";
 import type { TenantDb } from "@/db/tenant";
 
 /**
@@ -17,4 +17,15 @@ export async function nextInvoiceNumber(tx: TenantDb, organizationId: string): P
 
   const count = row?.count ?? 0;
   return `INV-${String(count + 1).padStart(6, "0")}`;
+}
+
+/** Sequential per-organization quote numbers, e.g. "QUO-000123" — same approach as `nextInvoiceNumber`. */
+export async function nextQuoteNumber(tx: TenantDb, organizationId: string): Promise<string> {
+  const [row] = await tx
+    .select({ count: sql<number>`count(*)::int` })
+    .from(quotes)
+    .where(eq(quotes.organizationId, organizationId));
+
+  const count = row?.count ?? 0;
+  return `QUO-${String(count + 1).padStart(6, "0")}`;
 }

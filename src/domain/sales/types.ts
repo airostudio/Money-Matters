@@ -1,7 +1,14 @@
-import type { invoiceStatusEnum, paymentMethodEnum } from "@/db/schema";
+import type {
+  invoiceStatusEnum,
+  paymentMethodEnum,
+  quoteStatusEnum,
+  recurringFrequencyEnum,
+} from "@/db/schema";
 
 export type InvoiceStatus = (typeof invoiceStatusEnum.enumValues)[number];
 export type PaymentMethod = (typeof paymentMethodEnum.enumValues)[number];
+export type QuoteStatus = (typeof quoteStatusEnum.enumValues)[number];
+export type RecurringFrequency = (typeof recurringFrequencyEnum.enumValues)[number];
 
 export interface InvoiceLineInput {
   description: string;
@@ -33,6 +40,53 @@ export interface RecordPaymentAllocationInput {
   /** Decimal string. Must not exceed the invoice's outstanding balance. */
   amount: string;
 }
+
+/**
+ * A quote's line is shaped identically to an invoice's — same
+ * quantity/unitPrice/accountId/taxCodeId fields — so `calculateInvoiceTotals`
+ * can be reused verbatim for quote totals, and a quote's lines can be copied
+ * onto a new invoice's lines without any field-by-field translation.
+ */
+export type QuoteLineInput = InvoiceLineInput;
+
+export interface CreateQuoteInput {
+  customerContactId: string;
+  issueDate: Date;
+  expiryDate: Date;
+  currency: string;
+  memo?: string;
+  lines: QuoteLineInput[];
+}
+
+export type UpdateQuoteInput = CreateQuoteInput;
+
+export interface RecurringInvoiceTemplateLineInput {
+  description: string;
+  /** Decimal string, e.g. "2.00". Must be positive. */
+  quantity: string;
+  /** Decimal string, e.g. "150.00". May be zero, never negative. */
+  unitPrice: string;
+  /** Revenue account this line's amount is credited to when an invoice is generated. */
+  accountId: string;
+  taxCodeId?: string;
+}
+
+export interface CreateRecurringInvoiceTemplateInput {
+  customerContactId: string;
+  name: string;
+  currency: string;
+  arAccountId: string;
+  memo?: string;
+  frequency: RecurringFrequency;
+  startDate: Date;
+  /** Optional — no end date means "run until maxOccurrences or paused". */
+  endDate?: Date;
+  /** Optional — no cap means "run until endDate or paused". */
+  maxOccurrences?: number;
+  lines: RecurringInvoiceTemplateLineInput[];
+}
+
+export type UpdateRecurringInvoiceTemplateInput = CreateRecurringInvoiceTemplateInput;
 
 export interface RecordPaymentInput {
   customerContactId: string;

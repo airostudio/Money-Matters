@@ -101,3 +101,52 @@ export class InvoiceNotPostedForPaymentError extends Error {
     this.name = "InvoiceNotPostedForPaymentError";
   }
 }
+
+export class QuoteNotFoundError extends Error {
+  constructor(quoteId: string) {
+    super(`Quote ${quoteId} was not found in this organization.`);
+    this.name = "QuoteNotFoundError";
+  }
+}
+
+export class QuoteNotEditableError extends Error {
+  constructor(quoteNumber: string) {
+    super(`Quote ${quoteNumber} is not a draft and cannot be edited or deleted.`);
+    this.name = "QuoteNotEditableError";
+  }
+}
+
+export class QuoteNotSentError extends Error {
+  constructor(quoteNumber: string) {
+    super(`Quote ${quoteNumber} has not been sent and cannot be accepted or declined yet.`);
+    this.name = "QuoteNotSentError";
+  }
+}
+
+export class QuoteNotAcceptedError extends Error {
+  constructor(quoteNumber: string) {
+    super(`Quote ${quoteNumber} has not been accepted and cannot be converted to an invoice.`);
+    this.name = "QuoteNotAcceptedError";
+  }
+}
+
+export class QuoteAlreadyConvertedError extends Error {
+  constructor(quoteNumber: string) {
+    super(`Quote ${quoteNumber} has already been converted to an invoice.`);
+    this.name = "QuoteAlreadyConvertedError";
+  }
+}
+
+export class RecurringTemplateNotFoundError extends Error {
+  constructor(templateId: string) {
+    super(`Recurring invoice template ${templateId} was not found in this organization.`);
+    this.name = "RecurringTemplateNotFoundError";
+  }
+}
+
+export class InvalidRecurringTemplateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidRecurringTemplateError";
+  }
+}

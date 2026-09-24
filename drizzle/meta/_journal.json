@@ -1,83 +1,97 @@
 {
-    "version": "7",
-    "dialect": "postgresql",
-    "entries": [
-        {
-            "idx": 0,
-            "version": "7",
-            "when": 1787468767500,
-            "tag": "0000_broad_scarlet_witch",
-            "breakpoints": true
-        },
-        {
-            "idx": 1,
-            "version": "7",
-            "when": 1787468803576,
-            "tag": "0001_row_level_security",
-            "breakpoints": true
-        },
-        {
-            "idx": 2,
-            "version": "7",
-            "when": 1787468804576,
-            "tag": "0002_force_row_level_security",
-            "breakpoints": true
-        },
-        {
-            "idx": 3,
-            "version": "7",
-            "when": 1787486072573,
-            "tag": "0003_gorgeous_steel_serpent",
-            "breakpoints": true
-        },
-        {
-            "idx": 4,
-            "version": "7",
-            "when": 1787486073576,
-            "tag": "0004_bank_feed_row_level_security",
-            "breakpoints": true
-        },
-        {
-            "idx": 5,
-            "version": "7",
-            "when": 1789967645146,
-            "tag": "0005_huge_jasper_sitwell",
-            "breakpoints": true
-        },
-        {
-            "idx": 6,
-            "version": "7",
-            "when": 1789967646146,
-            "tag": "0006_sales_row_level_security",
-            "breakpoints": true
-        },
-        {
-            "idx": 7,
-            "version": "7",
-            "when": 1790121122728,
-            "tag": "0007_adorable_manta",
-            "breakpoints": true
-        },
-        {
-            "idx": 8,
-            "version": "7",
-            "when": 1790121123728,
-            "tag": "0008_purchases_row_level_security",
-            "breakpoints": true
-        },
-        {
-            "idx": 9,
-            "version": "7",
-            "when": 1790205950625,
-            "tag": "0009_kind_tag",
-            "breakpoints": true
-        },
-        {
-            "idx": 10,
-            "version": "7",
-            "when": 1790205951625,
-            "tag": "0010_expenses_row_level_security",
-            "breakpoints": true
-        }
-    ]
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1787468767500,
+      "tag": "0000_broad_scarlet_witch",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1787468803576,
+      "tag": "0001_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1787468804576,
+      "tag": "0002_force_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1787486072573,
+      "tag": "0003_gorgeous_steel_serpent",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1787486073576,
+      "tag": "0004_bank_feed_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1789967645146,
+      "tag": "0005_huge_jasper_sitwell",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1789967646146,
+      "tag": "0006_sales_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1790121122728,
+      "tag": "0007_adorable_manta",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1790121123728,
+      "tag": "0008_purchases_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1790205950625,
+      "tag": "0009_kind_tag",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1790205951625,
+      "tag": "0010_expenses_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1790208132048,
+      "tag": "0011_motionless_robin_chapel",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1790208133048,
+      "tag": "0012_sales_slice2_row_level_security",
+      "breakpoints": true
+    }
+  ]
 }
