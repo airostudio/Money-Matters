@@ -1,9 +1,10 @@
-import { and, asc, desc, eq, inArray, lte, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import { accounts, contacts, journalEntries, journalLines, organizations, taxCodes } from "@/db/schema";
 import { withTenant, type TenantDb } from "@/db/tenant";
 import { Money } from "@/domain/money/money";
 import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
 import type { AccountType } from "@/domain/accounts/account-service";
+import { sumPostedActivityByAccount } from "./gl-aggregation";
 
 /**
  * Loads lines for a set of entries via an explicit join, NOT Drizzle's
@@ -80,42 +81,13 @@ export const LedgerService = {
         .where(eq(organizations.id, actor.organizationId));
       const baseCurrency = org?.baseCurrency ?? "AUD";
 
-      const postedLines = tx
-        .select({
-          accountId: journalLines.accountId,
-          baseDebit: journalLines.baseDebit,
-          baseCredit: journalLines.baseCredit,
-        })
-        .from(journalLines)
-        .innerJoin(journalEntries, eq(journalEntries.id, journalLines.journalEntryId))
-        .where(
-          and(
-            eq(journalEntries.organizationId, actor.organizationId),
-            // A REVERSED entry is still permanent ledger history — its
-            // lines stay in every balance calculation. Only its NEW
-            // reversal entry's opposite postings cancel the effect out.
-            // DRAFT is the only status with no ledger effect. See
-            // docs/accounting-engine.md §1.
-            ne(journalEntries.status, "DRAFT"),
-            lte(journalEntries.postingDate, asOfDate),
-          ),
-        )
-        .as("posted_lines");
-
-      const aggregated = await tx
-        .select({
-          accountId: accounts.id,
-          code: accounts.code,
-          name: accounts.name,
-          type: accounts.type,
-          totalDebit: sql<string>`coalesce(sum(${postedLines.baseDebit}), 0)`,
-          totalCredit: sql<string>`coalesce(sum(${postedLines.baseCredit}), 0)`,
-        })
-        .from(accounts)
-        .leftJoin(postedLines, eq(postedLines.accountId, accounts.id))
-        .where(eq(accounts.organizationId, actor.organizationId))
-        .groupBy(accounts.id, accounts.code, accounts.name, accounts.type)
-        .orderBy(accounts.code);
+      // A REVERSED entry is still permanent ledger history — its lines stay
+      // in every balance calculation. Only its NEW reversal entry's
+      // opposite postings cancel the effect out. See
+      // docs/accounting-engine.md §1 and `sumPostedActivityByAccount`'s own
+      // comment, the shared helper this and every Phase 5 financial
+      // statement query build on.
+      const aggregated = await sumPostedActivityByAccount(tx, actor.organizationId, { to: asOfDate });
 
       return aggregated.map((row) => {
         const debit = Money.of(row.totalDebit, baseCurrency);

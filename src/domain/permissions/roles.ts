@@ -55,6 +55,7 @@ export const PERMISSIONS = [
   "payment_run:read",
   "payment_run:manage",
   "payment_run:approve",
+  "financial_report:read",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -78,6 +79,7 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "journal:read",
     "journal:post",
     "journal:reverse",
+    "financial_report:read",
     "contact:read",
     "contact:manage",
     "tax_code:manage",
@@ -125,6 +127,7 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "account:read",
     "journal:read",
     "journal:post",
+    "financial_report:read",
     "contact:read",
     "contact:manage",
     "dimension:manage",
@@ -222,6 +225,7 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
   MANAGER: new Set<Permission>([
     "account:read",
     "journal:read",
+    "financial_report:read",
     "contact:read",
     "audit:read",
     "bank_account:read",
@@ -244,6 +248,7 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
   READ_ONLY: new Set<Permission>([
     "account:read",
     "journal:read",
+    "financial_report:read",
     "contact:read",
     "audit:read",
     "bank_account:read",
