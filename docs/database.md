@@ -306,6 +306,69 @@ converted invoice and a recurring template's generated invoice both go
 through `InvoiceService.approveAndPost` exactly like a manually created
 invoice — no parallel/shortcut posting path.
 
+## 2g. Phase 4 Slice 2 entity groups: purchase orders, recurring bills,
+supplier credits, payment runs
+
+Four extensions to the Phase 4 Slice 1 purchases domain, per
+`docs/roadmap.md` for what's built vs. deferred (real bank-file/payment-rail
+integration, full inventory-backed goods receiving).
+
+- `PurchaseOrder`/`PurchaseOrderLine` — shaped like `Bill`/`BillLine` on
+  purpose (`PurchaseOrderService` reuses `calculateBillTotals` verbatim). A
+  PO has no `journalEntryId`/`postedAt` — like a `Quote`, it never calls
+  `PostingService`. `status` is `DRAFT → SENT → PARTIALLY_RECEIVED/RECEIVED
+  → CLOSED`, or `CANCELLED`. `PurchaseOrderLine.quantityReceived` is
+  maintained only by `PurchaseOrderReceiptService.recordReceipt`, never
+  edited directly, and is the source of truth both the PO's own status and
+  the three-way match are derived from.
+- `PurchaseOrderReceipt`/`PurchaseOrderReceiptLine` — one row per
+  goods-received event and the PO lines it covered. Deliberately lightweight
+  (no warehouse location, no serial/lot tracking — that needs Phase 7's
+  inventory system) and never posts to the ledger (there is no inventory
+  asset account to debit without a real inventory module — the financial
+  effect happens once, when the resulting bill is posted).
+- `Bill.purchaseOrderId` (added in this slice) — set once, when
+  `PurchaseOrderService.convertToBill` creates the bill, never re-pointed.
+  Null for a bill entered directly (the common case).
+- `BillLine.receiptId` (added in this slice) — an optional link to Phase 2
+  Slice 2's `UploadedReceipt` (Document AI capture), reused as-is for bill
+  capture exactly the way `ExpenseClaimLine.receiptId` already used it — no
+  new extraction/storage code, just the one column.
+- `RecurringBillTemplate`/`RecurringBillTemplateLine`/`BillRecurringSource`
+  — the purchase-side mirror of `RecurringInvoiceTemplate` et al., including
+  reusing `advanceRecurringDate` (`src/domain/sales/recurring-schedule.ts`)
+  verbatim rather than a parallel implementation, since the date-advancement
+  math has nothing sales-specific about it. Same on-demand
+  "generate due bills" action, same DRAFT-only generation via
+  `BillService.create`.
+- `SupplierCreditNote`/`SupplierCreditNoteLine` — shaped like `Bill`
+  (reuses `calculateBillTotals`). Unlike a PO, a credit note *does* post —
+  on approval it debits AP and credits the expense/asset + tax accounts
+  (the exact mirror of a bill's dr/cr), via `PostingService`, so it's a real
+  financial transaction from the moment it's approved.
+- `SupplierCreditAllocation` — how much of a `SupplierCreditNote` was
+  applied against a given `Bill`, the mirror of
+  `SupplierPaymentAllocation` but applied directly rather than through a
+  payment (a credit isn't a payment: no payment account, no bank
+  reconciliation link). **`BillService.loadAllocatedTotal` sums both
+  `SupplierPaymentAllocation` and `SupplierCreditAllocation` together** —
+  the single combined source of truth for a bill's outstanding balance, so
+  a credit applied and a later cash payment can never independently
+  over-allocate past the bill's total.
+- `PaymentRun`/`PaymentRunItem` — a batch of bills prepared for payment
+  together. `PaymentRun.createdById` is who prepared it;
+  `PaymentRun.approvedById` is who approved it, and
+  `PaymentRunService.approve` refuses when they're the same user (master
+  spec §52's segregation of duties) unless the organization has at most one
+  member who can approve at all (see `docs/roadmap.md` for the reasoning).
+  `PaymentRunItem.supplierPaymentId` is set once approval generates the real
+  `SupplierPayment` for that bill's supplier group — one payment per
+  distinct supplier in the run, via
+  `SupplierPaymentAllocationService.recordPayment`, never a parallel posting
+  path. This slice has no real bank-file/payment-rail integration: "PAID"
+  means the payment was recorded in the ledger, the same financial effect a
+  manual `SupplierPayment` already has, just batched and approval-gated.
+
 ## 3. Row-Level Security
 
 Every tenant table gets an RLS policy of the shape:

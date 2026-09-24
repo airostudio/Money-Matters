@@ -425,7 +425,7 @@ separate, later piece of work rather than a rushed shortcut here.
     `RecurringInvoiceService.generateDue` logic, just not yet callable from
     a worker on a timer.
 
-## Phase 4 — Purchases (in progress)
+## Phase 4 — Purchases — **complete** (core + one extension slice)
 
 ### Slice 1 — Suppliers & Accounts Payable core — **complete**
 
@@ -505,10 +505,192 @@ separate, later piece of work rather than a rushed shortcut here.
   scheduled/batch payment runs, segregation-of-duties approval workflow for
   payments (creator ≠ approver), document/receipt capture (OCR)
 
-### Slice 2 — not started
-Purchase orders, goods-received matching, three-way matching, recurring
-bills, supplier credits, batch payment runs, payment approval workflow,
-document/receipt capture.
+### Slice 2 — Purchase orders, recurring bills, supplier credits, payment runs — **complete**
+
+- [x] Schema: `purchase_orders`/`purchase_order_lines`,
+      `purchase_order_receipts`/`purchase_order_receipt_lines`,
+      `recurring_bill_templates`/`recurring_bill_template_lines`,
+      `bill_recurring_source`, `supplier_credit_notes`/
+      `supplier_credit_note_lines`, `supplier_credit_allocations`,
+      `payment_runs`/`payment_run_items` — every one RLS-enabled and FORCEd,
+      `mm_app`-granted (verified by the `db:migrate` tenant-isolation audit —
+      44 of 48 tables now organization-scoped). `bills` gained an optional
+      `purchaseOrderId` (set once, by `PurchaseOrderService.convertToBill`,
+      never re-pointed) and `bill_lines` gained an optional `receiptId`,
+      reusing Phase 2 Slice 2's Document AI receipt capture
+      (`src/domain/documents/{receipt-service,receipt-extraction-service}.ts`)
+      **as-is** for bill capture — it was already entity-agnostic
+      (`uploaded_receipts` has no FK baked in; the link is from the line
+      side, exactly like `expense_claim_lines.receiptId`), so no new
+      extraction/storage code was needed, only the one new column
+- [x] `PurchaseOrderService` + `PurchaseOrderReceiptService`
+      (`src/domain/purchases/purchase-order-service.ts`): DRAFT → SENT →
+      PARTIALLY_RECEIVED/RECEIVED → CLOSED/CANCELLED, reusing
+      `calculateBillTotals` verbatim for line/tax/total math; a PO never
+      calls `PostingService` at any point — exactly like a quote, it is pure
+      workflow until it becomes a bill. `recordReceipt` is deliberately
+      lightweight (no warehouse location, no serial/lot tracking, no
+      inventory-asset posting) — a full goods-received workflow needs a real
+      inventory module (Phase 7, not built yet); this tracks
+      `quantityReceived` per line and derives the PO's own status from it,
+      which is what a business without inventory tracking actually needs
+- [x] Three-way matching (`src/domain/purchases/three-way-match.ts`): a
+      pure, DB-free comparison of a PO line's ordered quantity/price against
+      what's been received and what the supplier's bill claims, producing a
+      plain-language discrepancy per mismatch (e.g. `"Widgets": ordered
+      10.0000, received 10.0000, bill claims 12 — quantity mismatch`).
+      `PurchaseOrderService.convertToBill` runs this automatically and
+      refuses to proceed on any discrepancy unless the caller explicitly
+      passes `acknowledgeDiscrepancies: true` — never a silent auto-accept
+      or auto-reject (master spec §16). Conversion always goes through
+      `BillService.create`, so the resulting bill is a normal DRAFT that
+      still needs its own separate approve-and-post step — a PO conversion
+      never auto-posts
+- [x] `RecurringBillService` (`src/domain/purchases/recurring-bill-service.ts`):
+      structurally identical to `RecurringInvoiceService`, including reusing
+      `src/domain/sales/recurring-schedule.ts`'s `advanceRecurringDate`
+      **verbatim** rather than duplicating it — the date-advancement math
+      (weekly/monthly/quarterly/annually, day-of-month clamping) has nothing
+      sales-specific about it. Same on-demand "Generate due bills" trigger
+      (no job queue exists yet — see Slice 1's own deferral of this), same
+      idempotency guarantee (`nextRunDate` advances past "today" in the same
+      step a bill is generated), same rule that every generated bill is a
+      normal DRAFT via `BillService.create`, never auto-posted
+- [x] `SupplierCreditService` (`src/domain/purchases/supplier-credit-service.ts`):
+      a credit note is shaped like a bill (reuses `calculateBillTotals`) and
+      posts the mirror image on approval — credit the expense/asset account
+      (+ tax input-credit account), debit Accounts Payable — via
+      `PostingService.postJournal`. Applying a credit against an outstanding
+      bill is a small parallel allocation path
+      (`supplier_credit_allocations`) rather than forcing it through
+      `SupplierPaymentAllocationService` (a credit isn't a payment — no
+      payment account, no bank reconciliation link — so bending that
+      service's shape to fit would have been the awkward choice per the
+      slice's own guidance). Critically, `BillService.loadAllocatedTotal`
+      (the single source of truth for "how much of this bill is settled")
+      now sums **both** `supplier_payment_allocations` and
+      `supplier_credit_allocations` together, so a bill's outstanding
+      balance is always the combined truth — a credit and a later cash
+      payment can never independently over-allocate past the bill's total
+- [x] `PaymentRunService` (`src/domain/purchases/payment-run-service.ts`):
+      groups approved/part-paid bills into one `payment_runs` batch
+      (DRAFT → AWAITING_APPROVAL → APPROVED/PAID, org-scoped, tracks
+      `createdById`). **Segregation of duties (master spec §52) is enforced
+      in the service layer**, not just a UI hint: `approve()` rejects an
+      approval attempt where `actor.userId === run.createdById`, throwing
+      `SelfApprovalNotAllowedError` — covered by a dedicated integration
+      test. The one documented exception: if the organization has at most
+      one member holding `payment_run:approve` at all, self-approval is
+      allowed and the fact is recorded in the audit trail
+      (`selfApprovalDocumented`). This was a deliberate least-bad tradeoff —
+      the alternative (blocking it unconditionally) would permanently lock a
+      solo or two-person organization out of ever approving a payment, which
+      is worse than an audited, narrowly-scoped exception; a real
+      multi-person org is never affected by it since it only applies when
+      truly only one eligible approver exists. Approval generates the actual
+      `supplier_payments` via
+      `SupplierPaymentAllocationService.recordPayment` — one call per
+      distinct supplier in the run, reusing that existing, tested allocation
+      path rather than a shortcut — and re-validates every included bill's
+      *current* outstanding balance at approval time (never trusting what
+      was captured when the bill was added to the run)
+- [x] New permissions: `purchase_order:read/manage`,
+      `recurring_bill:read/manage`, `supplier_credit:read/manage/post/void`,
+      `payment_run:read/manage/approve`, wired into `ROLE_PERMISSIONS`
+      (ACCOUNTS_PAYABLE, ACCOUNTANT, BOOKKEEPER, PAYROLL_MANAGER get full
+      access; MANAGER/READ_ONLY get read-only)
+- [x] `AuditService` wired into every new mutation, including the
+      segregation-of-duties exception path noted above
+- [x] UI under `/[orgSlug]/purchases`: Purchase Orders (list/create, detail
+      with goods-received recording and a "convert to bill" form that shows
+      the three-way-match warning and requires an explicit "proceed anyway"
+      checkbox before it will create the bill), Recurring Bills (list/create,
+      detail with pause/resume, a "Generate due bills" action), Supplier
+      Credits (list/create, detail with post/apply-to-bill/void), Payment
+      Runs (list/create — pick bills, defaults to full outstanding balance —
+      detail with submit-for-approval/approve/cancel, the approval button's
+      own error message is the segregation-of-duties rejection when it
+      applies) — all linked from the Purchases dashboard and the
+      role-aware nav
+- [x] Tests: unit (`src/tests/unit/purchases/three-way-match.test.ts` — 7
+      cases covering clean matches, quantity-exceeds-received vs.
+      quantity-exceeds-ordered, price mismatches, and combinations),
+      property-based (`src/tests/property/purchases/supplier-credit-balance.
+      property.test.ts` — every posted credit note's journal balances;
+      `po-to-bill-balance.property.test.ts` — a bill converted from a
+      received PO always balances when posted, whether or not the
+      three-way match found a mismatch), integration
+      (`src/tests/integration/purchases/purchase-orders.test.ts`,
+      `recurring-bills.test.ts`, `supplier-credits.test.ts`,
+      `payment-runs.test.ts` — 27 cases total, incl. the PO
+      receive→mismatch→acknowledge→post→trial-balance flow, recurring
+      generation idempotency, a credit note applied against a bill reducing
+      its balance and interacting correctly with a subsequent cash payment,
+      and the full segregation-of-duties flow: creator's self-approval
+      rejected, a different user's approval succeeds and posts the real
+      payments, plus the single-eligible-approver exception), and
+      tenant-isolation cases for every new table
+- [x] `npm run typecheck`, `npm run lint`, `npm test` (375 tests) and
+      `npm run build` all pass; smoke-tested end-to-end against a real local
+      Postgres and a running production server (`next start`): logged in via
+      the real NextAuth credentials flow (cookie-based session, not a
+      bypass) and confirmed every new list/detail page
+      (`/purchase-orders`, `/recurring-bills`, `/supplier-credits`,
+      `/payment-runs`, each list and one seeded detail page) returns HTTP
+      200 with real data rendered — e.g. the payment run detail page
+      correctly showed `RUN-000001` with a "paid" status badge. The
+      underlying business flow was exercised directly through the same
+      domain services the pages call (register → create a PO → mark sent →
+      receive 10 units → attempt to convert to a bill claiming 12 units,
+      which throws `UnacknowledgedMatchDiscrepancyError` → convert again
+      with `acknowledgeDiscrepancies: true`, which succeeds → approve & post
+      it, Trial Balance reflects the $660 AP balance exactly → create a
+      recurring bill template and generate due bills, re-running the same
+      day generates zero more → create a supplier credit, post it, apply it
+      to the bill, confirm the bill's status/amountPaid reflects the
+      combined credit+cash total → create a payment run as the owner,
+      confirm the owner's own approval attempt is rejected
+      (`SelfApprovalNotAllowedError`), then approve as a second, genuinely
+      different user, confirming the underlying `supplier_payments` posted
+      correctly and the bank/AP balances moved). This confirms the real
+      HTTP/session/rendering layer works end-to-end for the new pages, not
+      only the service layer (which the integration test suite already
+      covers exhaustively against the real Postgres instance) — a full
+      browser click-through was not additionally performed in this
+      environment.
+- Deferred, with reasons (not vague hand-waving):
+  - **Real bank-file/payment-rail integration** (BECS/ABA file export, real
+    bank payment initiation via a banking API) — needs real banking
+    credentials/API access not available in this environment, and is a
+    substantial integration surface (file format compliance, sandbox
+    testing against an actual bank) that deserves its own slice once such
+    credentials exist. `PaymentRunService.approve` records the payment in
+    the ledger exactly like a manual supplier payment does today — correct
+    accounting, just not an actual funds transfer — which is an honest,
+    usable subset rather than a stub
+  - **Full inventory-backed goods receiving** (warehouse/location tracking,
+    serial/lot numbers, an inventory asset account debited on receipt and
+    credited on sale/consumption) — needs Phase 7's inventory system, which
+    doesn't exist yet. `PurchaseOrderReceiptService` tracks received
+    quantity per PO line, which is what a three-way match and a
+    without-inventory business need; a true warehouse receiving workflow is
+    additive on top of this once Phase 7 exists, not a rework
+  - **A job queue driving recurring bills/purchase-order reminders
+    automatically** — same deferral as Phase 2 Slice 2/Phase 3 Slice 2's
+    recurring invoicing: no background job infrastructure exists yet, so
+    "Generate due bills" is a human-triggered action, not a schedule
+
+## Phases 2, 3, and 4 are now all substantially complete
+
+Each has shipped its core slice plus one extension slice (Phase 2:
+banking + AI-assisted reconciliation/expenses/documents; Phase 3:
+invoicing/AR + quotes/recurring invoicing/collection priority; Phase 4:
+bills/AP + purchase orders/recurring bills/supplier credits/payment runs).
+Phase 5 (Reporting) is the next phase to start, per master spec §82's
+ordering — Phases 2-4 together now cover the full order-to-cash and
+procure-to-pay cycles a real small business needs, which is what makes
+meaningful financial reporting (P&L, balance sheet, cash flow, aged
+schedules across both AR and AP) worth building next rather than earlier.
 
 ## Phase 5 — Reporting (not started)
 

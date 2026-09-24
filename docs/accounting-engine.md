@@ -120,10 +120,12 @@ entry with `reversalOfId` set → mark the original `reversedById` → audit.
 
 - Accruals/prepayments *automation* (recurring journal templates) — schema
   note only. Not to be confused with Phase 3 Slice 2's
-  `recurring_invoice_templates` (`src/domain/sales/recurring-invoice-service.ts`),
-  which generates draft *sales invoices* on a schedule via
-  `InvoiceService.create`, not recurring GL journal entries — this deferral
-  is still open.
+  `recurring_invoice_templates` (`src/domain/sales/recurring-invoice-service.ts`)
+  or Phase 4 Slice 2's `recurring_bill_templates`
+  (`src/domain/purchases/recurring-bill-service.ts`), which generate draft
+  *sales invoices*/*supplier bills* on a schedule via
+  `InvoiceService.create`/`BillService.create`, not recurring GL journal
+  entries — this deferral is still open.
 - Multi-currency revaluation — `ExchangeRateService` interface exists,
   implementation is a stub returning rate `1`.
 - Period-lock override workflow UI — the reject path is enforced now; the
