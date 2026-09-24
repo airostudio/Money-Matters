@@ -54,6 +54,10 @@ export const NAV_ITEMS: NavItem[] = [
     anyPermission: ["supplier_bill:read", "expense_claim:read"],
     children: [
       { label: "Bills", href: "/purchases/bills", permission: "supplier_bill:read" },
+      { label: "Purchase Orders", href: "/purchases/purchase-orders", permission: "purchase_order:read" },
+      { label: "Recurring Bills", href: "/purchases/recurring-bills", permission: "recurring_bill:read" },
+      { label: "Supplier Credits", href: "/purchases/supplier-credits", permission: "supplier_credit:read" },
+      { label: "Payment Runs", href: "/purchases/payment-runs", permission: "payment_run:read" },
       { label: "Suppliers", href: "/purchases/suppliers", permission: "supplier_bill:read" },
       { label: "Aged Payables", href: "/purchases/aged-payables", permission: "supplier_bill:read" },
       { label: "Expenses", href: "/expenses", permission: "expense_claim:read" },

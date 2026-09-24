@@ -24,6 +24,13 @@ const STATUS_STYLES: Record<string, string> = {
   DECLINED: "bg-destructive/10 text-destructive",
   CONVERTED: "bg-sky-500/10 text-sky-600 dark:text-sky-400",
   EXPIRED: "bg-destructive/10 text-destructive",
+  PARTIALLY_RECEIVED: "bg-warning/10 text-warning",
+  RECEIVED: "bg-success/10 text-success",
+  CLOSED: "bg-muted text-muted-foreground",
+  CANCELLED: "bg-destructive/10 text-destructive",
+  PART_APPLIED: "bg-warning/10 text-warning",
+  APPLIED: "bg-success/10 text-success",
+  AWAITING_APPROVAL: "bg-warning/10 text-warning",
 };
 
 export function StatusBadge({ status }: { status: string }) {

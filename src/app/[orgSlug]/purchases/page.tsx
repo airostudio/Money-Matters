@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { FileText, Plus, Receipt, Users } from "lucide-react";
+import { CreditCard, FileText, Plus, Receipt, RefreshCw, ShoppingCart, Users, Wallet } from "lucide-react";
 import { requireOrgAndActor } from "@/lib/session";
 import { BillService } from "@/domain/purchases/bill-service";
 import { roleHasPermission } from "@/domain/permissions/roles";
@@ -67,7 +67,7 @@ export default async function PurchasesPage({ params }: { params: { orgSlug: str
         </Card>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-3">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <Link href={`/${org.slug}/purchases/bills`}>
           <Card className="h-full transition-colors hover:border-primary">
             <CardContent className="flex items-center gap-3 p-5">
@@ -97,6 +97,50 @@ export default async function PurchasesPage({ params }: { params: { orgSlug: str
               <div>
                 <p className="font-medium">Aged Payables</p>
                 <p className="text-xs text-muted-foreground">Who you owe, and how overdue</p>
+              </div>
+            </CardContent>
+          </Card>
+        </Link>
+        <Link href={`/${org.slug}/purchases/purchase-orders`}>
+          <Card className="h-full transition-colors hover:border-primary">
+            <CardContent className="flex items-center gap-3 p-5">
+              <ShoppingCart className="size-5 text-muted-foreground" />
+              <div>
+                <p className="font-medium">Purchase Orders</p>
+                <p className="text-xs text-muted-foreground">Order, receive, and three-way match to a bill</p>
+              </div>
+            </CardContent>
+          </Card>
+        </Link>
+        <Link href={`/${org.slug}/purchases/recurring-bills`}>
+          <Card className="h-full transition-colors hover:border-primary">
+            <CardContent className="flex items-center gap-3 p-5">
+              <RefreshCw className="size-5 text-muted-foreground" />
+              <div>
+                <p className="font-medium">Recurring Bills</p>
+                <p className="text-xs text-muted-foreground">Templates for bills that repeat on a schedule</p>
+              </div>
+            </CardContent>
+          </Card>
+        </Link>
+        <Link href={`/${org.slug}/purchases/supplier-credits`}>
+          <Card className="h-full transition-colors hover:border-primary">
+            <CardContent className="flex items-center gap-3 p-5">
+              <CreditCard className="size-5 text-muted-foreground" />
+              <div>
+                <p className="font-medium">Supplier Credits</p>
+                <p className="text-xs text-muted-foreground">Returns and pricing corrections</p>
+              </div>
+            </CardContent>
+          </Card>
+        </Link>
+        <Link href={`/${org.slug}/purchases/payment-runs`}>
+          <Card className="h-full transition-colors hover:border-primary">
+            <CardContent className="flex items-center gap-3 p-5">
+              <Wallet className="size-5 text-muted-foreground" />
+              <div>
+                <p className="font-medium">Payment Runs</p>
+                <p className="text-xs text-muted-foreground">Batch payments with approval segregation</p>
               </div>
             </CardContent>
           </Card>
