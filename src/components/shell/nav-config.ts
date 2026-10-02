@@ -89,7 +89,16 @@ export const NAV_ITEMS: NavItem[] = [
     ],
   },
   { label: "Insights", href: "/insights", icon: Sparkles },
-  { label: "AI Finance", href: "/ai-finance", icon: Bot },
+  {
+    label: "AI Finance",
+    href: "/ai-finance",
+    icon: Bot,
+    permission: "financial_report:read",
+    children: [
+      { label: "Ask the Controller", href: "/ai-finance", permission: "financial_report:read" },
+      { label: "Daily Finance Brief", href: "/ai-finance/brief", permission: "financial_report:read" },
+    ],
+  },
   { label: "Settings", href: "/settings", icon: Settings },
 ];
 

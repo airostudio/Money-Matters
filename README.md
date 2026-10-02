@@ -24,7 +24,13 @@ reporting (ask a plain-English question — Claude translates it into a
 structured query, the same deterministic report-builder engine computes
 the answer, it never calculates anything itself), and an on-demand
 management report pack (all three statements plus a short AI commentary).
-See [`docs/roadmap.md`](docs/roadmap.md) for exactly what's built vs.
+Phase 6 Slice 1 adds the AI Financial Controller — a conversational
+assistant over a fixed set of read-only, permission-checked tools (trial
+balance, P&L, balance sheet, aged receivables/payables, invoice/bill/
+expense-claim lookup, and the report builder) — and an on-demand Daily
+Finance Brief (cash position, money in/out due in the next 7 days, overdue
+receivables/payables, payments awaiting approval). See
+[`docs/roadmap.md`](docs/roadmap.md) for exactly what's built vs.
 explicitly deferred in each (a customer portal, AI-drafted collection
 reminders, a live bank feed provider, Stripe, a background job queue, a
 Redis cache, real bank-file/payment-rail integration, full
@@ -121,11 +127,15 @@ with a warning in the build log saying so.
 
 Optionally, set `ANTHROPIC_API_KEY` to turn on every AI-assisted feature in
 this codebase: the onboarding wizard's chart-of-accounts classification,
-AI-assisted fuzzy bank reconciliation, and Document AI receipt/invoice
-extraction (see `docs/ai-agents.md`). All three are entirely optional — with
-it unset, each falls back silently (a deterministic classifier, no AI
-suggestions section, a blank draft to fill in manually) with no loss of
-core functionality and no network call:
+AI-assisted fuzzy bank reconciliation, Document AI receipt/invoice
+extraction, natural-language reporting, the management report pack's
+commentary, the AI Financial Controller, and the Daily Finance Brief's
+summary paragraph (see `docs/ai-agents.md`). All of these are entirely
+optional — with it unset, each falls back silently (a deterministic
+classifier, no AI suggestions section, a blank draft to fill in manually,
+"natural-language reporting/the AI Financial Controller isn't available
+right now", no commentary/summary paragraph) with no loss of core
+functionality and no network call:
 
 | Variable | Value |
 |---|---|
@@ -133,6 +143,10 @@ core functionality and no network call:
 | `ANTHROPIC_ONBOARDING_MODEL` | Defaults to `claude-haiku-4-5-20251001` if unset. |
 | `ANTHROPIC_RECONCILIATION_MODEL` | Defaults to `claude-haiku-4-5-20251001` if unset. |
 | `ANTHROPIC_DOCUMENT_AI_MODEL` | Defaults to `claude-sonnet-4-5-20250929` if unset (vision extraction benefits from a stronger model than the other two classification-only calls). |
+| `ANTHROPIC_NL_REPORTING_MODEL` | Defaults to `claude-haiku-4-5-20251001` if unset. |
+| `ANTHROPIC_MANAGEMENT_PACK_MODEL` | Defaults to `claude-haiku-4-5-20251001` if unset. |
+| `ANTHROPIC_CONTROLLER_MODEL` | Defaults to `claude-sonnet-4-5-20250929` if unset (the Financial Controller's multi-turn tool-use reasoning benefits from a stronger model than the single-shot classification calls above). |
+| `ANTHROPIC_DAILY_BRIEF_MODEL` | Defaults to `claude-haiku-4-5-20251001` if unset. |
 
 Deploy. `npm run build` runs `npm run db:migrate:ci` first, which applies the
 schema and RLS policies, provisions the `mm_app` role, and then **connects
@@ -226,6 +240,6 @@ application code forgets a filter — see
 - [`docs/accounting-engine.md`](docs/accounting-engine.md) — the double-entry posting engine's invariants
 - [`docs/database.md`](docs/database.md) — schema conventions, RLS, a Drizzle/Postgres pitfall worth reading before touching money-bearing queries
 - [`docs/security.md`](docs/security.md) — tenant isolation, auth, threat model
-- [`docs/ai-agents.md`](docs/ai-agents.md) — the AI layer's architecture (not yet implemented)
+- [`docs/ai-agents.md`](docs/ai-agents.md) — the AI layer's architecture; the AI Financial Controller foundation is implemented (Phase 6 Slice 1), specialist agents/autonomy levels/command bar are not yet
 - [`docs/roadmap.md`](docs/roadmap.md) — phase-by-phase status
 - [`docs/decisions/`](docs/decisions/) — ADRs for the non-obvious technical calls

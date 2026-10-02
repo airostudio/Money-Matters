@@ -1005,11 +1005,130 @@ schedules across both AR and AP) worth building next rather than earlier.
     that belongs with Phase 9's period-lock/close workflow, where
     fiscal-year semantics get defined properly rather than bolted on here.
 
-## Phase 6 — AI (not started)
+## Phase 6 — AI
 
-AI Financial Controller, specialist agents (Bookkeeping, AR, AP, Payroll,
-Tax, FP&A), autonomy levels, command bar, daily/weekly finance briefs. See
-`docs/ai-agents.md` for the architecture this phase implements against.
+### Slice 1 — AI Financial Controller foundation + Daily Finance Brief (complete)
+
+- [x] **AI Financial Controller** (`src/domain/ai-controller/`): a
+      persistent conversational assistant (`/[orgSlug]/ai-finance`,
+      replacing the earlier scaffold placeholder) built exactly to master
+      spec §50's "Intent → Permission → Validation → Tool → Result → Audit"
+      pipeline and §49's non-negotiable permission discipline. A **fixed,
+      explicit set of nine read-only tools**
+      (`src/domain/ai-controller/controller-tools.ts`) — `trial_balance`,
+      `profit_and_loss`, `balance_sheet`, `aged_receivables` (with Phase 3
+      Slice 2's collection priority score), `aged_payables`, `find_invoice`,
+      `find_bill`, `find_expense_claim`, and `run_report` (reusing Phase 5
+      Slice 2's `resolveNLReportRequest` + `ReportBuilderService.runConfig`
+      verbatim rather than a parallel query path) — each a thin wrapper
+      around an already-existing domain-service method, called via Claude's
+      tool-use feature in a capped (5-round) loop
+      (`src/domain/ai-controller/financial-controller-service.ts`). No tool
+      writes, posts, or modifies anything.
+    - **The permission check is never duplicated or widened**: every tool
+      wrapper passes the real, authenticated actor straight into the same
+      domain-service call a route handler would make, so `assertPermission`
+      runs exactly once, in exactly the place it already ran. A refusal
+      (`PermissionDeniedError`) is caught and turned into a plain-language
+      refusal the model is instructed to relay honestly — proven, not just
+      asserted, by `src/tests/integration/ai-controller/financial-controller.test.ts`
+      (a real `EMPLOYEE`/`PAYROLL_MANAGER` actor against the real database,
+      `financial_report:read`-gated questions refused end to end with zero
+      citations recorded) and smoke-tested over real HTTP (a restricted
+      role's authenticated session gets the same refusal the equivalent
+      report page gives). Building this found and fixed one real bug before
+      it shipped: the loop unconditionally called `DimensionService.listActive`
+      to build `run_report`'s dimension hint, which itself requires
+      `dimension:read` — a role without it (`EMPLOYEE`, `PAYROLL_MANAGER`)
+      got an uncaught `PermissionDeniedError` crashing the *entire*
+      conversation turn rather than a narrower refusal. Fixed by falling
+      back to an empty dimension list for that actor, never by widening the
+      permission check.
+    - Every final answer is built from the tool results actually returned
+      — the model narrates and cites, it never computes or recalls a figure
+      itself. A runtime guard (`looksLikeUncitedFigure`, deliberately narrow
+      — see its doc comment) refuses a final answer that contains a
+      currency-shaped figure when no tool was ever called that turn, so a
+      prompt-following failure degrades to "I can't answer that from
+      memory" rather than shipping a hallucinated number. A deterministic
+      "Sources" footer (tool + period + drill-down link) is appended by the
+      application, never left to the model to self-report.
+    - Missing `ANTHROPIC_API_KEY` or a failed/timed-out call resolves to
+      "the AI Financial Controller isn't available right now" — the same
+      no-fallback-that-answers-the-question discipline as NL reporting
+      (docs/ai-agents.md §0b), for the same reason: there's no safe
+      deterministic guess at what a free-text question meant.
+    - Audit: every conversation turn that made at least one tool call is
+      recorded via `AuditService` with `actorType: "AI"` (the onboarding
+      wizard's established convention), listing which tools were called and
+      by whom — a chitchat turn with no tool call logs nothing. Best-effort
+      (wrapped so an audit-write failure never blocks the user's
+      already-computed answer — this is a read-only path, unlike a mutation
+      whose audit record must share its transaction).
+- [x] **Daily Finance Brief** (master spec §73,
+      `src/domain/reporting/daily-finance-brief-service.ts`,
+      `/[orgSlug]/ai-finance/brief`, plus a condensed widget on the org home
+      page): cash position (every linked bank account's real GL balance, via
+      `LedgerService.getTrialBalance` — never the `bank_accounts.currentBalance`
+      cache), money in/out expected in the next 7 days and overdue
+      receivables/payables (from `AgedReceivablesService`/`AgedPayablesService`,
+      which already compute every unpaid invoice/bill's days-until/-past
+      due), and payment runs awaiting approval (`PaymentRunService.list`
+      filtered to `AWAITING_APPROVAL`) — no new aggregation logic anywhere,
+      every figure reuses an existing domain-service call and every number
+      drills down into the real report/record page. An **optional** short
+      AI-written summary paragraph sits on top, following the Management
+      Report Pack's established pattern exactly: handed only the
+      already-computed figures, never a source of a new one, clearly
+      labeled, omitted (not faked) without an API key.
+- [x] **What's deferred to Slice 2, and why**: the specialist-agent system
+      (Bookkeeping/AR/AP/Payroll/Tax/FP&A agents sitting behind the
+      Controller), the autonomy-level framework (master spec §8's Level
+      0-4), and a free-text command bar that drafts or posts transactions —
+      all three are real, separate features that need this slice's
+      tool-calling foundation (the fixed-tool-registry + permission-checked
+      execution loop) to exist first; building them simultaneously would
+      have meant extending an unproven pattern in three directions at once.
+      A **scheduled/emailed** version of the Daily Finance Brief is also
+      deferred — no job-queue/scheduler infrastructure exists in this
+      codebase (the same gap documented since Phase 2 Slice 2 and carried
+      forward through the Management Report Pack); only the on-demand
+      version is built, never a fake "scheduled" toggle with nothing behind
+      it.
+- [x] Tests: unit (`src/tests/unit/ai-controller/financial-controller-loop.test.ts`
+      — the tool-call-loop orchestration against a mocked Anthropic client,
+      no database: the round cap, malformed tool-call-argument rejection,
+      and the uncited-figure guard), integration
+      (`src/tests/integration/ai-controller/controller-tools.test.ts` — each
+      tool wrapper's delegation and permission refusal against the real
+      database; `src/tests/integration/ai-controller/financial-controller.test.ts`
+      — the full mocked-tool-use round trip matching `ReportingService`'s
+      own real output exactly, plus the explicit restricted-role permission-
+      refusal proof described above; `src/tests/integration/reporting/daily-finance-brief.test.ts`
+      — every brief figure checked against seeded data and a direct query
+      of the same underlying services)
+- [x] `npm run typecheck`, `npm run lint`, `npm test` (487 tests) and
+      `npm run build` all pass; smoke-tested over real HTTP against a real
+      local Postgres and a running production server (`next start`):
+      register → sign in → the Daily Finance Brief page renders real seeded
+      figures (an overdue invoice's exact $2,500.00 total) matching a direct
+      SQL query → a restricted `EMPLOYEE` session gets the same refusal the
+      equivalent report page gives for the Brief and the org home page,
+      while the Controller's chat page itself (self-gating per tool call,
+      by design) still renders for them. The Controller's own tool-calling
+      turn (the server action invoking the mocked-Anthropic-client loop) was
+      exercised via the real-database integration tests above, not over raw
+      HTTP — Next.js Server Actions invoked imperatively (not via a plain
+      `<form>`) use a binary RSC wire protocol with no documented
+      curl-reproducible format, the one piece of this slice's HTTP smoke
+      testing that stayed at the integration-test level. The actual
+      Anthropic API call itself is, as with every other AI feature in this
+      codebase, only ever exercised via a mocked SDK — never a real network
+      call in tests or CI.
+
+### Slice 2 — specialist agents, autonomy levels, command bar (not started)
+
+See the Slice 1 deferral note above.
 
 ## Phase 7 — Operations (not started)
 

@@ -1,12 +1,14 @@
-# AI Agents (architecture; the AI Financial Controller itself begins Phase 6)
+# AI Agents (architecture; the AI Financial Controller foundation shipped in Phase 6 Slice 1)
 
-The AI Financial Controller, specialist agents and autonomy levels below are
-still Phase 6+ work. The onboarding wizard's chart-of-accounts recommender
+The specialist agents and autonomy levels described below (§3, §4) remain
+Phase 6 Slice 2+ work. The AI Financial Controller itself — the foundation
+those future specialist agents and the autonomy framework will sit on top
+of — shipped in Phase 6 Slice 1; see §0c for what was actually built, in
+place of the "planned shape" this document originally sketched in §2 before
+any of it existed. The onboarding wizard's chart-of-accounts recommender
 (§0) is the first real AI integration in the codebase, shipped ahead of
 Phase 6 as a small, tightly-scoped exception — see §0 for why it doesn't
-violate the rest of this document. Everything else here remains an
-architecture decision recorded *now* so Phase 1's domain layer doesn't have
-to be reshaped when the fuller AI layer is built.
+violate the rest of this document.
 
 ## 0. First AI integration: onboarding's chart-of-accounts recommender
 
@@ -208,6 +210,135 @@ independently and never replaced by anything the commentary says. A missing
 API key or a failed call simply omits the commentary section; the pack
 itself (three real reports, each independently correct) is unaffected.
 
+## 0c. Fifth AI integration, and the first multi-turn one: the AI Financial Controller (Phase 6 Slice 1)
+
+Every integration above (§0, §0a, §0b) is a single-shot classification or
+extraction call: one question in, one schema-constrained answer out. The AI
+Financial Controller (`src/domain/ai-controller/`) is the first one that
+holds a conversation and decides, turn by turn, *which* of several possible
+lookups a question needs — master spec §50's "Intent → Permission →
+Validation → Tool → Result → Audit" pipeline, finally built rather than just
+diagrammed (§2 below is the diagram this slice implements against).
+
+**The tool list is fixed, explicit, and closed.** The model cannot query the
+database, construct SQL, or invoke anything other than the nine named tools
+in `controller-tools.ts`: `trial_balance`, `profit_and_loss`,
+`balance_sheet`, `aged_receivables`, `aged_payables`, `find_invoice`,
+`find_bill`, `find_expense_claim`, and `run_report` (a generalized
+open-ended lookup — see below). Every one of them is a thin wrapper around
+an already-existing, already-tested domain-service method
+(`LedgerService.getTrialBalance`, `ReportingService.getProfitAndLoss`,
+`AgedReceivablesService.getWithPriority`, …); none of them is new query
+logic invented for this feature. `run_report` is the one exception worth
+calling out by name: rather than becoming a second, parallel "ask it
+anything" path alongside NL reporting (§0b), it reuses
+`resolveNLReportRequest` and `ReportBuilderService.runConfig` **verbatim** —
+the Financial Controller's open-ended tool and the dedicated "Ask a
+question" page share one interpretation→resolution→execution pipeline, not
+two that could drift apart. None of the nine tools writes, posts, approves,
+or modifies anything — this slice is deliberately read-only; an
+action-taking command bar is explicitly Slice 2 work (§3/§4 below).
+
+**The permission check is never skipped, elevated, or re-implemented.**
+Every tool wrapper takes the real, authenticated `Actor` the person is
+signed in as and passes it straight into the underlying domain-service call
+— the exact same `assertPermission(actor, …)` that call already runs for a
+route handler. There is no second, AI-specific permission layer to keep in
+sync with the real one, which is the whole point: master spec §49's "if a
+staff member cannot access payroll through the application, 'Show me
+everyone's salaries' must also be denied by the AI" is true *structurally*,
+because the AI path and the UI path are, past the point of the user's
+question, the identical function call. A `PermissionDeniedError` is caught
+in `controller-tools.ts`'s `guarded()` helper and turned into a plain-
+language refusal the model is instructed (and, by the tool's own output,
+unable to do otherwise) to relay honestly — it is never swallowed into a
+success, and the model is never given an alternate path to the same data.
+
+This is proven, not merely argued, by
+`src/tests/integration/ai-controller/financial-controller.test.ts`: a real
+`EMPLOYEE` actor and a real `PAYROLL_MANAGER` actor, in the real test
+database, ask questions that need `financial_report:read`/
+`customer_invoice:read` they don't hold, and get a refusal with **zero**
+citations recorded — nothing was actually retrieved, not just "not shown."
+The same proof was repeated once more over real HTTP against a running
+server (see `docs/roadmap.md`'s Slice 1 entry) with a genuinely
+authenticated, genuinely restricted-role session, not a mock.
+
+Building this surfaced one real instance of the exact failure class this
+design exists to prevent, before it shipped: `run_report`'s tool
+description is enriched with the organization's real dimension names (the
+same pattern NL reporting's tool schema uses), fetched once per conversation
+turn via `DimensionService.listActive(actor)` — which itself requires
+`dimension:read`. The first version of this code called it unconditionally,
+so an `EMPLOYEE` or `PAYROLL_MANAGER` actor (neither holds `dimension:read`)
+got an *uncaught* `PermissionDeniedError` that crashed the entire
+conversation turn, not a narrow, graceful refusal of just the data they
+couldn't see. The fix falls back to an empty dimension list for that actor
+rather than widening the permission check — `run_report` simply won't
+mention a dimension by name for them, the same as the Report Builder's own
+dimension filter would be invisible to them in the UI. The lesson generalizes:
+every piece of context assembled *around* a tool call — not just the tool
+call's own result — needs the same permission discipline as the tool call
+itself, and a crash is not an acceptable substitute for a refusal.
+
+**The conversational loop.** `FinancialControllerService.ask` sends the
+question (plus the prior turns' plain-text transcript — see its doc comment
+for why only final answers, not raw tool-use blocks, carry across turns) to
+Claude with all nine tools available and `tool_choice: "auto"`. Each round
+the model either calls one or more tools — executed, permission-checked,
+fed back as `tool_result` blocks — or produces a final answer. This repeats
+for up to 5 rounds; the 5th is forced to `tool_choice: "none"` so the
+conversation always ends in a narrated answer rather than a silent timeout.
+A malformed tool-call argument (schema validation failure on the model's
+own `input`) is reported back to the model as a `tool_result` error, not a
+crash, exactly like §0a's fuzzy reconciliation never trusts a tool's own
+shape without re-validating it. A runtime guard
+(`looksLikeUncitedFigure`, deliberately narrow — it only catches a
+currency-shaped number such as `$12,345.67`, not a hallucinated figure
+spelled out in words, which no cheap regex can catch) refuses a final answer
+that states a dollar figure when the model never called a tool that turn —
+the common, cheap failure mode of answering from "general knowledge" instead
+of looking anything up, treated as a bug to catch at runtime, not something
+left entirely to the system prompt's good behavior.
+
+**Citations are computed, never self-reported.** Every successful tool call
+returns a `ToolCitation` (which tool, what period, a drill-down link into
+the real report page — reusing Phase 5's pages, never a parallel rendering
+path) alongside its result. The application appends a deterministic
+"Sources" footer built from the citations that were actually collected; the
+model is told it doesn't need to list its own sources, so there's nothing
+for it to misremember or omit.
+
+**Audit.** Any conversation turn that made at least one tool call — success
+or refusal — is recorded via `AuditService.record` with `actorType: "AI"`
+(the onboarding wizard's established convention, §0), naming which tools
+were called, by whom, for which organization. A turn with no tool call (pure
+small talk) logs nothing — not every chitchat turn needs a heavyweight audit
+row, but anything that touched financial data is traceable. Unlike a
+mutation's audit record (which must share its transaction, per
+`AuditService`'s own doc comment), this is a read-only path: the write is
+best-effort, wrapped so a failure there never blocks the user from seeing
+an answer that was already correctly computed.
+
+**Fallback.** Missing `ANTHROPIC_API_KEY`, a failed/timed-out call, or an
+unhandled error anywhere in the loop all resolve to "the AI Financial
+Controller isn't available right now" — the same no-fallback-that-answers-
+the-question discipline §0b established for NL reporting, and for the same
+reason: there is no safe deterministic substitute for "have a conversation
+about arbitrary financial questions."
+
+**Daily Finance Brief** (`src/domain/reporting/daily-finance-brief-service.ts`,
+master spec §73) is this slice's other half, and a much simpler
+application of the same "AI never produces a figure" principle as the
+Management Report Pack (§0b): every number — cash position, money in/out
+over the next 7 days, overdue receivables/payables, payment runs awaiting
+approval — is computed by composing existing domain-service calls (no new
+aggregation), and an optional short AI-written summary paragraph sits on
+top, given only those already-computed figures and never a source of a new
+one. See `docs/roadmap.md`'s Phase 6 Slice 1 entry for the full list of
+what each figure reuses and what's deferred (a scheduled/emailed version,
+blocked on the still-missing job-queue infrastructure).
+
 ## 1. Why this belongs in the Phase 1 docs
 
 The single most important constraint on the AI layer is: **it must never see
@@ -219,7 +350,7 @@ and no "AI-only" query path — it only ever calls the same domain services
 call, through the same `assertPermission(actor, …)` choke point described in
 `docs/security.md` §4.
 
-## 2. Planned shape: Intent → Permission → Validation → Tool → Result → Audit
+## 2. Planned shape: Intent → Permission → Validation → Tool → Result → Audit (built in Phase 6 Slice 1 — see §0c)
 
 ```
 User/agent request
@@ -250,21 +381,39 @@ confidence columns already exist in the Phase 1 schema (`docs/database.md`
 §2 Governance) specifically so this is additive later, not a migration that
 touches historical rows.
 
+This diagram is no longer aspirational for the read-only half of it: the AI
+Financial Controller (§0c) implements every box above except the "tool call"
+being typed in the stricter sense of *writing* anything — Slice 1's tools
+are all reads. The write side (`prepareBankMatch`-style mutating tool calls,
+behind an autonomy level, with a human-approval gate for high-risk actions)
+is Slice 2's command-bar work, described in §3/§4 below.
+
 ## 3. Autonomy levels (master spec §8) — modeled, not enforced yet
 
 `Organization` will carry a per-workflow autonomy level (0 Manual .. 4 Finance
-Automation). Not implemented in Phase 1; noted here so the eventual column
+Automation). Not implemented yet; noted here so the eventual column
 (`OrganizationAutomationSetting`) is understood to key off `(organizationId,
 workflowType)`, not a single global switch — different workflows (bank
 reconciliation vs. supplier payments vs. payroll) will carry different
-autonomy levels per master spec §8's examples.
+autonomy levels per master spec §8's examples. This is Phase 6 Slice 2 work:
+it only makes sense once there are mutating tool calls (the command bar) for
+an autonomy level to actually gate — Slice 1's tools are all read-only, so
+every one of them is effectively "Level 0 Manual" today, trivially and
+uniformly, with no column needed yet to say so.
 
-## 4. Specialist agents (master spec §9) — not built in Phase 1
+## 4. Specialist agents (master spec §9) — not built yet
 
-Bookkeeping, AR, AP, Payroll, Tax & Compliance, and FP&A agents are Phase 6+
-work, coordinated by an AI Financial Controller. Each will be a thin
-LLM-driven planner over the same domain services; none gets bespoke data
-access.
+Bookkeeping, AR, AP, Payroll, Tax & Compliance, and FP&A agents are Phase 6
+Slice 2+ work, coordinated by the AI Financial Controller built in Slice 1
+(§0c). Each will be a thin LLM-driven planner over the same domain services
+Slice 1's tool registry already calls — none gets bespoke data access, and
+none bypasses the permission discipline §0c establishes. Concretely, a
+specialist agent is expected to be built as its own, narrower tool registry
+(e.g. an AR agent limited to `aged_receivables`, `find_invoice`, and new
+AR-specific read tools) plus its own system prompt, reusing
+`controller-tools.ts`'s wrapper pattern and `financial-controller-service.ts`'s
+loop/guard/audit machinery rather than a parallel implementation of any of
+them.
 
 ## 5. Non-negotiables carried into every future phase (master spec §87)
 

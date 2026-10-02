@@ -4,6 +4,7 @@ import { LedgerService } from "@/domain/ledger/ledger-service";
 import { Money } from "@/domain/money/money";
 import { AccountService } from "@/domain/accounts/account-service";
 import { roleHasPermission } from "@/domain/permissions/roles";
+import { DailyFinanceBriefService } from "@/domain/reporting/daily-finance-brief-service";
 import { MetricCard } from "@/components/accounting/metric-card";
 import { MoneyDisplay } from "@/components/accounting/money-display";
 import { StatusBadge } from "@/components/accounting/status-badge";
@@ -28,6 +29,9 @@ export default async function OrgHomePage({
 
   const needsOnboarding =
     roleHasPermission(actor.role, "onboarding:manage") && !accounts.some((a) => !a.isSystemAccount);
+
+  const canSeeBrief = roleHasPermission(actor.role, "financial_report:read");
+  const brief = canSeeBrief ? await DailyFinanceBriefService.generate(actor) : null;
 
   const sum = (types: string[]) =>
     trialBalance
@@ -128,14 +132,48 @@ export default async function OrgHomePage({
         </Card>
 
         <Card>
-          <CardHeader>
+          <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle className="flex items-center gap-2 text-base">
-              <Bot className="size-4 text-muted-foreground" /> AI Financial Controller
+              <Bot className="size-4 text-muted-foreground" /> Daily Finance Brief
             </CardTitle>
+            {brief && (
+              <Link href={`/${org.slug}/ai-finance/brief`} className="text-sm text-primary hover:underline">
+                Full brief
+              </Link>
+            )}
           </CardHeader>
-          <CardContent className="text-sm text-muted-foreground">
-            Anomaly detection, daily finance briefs, and the AI Financial Controller land in Phase 6 (see{" "}
-            <span className="font-mono text-xs">docs/roadmap.md</span>). Nothing here is faked in the meantime.
+          <CardContent className="space-y-3 text-sm">
+            {!brief ? (
+              <p className="text-muted-foreground">
+                Your role doesn&apos;t have access to financial reports, so the brief isn&apos;t shown here.
+              </p>
+            ) : (
+              <>
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Cash on hand</span>
+                  <MoneyDisplay amount={brief.cash.total} currency={brief.currency} />
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Overdue receivables</span>
+                  <span className={brief.overdueReceivables.count > 0 ? "text-destructive" : undefined}>
+                    {brief.overdueReceivables.count > 0 ? (
+                      <MoneyDisplay amount={brief.overdueReceivables.total} currency={brief.currency} />
+                    ) : (
+                      "None"
+                    )}
+                  </span>
+                </div>
+                {brief.paymentRunsAwaitingApproval.length > 0 && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Payments to approve</span>
+                    <span>{brief.paymentRunsAwaitingApproval.length}</span>
+                  </div>
+                )}
+                <Link href={`/${org.slug}/ai-finance`} className="block pt-1 text-xs text-primary hover:underline">
+                  Ask the AI Financial Controller a question →
+                </Link>
+              </>
+            )}
           </CardContent>
         </Card>
       </div>
