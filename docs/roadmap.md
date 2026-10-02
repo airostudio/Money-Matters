@@ -832,36 +832,178 @@ schedules across both AR and AP) worth building next rather than earlier.
       Revenue $8,000.00 credit / GST Payable $800.00 credit lines. A full
       browser click-through was not additionally performed in this
       environment, matching prior slices' documented smoke-test scope.
-- **Deferred to Slice 2, explicitly, with reasons:**
-  - **Dimensional reporting** (slicing any report by the `dimensions`/
-    `dimension_values`/`journal_line_dimensions` tables Phase 1 already
-    schema'd) — this slice's aggregation query is deliberately structured so
-    adding a dimension filter is one more join/`and()` clause, not a
-    rewrite, but actually exposing it as a UI filter is real, separate
-    scope (which dimension, which values, how it composes with a
-    comparison period) better done once the core statements exist to slice.
-  - **Report builder** (a general "pick accounts/columns/filters and save a
-    custom report" tool) — needs its own data model (saved report
-    definitions) and UI, and is explicitly the next thing to build *on top
-    of* this slice's reporting data model per the master spec's own
-    phrasing, not alongside it.
-  - **Natural-language reporting** (a structured-query path from a plain-
-    English question to one of these reports/a report-builder query — never
-    free-text LLM arithmetic on money, per docs/ai-agents.md's existing
-    non-negotiables) — depends on the report builder's query representation
-    existing first; there is nothing yet for an NL layer to translate into.
-  - **Management report packs** (bundling multiple reports with commentary
-    into one shareable document) — a packaging feature over reports that,
-    before this slice, didn't exist yet to package.
-  - **PDF/Excel export** — CSV was judged a reasonable low-effort baseline
-    for this slice; a formatted PDF/Excel export is more UI/formatting work
-    than this slice's scope justified, and fits naturally alongside the
-    report builder in Slice 2.
-  - **A configurable fiscal-year start** — the Balance Sheet's Retained
-    Earnings/Current Year Earnings split currently assumes a calendar-year
-    fiscal year (see `docs/accounting-engine.md` §8b); a true
-    organization-level setting belongs with Phase 9's period-lock/close
-    workflow, which is where fiscal-year semantics get defined properly.
+- **Deferred to Slice 2** (dimensional reporting, report builder,
+  natural-language reporting, management report packs, PDF/Excel export,
+  configurable fiscal-year start) — see Slice 2 below for what was actually
+  built against each of these and what's carried forward again to Slice 3.
+
+### Slice 2 — Dimensional reporting, report builder, natural-language reporting — **complete**; management report packs — **complete (on-demand only)**; PDF/Excel export and fiscal-year config — **deferred to Slice 3**
+
+- [x] **Dimensional reporting** (master spec §4's "Universal Dimension
+      Engine"). `dimensions`/`dimension_values`/`journal_line_dimensions`
+      have existed in the schema since Phase 1, and `PostingService` could
+      already accept `dimensionValueIds` per line, but **nothing in the app
+      could create a `Dimension`/`DimensionValue` at all**, and no posting
+      path ever passed `dimensionValueIds` — verified by grepping the whole
+      codebase before writing anything, not assumed from the Slice 1 notes.
+      This slice closes that gap honestly rather than faking it:
+      - `src/domain/dimensions/dimension-service.ts` — CRUD for dimensions
+        and their values, gated on the already-existing-but-previously-unused
+        `dimension:manage` permission (split from a new, more broadly
+        granted `dimension:read` so anyone with `financial_report:read` can
+        filter a report by dimension without being able to create one).
+        `/[orgSlug]/accounting/dimensions` is the admin UI.
+      - **Tagging entry point**: the manual Journal Entry form
+        (`/[orgSlug]/accounting/journals/new`) — chosen deliberately as the
+        smallest, cleanest addition, since `PostingService` already accepted
+        `dimensionValueIds` end to end for this path. `JournalLineEditor`
+        gained an optional per-line dimension picker (one dimension value
+        per line, not one per configured dimension — documented in its own
+        doc comment as a limitation, not a bug).
+      - **Explicitly NOT done this slice**: attaching a dimension to an
+        individual invoice or bill line item. That touches Phase 3/4's
+        `InvoiceService`/`BillService` line editors and their multi-line
+        forms across several pages — real, separate scope, not a quick
+        addition the way the single-entry journal form was. Deferred to
+        Slice 3, documented in the Dimensions page's own copy so the gap is
+        visible to users, not just in this file.
+      - `gl-aggregation.ts`'s `sumPostedActivityByAccount` gained the
+        `dimensionValueId` filter Slice 1's own doc comment anticipated (one
+        join against `journal_line_dimensions`, short-circuited to an
+        all-zero result when nothing is tagged with that value — never an
+        unfiltered fallback that would silently show the wrong numbers).
+        `ReportingService.getProfitAndLoss`/`getBalanceSheet` both take an
+        optional `dimensionValueId` now, with a `DimensionFilterField`
+        dropdown added to both report pages (and their CSV export routes).
+- [x] **Report builder** (master spec §33) —
+      `src/domain/reporting/report-builder-service.ts` /
+      `/[orgSlug]/accounting/reports/builder`. A generalized, configurable
+      version of Slice 1's P&L/Balance Sheet grid: rows (individual accounts
+      or account-type totals), columns (a single period, or a monthly/
+      quarterly breakdown — `period-presets.ts` gained `monthlyColumns`/
+      `quarterlyColumns`/`lastNMonths`/`lastNQuarters`/quarter-range
+      helpers), a measure (`BALANCE` = cumulative as-of the column's end
+      date, `MOVEMENT` = activity within the column's own range), filters
+      (date range, account type, dimension), and an optional comparison
+      period (the prior equivalent range). Every number still comes from
+      `sumPostedActivityByAccount` — this module adds no new aggregation
+      query, only configuration over the existing one.
+      `ReportBuilderConfigSchema` (zod) is the single validated shape both a
+      human-built form submission and an AI-translated NL request must
+      produce — see below.
+      Saved as `saved_reports` (org-scoped, `PERSONAL`/`ORGANIZATION`
+      visibility, `config` stored as JSON): **a saved query, never a cached
+      result** — reloading and re-running a saved report always re-executes
+      `config` against current data, proven by an integration test that
+      posts a new transaction between two runs of the same saved report and
+      confirms the second run picks it up. New `saved_report:manage`
+      permission for saving/deleting (reusing `financial_report:read` for
+      running/viewing one).
+- [x] **Natural-language reporting** (master spec §34, quoted in full in
+      `docs/ai-agents.md` §0b) — `src/domain/reporting/nl-report-query.ts`
+      (schema + deterministic resolution) and
+      `src/domain/reporting/nl-reporting-service.ts` (the AI call),
+      `/[orgSlug]/accounting/reports/ask`. Follows the exact
+      interpret → structured request → deterministic resolution →
+      deterministic execution → render pipeline master spec §34 specifies,
+      reusing the report builder's own engine for the last two steps —
+      see `docs/ai-agents.md` §0b for the full writeup, including the one
+      documented place this diverges from every prior AI integration here:
+      there is no deterministic fallback that *answers the question* when
+      the AI is unavailable (a wrong guess at what was asked is worse than
+      no answer), so a missing `ANTHROPIC_API_KEY`/failed call/schema
+      validation failure all resolve to "natural-language queries aren't
+      available right now, try the Report Builder" rather than any report
+      at all.
+- [x] **Management report packs** (master spec §33) —
+      `src/domain/reporting/management-pack-service.ts`,
+      `/[orgSlug]/accounting/reports/management-pack`: P&L + Balance Sheet +
+      Cash Flow summarized together with a short AI-written commentary
+      paragraph, generated **on demand only** — master spec §33 also
+      describes a *scheduled* pack, but no job-queue infrastructure exists
+      in this codebase (Phase 2 Slice 2's deferral, carried forward every
+      slice since), so only the on-demand version was built. The commentary
+      step reuses the "AI never produces a financial figure" principle one
+      more time (see `docs/ai-agents.md` §0b) but is the one place in this
+      codebase where that can't be enforced with a schema, since the output
+      is prose, not a structured value — handled by labeling the commentary
+      as AI-generated and always showing the real figures independently
+      alongside it, never in place of them.
+- [x] New permissions: `dimension:read` (split out of the existing
+      `dimension:manage` so report-filtering access doesn't require
+      dimension-admin access), `saved_report:manage`. Every mutation
+      (creating/deactivating a dimension or value, saving/deleting a saved
+      report) goes through `AuditService.record` in the same transaction.
+- [x] Tests: unit (`period-presets.test.ts` extended with 15 new cases for
+      the monthly/quarterly/last-N-periods helpers;
+      `report-builder-config.test.ts` — 9 cases validating
+      `ReportBuilderConfigSchema` rejects every malformed/out-of-range shape;
+      `nl-report-query.test.ts` — 18 cases: schema rejection of a
+      hallucinated metric/period/breakdown, and `resolveNLReportRequest`'s
+      deterministic resolution for every metric/period combination,
+      including rejecting — never guessing — a dimension reference that
+      doesn't match a real one), integration
+      (`report-builder.test.ts` — 7 cases: hand-computed MOVEMENT/BALANCE/
+      monthly-breakdown figures against real posted data, the
+      save-then-re-run-after-a-new-posting non-caching proof, PERSONAL vs.
+      ORGANIZATION visibility across two real users, and dimension filtering
+      matching `ReportingService`'s own filter; `nl-reporting.test.ts` — 6
+      cases: a full round trip with a mocked Anthropic tool-use response
+      whose resulting figures are asserted equal to the equivalent
+      manually-built report-builder query, a real dimension reference
+      resolved end to end, and three distinct unavailable-but-never-wrong
+      paths (network failure, schema-invalid response, no API key);
+      `dimension-service.test.ts` — 7 cases covering CRUD, duplicate-key/
+      value rejection, active/inactive filtering, and the
+      `dimension:manage`-vs-`dimension:read` permission split) and a new
+      tenant-isolation case for `saved_reports` (invisible cross-tenant,
+      and `runSavedReport`/`deleteSavedReport` both reject as the wrong org).
+- [x] `npm run typecheck`, `npm run lint`, `npm test` (460 tests, up from
+      403) and `npm run build` all pass; smoke-tested against a real local
+      Postgres: a script-driven run (domain services directly, mirroring
+      `scripts/seed.ts`'s own approach) created a real org, tagged a journal
+      line with a dimension, confirmed `ReportingService.getProfitAndLoss`'s
+      dimension filter produced the correct subset ($1,000 of $1,500 total
+      revenue), saved a report builder config, confirmed its first run's
+      total, posted a new transaction, and confirmed the saved report's
+      second run picked up the new figure (proving it is not a cached
+      snapshot) — then logged in via the real NextAuth credentials flow
+      (cookie-based session) and confirmed over HTTP that
+      `/accounting/reports/{profit-and-loss,balance-sheet,builder,ask,
+      management-pack,dimensions}` and `/accounting/journals/new` (with its
+      new dimension picker) all return HTTP 200, with the Report Builder
+      page's rendered HTML containing the real "$1,000.00" revenue figure
+      for a dimension-less query against the same seeded data. The
+      natural-language reporting pipeline's AI call itself was exercised
+      only with a mocked SDK response (no `ANTHROPIC_API_KEY` was available
+      in this environment) — its clarification/unavailable/schema-rejection
+      paths are covered by the integration tests above, but a live call to
+      the real Anthropic API was not performed in this environment, matching
+      the same documented limitation every prior AI integration in this
+      codebase has noted.
+- **Deferred to Slice 3, explicitly, with reasons:**
+  - **Invoice/bill line-level dimension tagging** — see the dimensional
+    reporting notes above; real, separate scope across Phase 3/4's line
+    editors, not attempted here to keep this slice's dimension work to a
+    clean, honest, fully-wired vertical slice (admin → tagging → reporting)
+    rather than a half-wired one spread thinner across more entry points.
+  - **PDF/Excel export** — CSV (Slice 1) and the Report Builder's on-screen
+    table (this slice) cover the practical "get the numbers out" need; a
+    properly formatted PDF or Excel export is real, additional rendering
+    work (a server-side HTML-to-PDF step and a spreadsheet-writing
+    dependency, neither of which exists in this codebase yet) that didn't
+    fit cleanly alongside the two higher-priority features this slice was
+    asked to prioritize. Still worth doing, just not at the cost of rushing
+    the report builder or NL reporting.
+  - **A configurable fiscal-year start** — unchanged from Slice 1's own
+    deferral note: the Balance Sheet's Retained Earnings/Current Year
+    Earnings split (`docs/accounting-engine.md` §8b) still assumes a
+    calendar-year fiscal year (Jan 1 – Dec 31) for the prior-periods/
+    current-year-earnings boundary, and the report builder's own BALANCE
+    measure inherits the same assumption. A true per-organization setting
+    is a real, somewhat invasive schema + retained-earnings-logic change
+    that belongs with Phase 9's period-lock/close workflow, where
+    fiscal-year semantics get defined properly rather than bolted on here.
 
 ## Phase 6 — AI (not started)
 

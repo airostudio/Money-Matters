@@ -369,6 +369,38 @@ integration, full inventory-backed goods receiving).
   means the payment was recorded in the ledger, the same financial effect a
   manual `SupplierPayment` already has, just batched and approval-gated.
 
+## 2h. Phase 5 Slice 2: `saved_reports` (report builder)
+
+One new table for the report builder (master spec §33) —
+`src/domain/reporting/report-builder-service.ts`'s own doc comment has the
+full design; this is the schema-level summary.
+
+- `saved_reports` — `organizationId`, `name`, `description`, `visibility`
+  (`PERSONAL` | `ORGANIZATION`), `config` (`jsonb`), `createdById`,
+  `updatedById`. **`config` is a JSON-serialized `ReportBuilderConfig`, never
+  a cached result** — there is deliberately no result/snapshot column here;
+  running a saved report always re-executes `config` through
+  `sumPostedActivityByAccount` against current data, the same guarantee
+  every other report in this codebase gives. `visibility: PERSONAL` is
+  readable/deletable only by `createdById`; `ORGANIZATION` is readable by
+  anyone in the org holding `financial_report:read` but still only
+  editable/deletable by its creator — `ReportBuilderService` enforces that
+  narrower, per-row ownership check in application code; RLS's `organization_id`
+  policy only ever enforces tenant isolation (which org can see a row at
+  all), never a within-tenant visibility rule like PERSONAL vs. ORGANIZATION.
+  No `DASHBOARD_WIDGET`/`SCHEDULED`
+  visibility exists yet — master spec §33 describes both, but there is no
+  dashboard-widget surface or job-queue infrastructure (see Phase 2 Slice
+  2's deferral, carried forward every slice since) to attach either to.
+- Dimensional reporting (master spec §4) added **no new table** — it reuses
+  `dimensions`/`dimension_values`/`journal_line_dimensions` from Phase 1,
+  previously schema'd but unused by any report or any UI that could create
+  a `Dimension`/`DimensionValue` at all. `src/domain/dimensions/dimension-service.ts`
+  is the first CRUD surface for them; `gl-aggregation.ts`'s
+  `sumPostedActivityByAccount` gained an optional `dimensionValueId` filter
+  (a join against `journal_line_dimensions`), exactly the "one more clause"
+  Slice 1's doc comment on that function anticipated.
+
 ## 3. Row-Level Security
 
 Every tenant table gets an RLS policy of the shape:

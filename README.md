@@ -12,16 +12,24 @@ deterministic Collection Priority Score), and Phase 4 (purchases —
 supplier bills & Accounts Payable core plus purchase orders with
 three-way matching, recurring bills, supplier credits, and payment runs
 with segregation-of-duties approval) are all complete, each as a core
-slice plus one extension slice, and Phase 5 (Reporting) has its first
-slice — Profit & Loss, Balance Sheet, and a Cash Flow Statement (indirect
-method), each with comparison periods, CSV export, and drill-down from
-every line down to its source invoice/bill/expense claim. See
-[`docs/roadmap.md`](docs/roadmap.md) for exactly what's built vs.
+slice plus one extension slice, and Phase 5 (Reporting) has two slices:
+Profit & Loss, Balance Sheet, and a Cash Flow Statement (indirect method),
+each with comparison periods, CSV export, and drill-down from every line
+down to its source invoice/bill/expense claim; plus dimensional reporting
+(tag a journal line with a project/location/department and filter any
+report by it), a configurable Report Builder (rows/columns/measures/
+filters/comparison periods, saved as personal or organization-wide
+queries that always re-run against fresh data), natural-language
+reporting (ask a plain-English question — Claude translates it into a
+structured query, the same deterministic report-builder engine computes
+the answer, it never calculates anything itself), and an on-demand
+management report pack (all three statements plus a short AI commentary).
+See [`docs/roadmap.md`](docs/roadmap.md) for exactly what's built vs.
 explicitly deferred in each (a customer portal, AI-drafted collection
 reminders, a live bank feed provider, Stripe, a background job queue, a
 Redis cache, real bank-file/payment-rail integration, full
-inventory-backed goods receiving, and dimensional reporting/report
-builder/natural-language reporting/management report packs all need
+inventory-backed goods receiving, invoice/bill line-level dimension
+tagging, PDF/Excel export, and a configurable fiscal-year start all need
 either infrastructure that doesn't exist yet, external accounts/
 credentials this environment doesn't have, or are next up on top of what's
 built so far). See [`docs/architecture.md`](docs/architecture.md) for how

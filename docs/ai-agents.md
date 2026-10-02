@@ -124,6 +124,90 @@ available in this environment) recorded in
 feed provider abstraction: ship the credential-free path now, make a real
 object-storage provider (S3, Vercel Blob) an additive swap later.
 
+## 0b. Fourth AI integration: Natural-Language Reporting (Phase 5 Slice 2)
+
+Master spec §34 states this codebase's discipline more explicitly than any
+other section of the spec, so it's worth quoting in full:
+
+> "interpret question → generate a safe structured analytics request →
+> query validated financial data → calculate result deterministically →
+> render chart/table → explain. Never ask the LLM to calculate large
+> financial datasets directly from text."
+
+`src/domain/reporting/nl-report-query.ts` and
+`src/domain/reporting/nl-reporting-service.ts` implement exactly that
+pipeline, as a different front door onto Phase 5 Slice 2's report builder
+(`src/domain/reporting/report-builder-service.ts`) rather than a separate
+feature:
+
+1. **Interpret.** `NLReportingService.ask` sends the user's plain-English
+   question to Claude via a schema-constrained tool call (`structure_report_request`),
+   the same `tools`/`tool_choice` mechanism as every other AI integration
+   here. The model's context includes the organization's real dimension
+   names/values (for matching "marketing" or "Project X" against something
+   real) but **never any balance, total, or other computed figure** — it
+   doesn't need one to do a classification task, and keeping it out of the
+   prompt means there is nothing sensitive for the model to leak or
+   misremember.
+2. **Structured request.** The tool call's output is `NLReportRequest`: one
+   of six fixed `metric` values, one of nine `period` shapes, a `breakdown`,
+   and optional `dimensionKey`/`dimensionValue` strings — re-validated with
+   zod (`NLReportRequestSchema`) exactly like every prior AI response in
+   this codebase, never trusted because the tool schema already shaped it.
+   This is the **entire** output the AI is allowed to produce. It is not
+   SQL, not a number, not a report.
+3. **Deterministic resolution.** `resolveNLReportRequest` is a pure function
+   that turns `NLReportRequest` into the exact same `ReportBuilderConfig`
+   shape a human builds by hand in the Report Builder UI — resolving
+   "last quarter" against the real calendar, and matching `dimensionKey`/
+   `dimensionValue` against the organization's actual dimensions. A
+   dimension reference that doesn't match a real one is a **hard failure**
+   returned to the user as a clarification request, never a guess — the
+   same "never trust a reference the model merely claims, only one that was
+   actually in the list it was given" discipline §0a's fuzzy reconciliation
+   established for candidate ids, applied here to dimension names.
+4. **Deterministic execution.** The resolved config is handed to
+   `ReportBuilderService.runConfig` — the identical function call the Report
+   Builder page itself makes. Nothing about that function knows or cares
+   whether its input came from a form submission or an AI-interpreted
+   question. The AI's job ends at step 2; it never computes a number, and it
+   never sees one before the user does.
+5. **Render and explain.** The result renders through the same
+   `ReportResultTable` component as the Report Builder, with a one-line
+   plain-English restatement ("Showing: Revenue, by month, for the last 12
+   months") above it so the user can confirm the system understood them
+   correctly before trusting the numbers (master spec §34's "explain" step).
+
+**No deterministic fallback that answers the question.** Every other AI
+integration in this codebase (§0, §0a) falls back to a deterministic
+alternative that still completes the task when the AI is unavailable — the
+whole point of their mandatory fallbacks. NL reporting is the one exception,
+on purpose: there is no safe deterministic way to guess what a free-text
+question meant. Falling back to "assume they meant the most recent month" or
+similar would risk confidently showing the *wrong* report for a *different*
+question, which is strictly worse than not answering. So a missing
+`ANTHROPIC_API_KEY`, a timed-out/failed call, or a schema-validation failure
+all resolve to `{ status: "unavailable" }` — the UI tells the user
+natural-language queries aren't available right now and points them at the
+Report Builder directly. This is the one place in this codebase where
+"AI unavailable" means "feature unavailable" rather than "deterministic
+fallback," and it is a deliberate, documented exception to §0/§0a's pattern,
+not an oversight.
+
+**Management report pack commentary** (`src/domain/reporting/management-pack-service.ts`)
+is a lighter-weight fifth use of the same "AI never produces a financial
+figure" principle: the model is handed only the already-computed P&L/
+Balance Sheet/Cash Flow totals (never raw ledger data) and asked to write
+3-5 sentences of prose about them — explicitly instructed to use only the
+given figures, never calculate or introduce a new one. Unlike the four
+integrations above, there is no schema that can validate "the generated
+sentence didn't misstate a number," since the output is prose, not a
+structured value — so the commentary is clearly labeled as AI-generated in
+the UI and the figures themselves are always shown alongside it, computed
+independently and never replaced by anything the commentary says. A missing
+API key or a failed call simply omits the commentary section; the pack
+itself (three real reports, each independently correct) is unaffected.
+
 ## 1. Why this belongs in the Phase 1 docs
 
 The single most important constraint on the AI layer is: **it must never see
