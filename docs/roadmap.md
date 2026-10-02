@@ -1261,6 +1261,174 @@ schedules across both AR and AP) worth building next rather than earlier.
       page redirects confirmed over real HTTP) in addition to the
       real-database integration-test proof above.
 
+### Slice 3 — the real 0-4 autonomy slider: whitelisted auto-execution (complete)
+
+User-authorized expansion beyond Slice 2's scope ("Let's have levels of
+autonomy, the user can select how much on a sliding scale, that makes it the
+user's responsibility" — "it will be most things, just not critical things
+as mentioned"). This slice builds the real five-level dial master spec §8
+describes, where Levels 3-4 let the AI auto-EXECUTE (not just prepare-and-
+wait) a narrow, pre-approved set of actions — while the critical-action
+carve-out from §8 stays human-gated at every level, no exception, exactly as
+the user confirmed.
+
+- [x] **`AutonomySettingsService.setLevel` now accepts 0-4** (`autonomy.ts`)
+      — the `InvalidAutonomyLevelError` rejection of 3/4 from Slice 2 is
+      gone; only a genuinely out-of-range value (5, -1, ...) is rejected
+      now. `AUTONOMY_LEVEL_LABELS`/`AUTONOMY_LEVEL_DESCRIPTIONS` give a
+      plain-English explanation per level for the Settings UI ("don't make
+      the user guess" what a level does).
+- [x] **The whitelist mechanism (master spec §76: "learn ... only through
+      controlled configuration")** — a new `ai_auto_approved_actions` table
+      (`organizationId`, `actionType`, unique per pair) is the per-org,
+      per-action-type opt-in list `src/domain/ai-controller/
+      auto-execution-policy.ts` reads. Selecting Level 3 or 4 inserts
+      **zero** rows here by itself — `isAutoExecutionApproved(organizationId,
+      actionType)` requires BOTH `level >= 3` AND an explicit whitelist row,
+      read fresh from Postgres on every single check, never cached. This is
+      proven in `src/tests/integration/ai-controller/auto-execution.test.ts`:
+      a Level 4 org with an empty whitelist auto-executes nothing despite
+      due work existing, and a whitelisted action type at Level 2 still
+      doesn't execute (level checked independently of the whitelist).
+- [x] **The closed allowlist**: `AUTO_APPROVABLE_ACTION_TYPES` has exactly
+      three members —
+      `RECURRING_INVOICE_AUTO_GENERATE`/`RECURRING_BILL_AUTO_GENERATE`
+      (auto-triggers the existing, already-human-triggered
+      `RecurringInvoiceService.generateDue`/`RecurringBillService.generateDue`
+      — "trigger the thing a human would have clicked," never new business
+      logic) and `BANK_RECONCILIATION_AUTO_MATCH` (auto-confirms ONLY a
+      deterministic, same-day, exact-amount `ReconciliationService.
+      findCandidateMatches` candidate — confidence exactly 1.0 — via the
+      exact same `confirmMatch` a human's "Confirm match" click already
+      calls). **Deliberately never auto-confirms an AI-scored
+      `FuzzyReconciliationService` suggestion, however high its reported
+      confidence** — a probabilistic judgment is not the "previously
+      human-approved category" §76 describes, so fuzzy suggestions stay
+      propose-only at every autonomy level, with no exception for Level 4.
+      Both the Postgres enum column and a zod schema in application code
+      enforce this closed set — `AutoApprovedActionsService.setEnabled`
+      refuses an excluded value (`SUPPLIER_PAYMENT_CREATE`,
+      `BANK_ACCOUNT_DETAIL_CHANGE`, `PAYROLL_ANY`, `TAX_SUBMISSION_ANY`,
+      `JOURNAL_ENTRY_UNUSUAL`, `FISCAL_PERIOD_CLOSE`, ...) with
+      `InvalidAutoApprovedActionTypeError`, structurally, at Level 4 exactly
+      as it would be refused at Level 0 — proven in both
+      `src/tests/unit/ai-controller/auto-execution-policy.test.ts`
+      (allowlist/exclusion-list disjointness, no database) and the
+      integration suite (an actual attempt to whitelist one, refused).
+      `prepare_draft_journal_entry` (Slice 2) is never promoted to
+      auto-execute at any level — there is no `JOURNAL_ENTRY` entry in the
+      allowlist at all, so an "unusual" freeform journal entry stays
+      confirmation-gated structurally, not by convention.
+- [x] **`PaymentRunService`'s segregation-of-duties check is untouched and
+      remains the sole authority over payment approval** — no autonomy
+      level logic was added in front of or instead of it; nothing in
+      `AutoExecutionService` calls `PaymentRunService` at all. Proven with a
+      real-database test: a Level 4 org with every action type whitelisted
+      still gets `SelfApprovalNotAllowedError` when the same user who
+      created a payment run tries to approve it, exactly as at Level 0.
+- [x] **Honest Level 3 vs. Level 4 distinction: there isn't a safely-
+      buildable one with what exists in this codebase today, and this is
+      stated plainly rather than fabricated.** Both levels share the
+      identical whitelist mechanism and, right now, the identical closed
+      set of three auto-approvable action types — exactly the same honest
+      choice Slice 2 made for Levels 0/1 ("functionally identical today,
+      kept as distinct values because master spec §8 names them
+      distinctly"). The task suggested one candidate Level-4-only
+      distinction (auto-promoting an auto-drafted invoice/bill into a
+      "ready for review" queue) — this was deliberately NOT built: there is
+      no "ready for review" status anywhere in `invoice_status`/
+      `bill_status` today, and inventing one purely to manufacture a 3-vs-4
+      difference would be exactly the shallow, fabricated distinction the
+      task asked not to produce. A real Level-4-only action type becomes
+      possible once this codebase has a second low-risk, reversible,
+      already-human-triggered mechanism to reserve for it — e.g. once a
+      bank-feed auto-import/categorization pass or a second reconciliation
+      strategy exists.
+- [x] **Human override machinery (master spec §77)**:
+    - **Visibly flagged, not buried in the audit log**: a new
+      `ai_auto_executions` table records every auto-executed action
+      (actionType, entityType/entityId, confidence, autonomy level,
+      who triggered the check). The invoice and bill list pages
+      (`sales/invoices`, `purchases/bills`) query it to render a distinct
+      "AI auto" badge next to an auto-created draft; the Daily Finance
+      Brief surfaces a callout when any auto-execution happened in the last
+      24 hours.
+    - **Trivially undoable, never a destructive edit**:
+      `AutoExecutionService.undo` calls `InvoiceService.deleteDraft`/
+      `BillService.deleteDraft` for an auto-generated draft (still a plain
+      DRAFT — nothing was posted), and a new `ReconciliationService.unmatch`
+      for an auto-confirmed bank match (reverts the link; refuses if the
+      transaction was instead reconciled by posting a brand-new journal
+      entry, since undoing that must go through `PostingService.
+      reverseEntry`, never a status flip — but auto-execution in this slice
+      never takes that path in the first place, only the link-to-existing-
+      line path).
+    - **A real, reachable emergency stop, separate from the normal settings
+      form**: `AutonomySettingsService.emergencyStop` drops the org straight
+      to Level 0 and leaves the whitelist untouched (so re-enabling later
+      restores the same configuration). There is no cache to invalidate —
+      `isAutoExecutionApproved` reads the level fresh from Postgres on every
+      call — so the very next check anywhere in the app is blocked
+      immediately. Proven with a real-database test: Level 4 + a
+      whitelisted action type auto-executes once, emergency stop is
+      triggered, new due work is created, and the very next
+      `runPendingAutoExecutions` call executes nothing, with the whitelist
+      row still present in the database.
+- [x] **Who triggers it, given no job-queue infrastructure exists**
+      (the same documented gap since Phase 2 Slice 2): a conversation turn
+      with the AI Financial Controller (`FinancialControllerService.ask`)
+      runs `AutoExecutionService.runPendingAutoExecutions` as a best-effort
+      first step (never blocking the user's actual question on failure),
+      and the Settings page has its own "Run automated actions now" button
+      — the same honest "on-demand precursor to real scheduling" framing
+      `RecurringInvoiceService.generateDue` itself already carried forward
+      from Phase 3 Slice 2.
+- [x] **Settings UI**: the autonomy picker now spans 0-4 with a plain-
+      English description per level; at Level 3/4 a whitelist panel appears
+      with one checkbox-equivalent toggle per auto-approvable action type
+      (unchecked by default, even at Level 4); a "Run automated actions
+      now" button; and a visually distinct, separately-labeled "Emergency
+      stop" control that drops straight to Level 0.
+- [x] Tests: unit
+      (`src/tests/unit/ai-controller/auto-execution-policy.test.ts` — the
+      allowlist is small/specific (not "everything except excluded"),
+      disjoint from a documented excluded-category example list, and
+      `isAutoApprovableActionType`/`InvalidAutoApprovedActionTypeError`
+      refuse every excluded example, no database), integration
+      (`src/tests/integration/ai-controller/auto-execution.test.ts` — level-
+      alone-does-nothing at Level 4 with empty whitelist and at Level 2 with
+      a whitelist entry; excluded-category whitelisting refused at Level 4;
+      `PaymentRunService` self-approval still blocked at Level 4 with a full
+      whitelist; `prepare_draft_journal_entry` never auto-promoted; full
+      whitelisted end-to-end round trips for both recurring-invoice and
+      recurring-bill auto-generation and for bank-reconciliation auto-match,
+      each checked for the "AI auto" flag, the master-spec-§44 audit fields
+      including the honest "auto-approved under org policy" approver, and
+      successful `undo`; the emergency stop's immediate, no-caching effect
+      with new due work appearing after the stop).
+- [x] `npm run typecheck`, `npm run lint`, `npm test` (533 tests — the 516
+      from Slice 2 plus 17 new) and `npm run build` all pass against a local
+      Postgres (two new migrations: `ai_auto_approved_actions` and
+      `ai_auto_executions`, both with the same FORCEd-RLS tenant-isolation
+      policy every other tenant table has — confirmed by `db:migrate`'s own
+      tenant-isolation audit going from 46/50 to 48/52 org-scoped tables).
+      Smoke-tested for real against a local Postgres (a throwaway script
+      exercising the real domain services, not mocks, deleted afterward):
+      Level 4 with an empty whitelist auto-executed nothing; whitelisting
+      `RECURRING_INVOICE_AUTO_GENERATE` then re-running auto-executed
+      exactly one due invoice, visibly flagged as AI-auto in the lookup the
+      invoice list page uses; attempting to whitelist
+      `SUPPLIER_PAYMENT_CREATE` was refused with
+      `InvalidAutoApprovedActionTypeError`; triggering the emergency stop
+      and creating new due work afterward produced zero further
+      auto-execution on the next check. The real Anthropic API call itself
+      is, as with every other AI feature in this codebase, only ever
+      exercised via a mocked SDK in the Controller's own loop tests — never
+      a real network call in tests or CI; none of this slice's own
+      mechanism (the whitelist gate, the three runners, undo, emergency
+      stop) involves an LLM call at all, so there was nothing to mock there
+      in the first place.
+
 ## Phase 7 — Operations (not started)
 
 Projects/jobs, time tracking, inventory (incl. costing methods, landed

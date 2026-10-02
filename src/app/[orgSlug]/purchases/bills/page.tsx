@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Plus } from "lucide-react";
 import { requireOrgAndActor } from "@/lib/session";
 import { BillService } from "@/domain/purchases/bill-service";
+import { AutoExecutionService } from "@/domain/ai-controller/auto-execution-service";
 import { roleHasPermission } from "@/domain/permissions/roles";
 import { billStatusEnum } from "@/db/schema";
 import { Button } from "@/components/ui/button";
@@ -25,6 +26,7 @@ export default async function BillsPage({
       : undefined;
 
   const bills = await BillService.list(actor, { status: statusFilter });
+  const aiAutoBillIds = await AutoExecutionService.listAutoExecutedEntityIds(org.id, "Bill");
   const canManage = roleHasPermission(actor.role, "supplier_bill:manage");
   const now = new Date();
 
@@ -90,6 +92,14 @@ export default async function BillsPage({
                         <Link href={`/${org.slug}/purchases/bills/${bill.id}`} className="font-medium hover:underline">
                           {bill.billNumber}
                         </Link>
+                        {aiAutoBillIds.has(bill.id) && (
+                          <span
+                            className="ml-2 rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-violet-700 dark:bg-violet-950 dark:text-violet-300"
+                            title="Auto-created by the AI Financial Controller under this organization's autonomy policy — see Settings"
+                          >
+                            AI auto
+                          </span>
+                        )}
                         {bill.supplierReference && (
                           <div className="text-xs text-muted-foreground">{bill.supplierReference}</div>
                         )}

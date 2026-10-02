@@ -265,6 +265,48 @@ export const ReconciliationService = {
     });
   },
 
+  /**
+   * Reverts a transaction matched via `confirmMatch` back to UNMATCHED — the
+   * undo mechanism Phase 6 Slice 3's auto-execution needs (master spec §77:
+   * every auto-executed action must be trivially undoable). This NEVER
+   * reaches a transaction that was reconciled via `createJournalFromTransaction`
+   * (`categorizedAccountId` would be set): that path posted a real new
+   * journal entry, and undoing a posted entry must go through
+   * `PostingService.reverseEntry`, never a status flip — `unmatch` refuses
+   * with `BankTransactionAlreadyMatchedError`'s sibling check below rather
+   * than silently detaching a posted entry's own bank-side link. A plain
+   * `confirmMatch`, by contrast, never posted anything — it only linked this
+   * transaction to an already-existing, already-posted journal line — so
+   * reverting that link is not a destructive ledger edit at all.
+   */
+  async unmatch(actor: Actor, bankTransactionId: string) {
+    assertPermission(actor, "bank_transaction:reconcile");
+    return withTenant(actor.organizationId, async (tx) => {
+      const { transaction } = await loadBankTransaction(tx, actor.organizationId, bankTransactionId);
+      if (transaction.status !== "RECONCILED" || transaction.categorizedAccountId) {
+        throw new Error(
+          `Bank transaction ${bankTransactionId} cannot be unmatched this way — it either isn't reconciled, or it was reconciled by posting a new journal entry (use PostingService.reverseEntry for that).`,
+        );
+      }
+
+      const [updated] = await tx
+        .update(bankTransactions)
+        .set({ status: "UNMATCHED", matchedJournalLineId: null, matchedById: null, matchedAt: null })
+        .where(eq(bankTransactions.id, bankTransactionId))
+        .returning();
+
+      await AuditService.record(tx, actor, {
+        action: "bank_transaction.unmatched",
+        entityType: "BankTransaction",
+        entityId: bankTransactionId,
+        before: { matchedJournalLineId: transaction.matchedJournalLineId },
+        after: { status: "UNMATCHED" },
+      });
+
+      return updated;
+    });
+  },
+
   /** Marks a transaction as deliberately not reconciled (a duplicate export, an out-of-scope line) — no ledger effect. */
   async exclude(actor: Actor, bankTransactionId: string, reason?: string) {
     assertPermission(actor, "bank_transaction:reconcile");

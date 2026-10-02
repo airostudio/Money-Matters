@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Plus } from "lucide-react";
 import { requireOrgAndActor } from "@/lib/session";
 import { InvoiceService } from "@/domain/sales/invoice-service";
+import { AutoExecutionService } from "@/domain/ai-controller/auto-execution-service";
 import { roleHasPermission } from "@/domain/permissions/roles";
 import { invoiceStatusEnum } from "@/db/schema";
 import { Button } from "@/components/ui/button";
@@ -25,6 +26,7 @@ export default async function InvoicesPage({
       : undefined;
 
   const invoices = await InvoiceService.list(actor, { status: statusFilter });
+  const aiAutoInvoiceIds = await AutoExecutionService.listAutoExecutedEntityIds(org.id, "Invoice");
   const canManage = roleHasPermission(actor.role, "customer_invoice:manage");
   const now = new Date();
 
@@ -90,6 +92,14 @@ export default async function InvoicesPage({
                         <Link href={`/${org.slug}/sales/invoices/${inv.id}`} className="font-medium hover:underline">
                           {inv.invoiceNumber}
                         </Link>
+                        {aiAutoInvoiceIds.has(inv.id) && (
+                          <span
+                            className="ml-2 rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-violet-700 dark:bg-violet-950 dark:text-violet-300"
+                            title="Auto-created by the AI Financial Controller under this organization's autonomy policy — see Settings"
+                          >
+                            AI auto
+                          </span>
+                        )}
                       </td>
                       <td className="px-6 py-2.5">{inv.customer.displayName}</td>
                       <td className="px-6 py-2.5 text-muted-foreground">

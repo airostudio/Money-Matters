@@ -6,6 +6,8 @@ import { requireOrgAndActor } from "@/lib/session";
 import { OrganizationService } from "@/domain/organizations/organization-service";
 import { membershipRoleEnum } from "@/db/schema";
 import { AutonomySettingsService, InvalidAutonomyLevelError } from "@/domain/ai-controller/autonomy";
+import { AutoApprovedActionsService, InvalidAutoApprovedActionTypeError } from "@/domain/ai-controller/auto-execution-policy";
+import { AutoExecutionService } from "@/domain/ai-controller/auto-execution-service";
 
 const roleValues = membershipRoleEnum.enumValues;
 
@@ -76,5 +78,58 @@ export async function updateAutonomyLevelAction(orgSlug: string, formData: FormD
     if (err instanceof InvalidAutonomyLevelError) return;
     throw err;
   }
+  revalidatePath(`/${orgSlug}/settings`);
+}
+
+/**
+ * A real, reachable control separate from the level picker above (master
+ * spec §77's "pause/override") — see `AutonomySettingsService.emergencyStop`.
+ * Swallows a permission refusal the same way the level-picker form does:
+ * this page only ever renders the button for an actor who already holds
+ * `organization:manage`, so a submission from anyone else can only be a
+ * stale/forged request, not a real user hitting an error they need to see.
+ */
+export async function emergencyStopAction(orgSlug: string): Promise<void> {
+  const { actor } = await requireOrgAndActor(orgSlug);
+  try {
+    await AutonomySettingsService.emergencyStop(actor);
+  } catch {
+    return;
+  }
+  revalidatePath(`/${orgSlug}/settings`);
+}
+
+/**
+ * The Level 3/4 whitelist (master spec §76) — one checkbox per auto-
+ * approvable action type. `AutoApprovedActionsService.setEnabled` itself
+ * re-validates `actionType` against the closed enum regardless of what this
+ * form's own checkboxes could produce, so a tampered/forged submission is
+ * refused structurally, not just prevented by the UI.
+ */
+export async function updateAutoApprovedActionAction(orgSlug: string, formData: FormData): Promise<void> {
+  const { actor } = await requireOrgAndActor(orgSlug);
+  const actionType = formData.get("actionType");
+  const enabled = formData.get("enabled") === "true";
+  if (typeof actionType !== "string") return;
+
+  try {
+    await AutoApprovedActionsService.setEnabled(actor, actionType, enabled);
+  } catch (err) {
+    if (err instanceof InvalidAutoApprovedActionTypeError) return;
+    throw err;
+  }
+  revalidatePath(`/${orgSlug}/settings`);
+}
+
+/**
+ * The on-demand touchpoint for Level 3/4 auto-execution (see
+ * `auto-execution-service.ts`'s doc comment on why this codebase has no
+ * background job queue to run it automatically). Safe to click at any
+ * autonomy level — it only ever does anything for an action type that is
+ * BOTH Level 3/4 AND explicitly whitelisted.
+ */
+export async function runAutoExecutionsAction(orgSlug: string): Promise<void> {
+  const { actor } = await requireOrgAndActor(orgSlug);
+  await AutoExecutionService.runPendingAutoExecutions(actor);
   revalidatePath(`/${orgSlug}/settings`);
 }

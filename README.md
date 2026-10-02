@@ -36,7 +36,13 @@ tools that PREPARE — never create or post — a draft invoice, bill, or
 journal entry, always behind a separate, explicit human confirmation step
 before anything is written to the database, and four specialist agent
 modes (Bookkeeping, AR, AP, FP&A) as scoped tool subsets/system prompts
-over the same Controller loop. See
+over the same Controller loop. Phase 6 Slice 3 extends the autonomy
+setting to the full 0-4 range: Levels 3-4 let the AI auto-execute (no
+confirmation click) a narrow, organization-whitelisted set of actions —
+auto-generating a due recurring invoice/bill, or auto-confirming an exact,
+same-day bank reconciliation match — while supplier payments, bank
+details, payroll, tax, unusual journals, and period closes stay
+human-gated at every level, with no exception. See
 [`docs/roadmap.md`](docs/roadmap.md) for exactly what's built vs.
 explicitly deferred in each (a customer portal, AI-drafted collection
 reminders, a live bank feed provider, Stripe, a background job queue, a
@@ -247,6 +253,6 @@ application code forgets a filter — see
 - [`docs/accounting-engine.md`](docs/accounting-engine.md) — the double-entry posting engine's invariants
 - [`docs/database.md`](docs/database.md) — schema conventions, RLS, a Drizzle/Postgres pitfall worth reading before touching money-bearing queries
 - [`docs/security.md`](docs/security.md) — tenant isolation, auth, threat model
-- [`docs/ai-agents.md`](docs/ai-agents.md) — the AI layer's architecture: the AI Financial Controller foundation (Phase 6 Slice 1), and the autonomy-level gate, prepare/confirm write tools, and specialist-agent modes (Phase 6 Slice 2). Level 3/4 autonomy (auto-execution) and Payroll/Tax specialist agents are not yet built — see that doc and `docs/roadmap.md` for why
+- [`docs/ai-agents.md`](docs/ai-agents.md) — the AI layer's architecture: the AI Financial Controller foundation (Phase 6 Slice 1), the autonomy-level gate, prepare/confirm write tools, and specialist-agent modes (Phase 6 Slice 2), and the full 0-4 autonomy dial with whitelisted auto-execution, undo, and an emergency stop (Phase 6 Slice 3). Payroll/Tax specialist agents are not yet built — see that doc and `docs/roadmap.md` for why
 - [`docs/roadmap.md`](docs/roadmap.md) — phase-by-phase status
 - [`docs/decisions/`](docs/decisions/) — ADRs for the non-obvious technical calls

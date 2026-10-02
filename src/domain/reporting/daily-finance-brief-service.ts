@@ -5,6 +5,7 @@ import { LedgerService } from "@/domain/ledger/ledger-service";
 import { AgedReceivablesService, type PrioritizedInvoiceRow } from "@/domain/sales/aged-receivables-service";
 import { AgedPayablesService, type AgedBillRow } from "@/domain/purchases/aged-payables-service";
 import { PaymentRunService } from "@/domain/purchases/payment-run-service";
+import { AutoExecutionService } from "@/domain/ai-controller/auto-execution-service";
 import { Money } from "@/domain/money/money";
 import { formatDateParam } from "./period-presets";
 
@@ -63,6 +64,8 @@ export interface DailyFinanceBrief {
   overdueReceivables: { count: number; total: string; topPriority: PrioritizedInvoiceRow[] };
   overduePayables: { count: number; total: string };
   paymentRunsAwaitingApproval: PaymentRunAwaitingApproval[];
+  /** Phase 6 Slice 3 (master spec §77: surface auto-executed items wherever they appear, not just in the audit log) — count of auto-executed actions in this brief's lookback window, so an owner sees at a glance whether the AI did anything unattended. */
+  recentAiAutoExecutions: number;
   callouts: string[];
   /** `null` when `ANTHROPIC_API_KEY` is unset or the call failed — the brief is complete and useful without it. */
   aiSummary: string | null;
@@ -101,12 +104,13 @@ export const DailyFinanceBriefService = {
   async generate(actor: Actor, asOfDate: Date = new Date()): Promise<DailyFinanceBrief> {
     assertPermission(actor, "financial_report:read");
 
-    const [bankAccounts, trialBalance, receivables, payables, awaitingApproval] = await Promise.all([
+    const [bankAccounts, trialBalance, receivables, payables, awaitingApproval, recentAutoExecutions] = await Promise.all([
       BankAccountService.list(actor),
       LedgerService.getTrialBalance(actor, asOfDate),
       AgedReceivablesService.getWithPriority(actor, asOfDate),
       AgedPayablesService.get(actor, asOfDate),
       PaymentRunService.list(actor, { status: "AWAITING_APPROVAL" }),
+      AutoExecutionService.listRecent(actor.organizationId, 50),
     ]);
 
     const balanceByAccount = new Map(trialBalance.map((r) => [r.accountId, r.balance]));
@@ -146,7 +150,17 @@ export const DailyFinanceBriefService = {
       currency: r.currency,
     }));
 
+    const oneDayMs = 24 * 60 * 60 * 1000;
+    const recentAiAutoExecutions = recentAutoExecutions.filter(
+      (e) => !e.reversedAt && asOfDate.getTime() - e.createdAt.getTime() <= oneDayMs,
+    ).length;
+
     const callouts: string[] = [];
+    if (recentAiAutoExecutions > 0) {
+      callouts.push(
+        `The AI Financial Controller auto-executed ${recentAiAutoExecutions} whitelisted action(s) in the last 24 hours under this organization's autonomy policy — see Settings for the whitelist, or the audit trail for details.`,
+      );
+    }
     if (overdueReceivableRows.length > 0) {
       const top = [...overdueReceivableRows].sort((a, b) => b.priorityScore - a.priorityScore)[0]!;
       callouts.push(
@@ -193,6 +207,7 @@ export const DailyFinanceBriefService = {
       },
       overduePayables: { count: overduePayableBills.length, total: overduePayablesTotal.toString() },
       paymentRunsAwaitingApproval,
+      recentAiAutoExecutions,
       callouts,
       aiSummary,
     };

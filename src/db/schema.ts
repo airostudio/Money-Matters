@@ -2526,3 +2526,109 @@ export const aiDraftProposalsRelations = relations(aiDraftProposals, ({ one }) =
     references: [organizations.id],
   }),
 }));
+
+// ---------------------------------------------------------------------------
+// AI Financial Controller — autonomy Levels 3-4 auto-execution (Phase 6 Slice 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Master spec §76's "learn organisation-specific patterns only through
+ * controlled configuration" — this is the CLOSED, hand-curated set of action
+ * types an organization may ever auto-approve at autonomy Level 3/4 (see
+ * `src/domain/ai-controller/auto-execution-policy.ts`). Each one is a
+ * mechanism that already exists, was already safe when a human triggered it
+ * on demand (`RecurringInvoiceService.generateDue`,
+ * `RecurringBillService.generateDue`, `ReconciliationService.confirmMatch`
+ * on a deterministic, same-day exact-amount candidate), and is trivially
+ * reversible (`InvoiceService.deleteDraft`/`BillService.deleteDraft`/a
+ * reconciliation unmatch — never a destructive ledger edit). Deliberately
+ * excluded, structurally, by never appearing in this enum: anything
+ * touching a supplier payment or payment run, a bank account's own details,
+ * payroll, tax, an "unusual" freeform journal entry, or a fiscal period
+ * close — see docs/ai-agents.md §3b.
+ */
+export const aiAutoExecutionActionTypeEnum = pgEnum("ai_auto_execution_action_type", [
+  "RECURRING_INVOICE_AUTO_GENERATE",
+  "RECURRING_BILL_AUTO_GENERATE",
+  "BANK_RECONCILIATION_AUTO_MATCH",
+]);
+
+/**
+ * The per-org, per-action-type opt-in whitelist itself. A row's mere
+ * existence means that action type is auto-approved — turning the autonomy
+ * dial to Level 3/4 alone inserts no rows here, so it does nothing by
+ * itself (see `AutoApprovedActionsService.isApproved`, which requires BOTH
+ * level >= 3 AND a row here, read fresh on every check — never cached,
+ * which is also what makes the emergency stop take effect immediately).
+ */
+export const aiAutoApprovedActions = pgTable("ai_auto_approved_actions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  actionType: aiAutoExecutionActionTypeEnum("action_type").notNull(),
+  enabledByUserId: uuid("enabled_by_user_id").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  orgActionUnique: uniqueIndex("ai_auto_approved_actions_org_action_unique").on(
+    table.organizationId,
+    table.actionType,
+  ),
+}));
+
+export const aiAutoApprovedActionsRelations = relations(aiAutoApprovedActions, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [aiAutoApprovedActions.organizationId],
+    references: [organizations.id],
+  }),
+}));
+
+/**
+ * One row per auto-executed action (master spec §44's "for AI actions also
+ * store: agent, model, ..., proposed action, approver, outcome," and §77's
+ * "clearly flagged ... in the normal UI, not just the audit log"). This is
+ * what the invoice/bill lists and the Daily Finance Brief query to render an
+ * "AI auto" badge, and what `AutoExecutionService.undo` reads to find the
+ * real entity to reverse. `confidence`/`model` are null for the two
+ * recurring-generation action types — they trigger existing, deterministic
+ * business logic (the same "generate the due occurrence" a human's button
+ * click runs), not an LLM inference, so there is no model confidence to
+ * record; only `BANK_RECONCILIATION_AUTO_MATCH` ever has a non-null
+ * `confidence`, and even then it is the deterministic matcher's own
+ * same-day/exact-amount score, never a probabilistic AI suggestion (see
+ * docs/ai-agents.md §3b for why `FuzzyReconciliationService`'s AI-scored
+ * suggestions are never auto-confirmed at any level).
+ */
+export const aiAutoExecutions = pgTable("ai_auto_executions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  actionType: aiAutoExecutionActionTypeEnum("action_type").notNull(),
+  entityType: text("entity_type").notNull(),
+  entityId: uuid("entity_id").notNull(),
+  confidence: numeric("confidence", { precision: 4, scale: 3 }),
+  model: text("model"),
+  autonomyLevel: integer("autonomy_level").notNull(),
+  triggeredByUserId: uuid("triggered_by_user_id").notNull(),
+  reversedAt: timestamp("reversed_at", { withTimezone: true }),
+  reversedByUserId: uuid("reversed_by_user_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  orgEntityIdx: index("ai_auto_executions_org_entity_idx").on(
+    table.organizationId,
+    table.entityType,
+    table.entityId,
+  ),
+  orgCreatedAtIdx: index("ai_auto_executions_org_created_at_idx").on(
+    table.organizationId,
+    table.createdAt,
+  ),
+}));
+
+export const aiAutoExecutionsRelations = relations(aiAutoExecutions, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [aiAutoExecutions.organizationId],
+    references: [organizations.id],
+  }),
+}));

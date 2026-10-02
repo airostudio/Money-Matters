@@ -1,15 +1,19 @@
-# AI Agents (architecture; the AI Financial Controller foundation shipped in Phase 6 Slice 1, autonomy levels + write tools + specialist agents in Slice 2)
+# AI Agents (architecture; the AI Financial Controller foundation shipped in Phase 6 Slice 1, autonomy levels + write tools + specialist agents in Slice 2, the full 0-4 autonomy slider + whitelisted auto-execution in Slice 3)
 
-§3 and §4 below describe what actually shipped in Phase 6 Slice 2: an
-org-level autonomy setting that gates three write-capable (but
-never-posting) Controller tools, and four specialist agent modes built as
-scoped tool subsets over the same conversational loop. The AI Financial
-Controller itself — the read-only foundation these sit on top of — shipped
-in Phase 6 Slice 1; see §0c for that design, and §0d below for Slice 2's
-additions to it. The onboarding wizard's chart-of-accounts recommender
-(§0) is the first real AI integration in the codebase, shipped ahead of
-Phase 6 as a small, tightly-scoped exception — see §0 for why it doesn't
-violate the rest of this document.
+§3 and §4 below describe what shipped in Phase 6 Slice 2: an org-level
+autonomy setting that gates three write-capable (but never-posting)
+Controller tools, and four specialist agent modes built as scoped tool
+subsets over the same conversational loop. §3b describes Slice 3's
+extension of that setting into the real five-level dial master spec §8
+describes, where Levels 3-4 let the AI auto-EXECUTE a narrow,
+organization-whitelisted set of actions with no per-instance confirmation
+click. The AI Financial Controller itself — the read-only foundation these
+sit on top of — shipped in Phase 6 Slice 1; see §0c for that design, §0d
+below for Slice 2's additions to it, and §0e for Slice 3's. The onboarding
+wizard's chart-of-accounts recommender (§0) is the first real AI
+integration in the codebase, shipped ahead of Phase 6 as a small,
+tightly-scoped exception — see §0 for why it doesn't violate the rest of
+this document.
 
 ## 0. First AI integration: onboarding's chart-of-accounts recommender
 
@@ -449,6 +453,71 @@ conversation could already do, never widens it, and reuses every bit of
 §0c's loop/guard/audit machinery unmodified. Payroll and Tax & Compliance
 are **not** built as modes — see §4 for why.
 
+## 0e. Seventh integration: whitelisted auto-execution — the real 0-4 autonomy dial (Phase 6 Slice 3)
+
+This is a deliberate, user-authorized expansion of AI autonomy beyond
+Slice 2's scope. The user explicitly asked for "levels of autonomy, the
+user can select how much on a sliding scale, that makes it the user's
+responsibility," and confirmed the boundary: "it will be most things, just
+not critical things as mentioned" — critical meaning master spec §8's own
+carve-out (large payments, bank-detail changes, payroll changes, tax
+submissions, unusual journals, period closes), which stays human-gated at
+**every** autonomy level with no exception. See §3b below for the full
+design this section summarizes.
+
+**The structural shape mirrors every prior integration in this document**:
+a closed, hand-curated set of what the AI may ever do
+(`AUTO_APPROVABLE_ACTION_TYPES` in `auto-execution-policy.ts`), each member
+a thin wrapper around an already-existing, already-human-triggered,
+already-reversible domain-service call — never new business logic, never a
+second ledger-writing code path. What's new relative to Slice 2 is not a
+new kind of trust in the AI's judgment; it's removing a per-instance human
+click for a category the organization pre-approved in advance, exactly
+master spec §76's "learn organisation-specific patterns only through
+controlled configuration."
+
+**Two gates, not one, checked fresh every time**: `isAutoExecutionApproved`
+requires both the org's autonomy level (>= 3) AND an explicit per-action-type
+whitelist row, read from Postgres on every single check — never cached
+across a request, a session, or even within one multi-action-type run.
+This is what makes turning the dial to Level 3/4 alone do nothing (the
+whitelist starts empty, always), and what makes the emergency stop
+(`AutonomySettingsService.emergencyStop`) take effect on the very next
+check with no invalidation step required.
+
+**The excluded category is enforced by what the allowlist does NOT
+contain, in two independent places**: the Postgres enum column
+(`ai_auto_execution_action_type`) and a zod schema in application code
+both only ever accept the three real action types — so neither a raw SQL
+write nor an application-level caller can smuggle in
+`SUPPLIER_PAYMENT_CREATE`, `BANK_ACCOUNT_DETAIL_CHANGE`,
+`PAYROLL_ANY`/`TAX_SUBMISSION_ANY` (no such domains exist yet, so there is
+nothing for even the model to pretend to automate), `JOURNAL_ENTRY_UNUSUAL`
+(`prepare_draft_journal_entry` stays confirmation-gated at every level —
+never promoted, because there is no `JOURNAL_ENTRY` entry in the
+allowlist), or `FISCAL_PERIOD_CLOSE` (not built; nothing here creates a
+path toward it). `PaymentRunService`'s own segregation-of-duties check
+(§8's "large payments... always require authorisation") is untouched and
+is never routed around — `AutoExecutionService` never calls it at all,
+proven by a real-database test that a Level 4 org with everything else
+whitelisted still gets `SelfApprovalNotAllowedError` on a self-approval
+attempt, identically to Level 0.
+
+**Honest about Level 3 vs. 4**: both share the identical mechanism and,
+today, the identical three-item allowlist. This document does not invent a
+distinction that isn't real — see §3b for why, and what would change it.
+
+**Human override (master spec §77)**: every auto-executed action is
+recorded in `ai_auto_executions` (visibly flagged in the invoice/bill
+lists and the Daily Finance Brief, not only in the audit log), trivially
+undoable (`InvoiceService.deleteDraft`/`BillService.deleteDraft` for a
+still-DRAFT auto-generated invoice/bill, a new
+`ReconciliationService.unmatch` for an auto-confirmed bank match — never a
+destructive edit, and `PostingService.reverseEntry` remains the only way
+to undo anything actually posted, which auto-execution in this slice never
+does), and the whole mechanism is pausable via a real, reachable emergency
+stop separate from the normal settings form.
+
 ## 1. Why this belongs in the Phase 1 docs
 
 The single most important constraint on the AI layer is: **it must never see
@@ -498,7 +567,7 @@ are all reads. The write side (`prepareBankMatch`-style mutating tool calls,
 behind an autonomy level, with a human-approval gate for high-risk actions)
 is Slice 2's command-bar work, described in §3/§4 below.
 
-## 3. Autonomy levels (master spec §8) — Levels 0-2 implemented, 3-4 deliberately not (Phase 6 Slice 2)
+## 3. Autonomy levels (master spec §8) — Levels 0-2 (Phase 6 Slice 2; see §3b for 3-4, added in Slice 3)
 
 `organizations.ai_autonomy_level` (`src/domain/ai-controller/autonomy.ts`)
 is a single org-level integer, not yet the per-workflow
@@ -520,19 +589,156 @@ reasonably want its own, stricter gate).
   itself at Level 2 or any other level — "prepare" names the ceiling of
   what Level 2 unlocks, not a promise that the AI acts unsupervised within
   it. An OWNER/ADMINISTRATOR must explicitly opt in on the Settings page.
-- **Level 3 (Auto, low-risk) and Level 4 (Finance automation) are
-  deliberately NOT implemented.** `AutonomySettingsService.setLevel`
-  actively rejects them (`InvalidAutonomyLevelError`) rather than accepting
-  and silently ignoring a value nothing honors. Master spec §8 itself lists
-  "large payments, changing bank information, payroll changes, tax
-  submissions, unusual journals, closing financial periods" as always
-  requiring authorisation regardless of autonomy level — and every
-  mutating action this codebase has today (invoice/bill creation, journal
-  posting, payment runs) is exactly this kind of action. Auto-executing any
-  of it without human review needs a trust/audit track record (consistently
-  correct proposals, a real usage history) this codebase does not have yet.
-  Building Level 3/4 now would mean inventing a "the AI acts alone"
-  pathway with no evidence it should be trusted to.
+- **Level 3 (Auto, low-risk) and Level 4 (Finance automation)** — see §3b
+  immediately below for the full design shipped in Phase 6 Slice 3. In
+  short: the AI may auto-execute a narrow, explicitly organization-
+  whitelisted set of action types with no per-instance confirmation click,
+  but the level alone does nothing — an explicit whitelist entry is always
+  also required — and master spec §8's own "large payments, bank-detail
+  changes, payroll changes, tax submissions, unusual journals, period
+  closes always require authorisation" carve-out is enforced structurally
+  at every level, with no exception for 3 or 4.
+
+## 3b. Levels 3-4: whitelisted auto-execution (Phase 6 Slice 3)
+
+This is the real build-out of what §3 above used to defer. It is a
+deliberate, user-authorized expansion of AI autonomy — see §0e above for
+the user's own framing of the request and the safety boundary they
+confirmed — built carefully rather than loosely, per that same
+conversation's instruction.
+
+**The whitelist, not the level number, is what actually gates anything**
+(`src/domain/ai-controller/auto-execution-policy.ts`). `ai_auto_approved_actions`
+is a per-organization, per-action-type table; a row's mere existence means
+that action type is auto-approved. Turning the dial to Level 3 or 4 inserts
+**zero** rows here — an OWNER/ADMINISTRATOR must separately, explicitly
+enable each action type, exactly the same `organization:manage`-gated
+opt-in discipline `AutonomySettingsService.setLevel` already established
+for reaching Level 2. `isAutoExecutionApproved(organizationId, actionType)`
+is the single choke point every auto-execution attempt passes through, and
+it requires BOTH conditions, read fresh from Postgres on every call — see
+"no caching, ever" below.
+
+**The closed allowlist (master spec §76's "controlled configuration")**:
+`AUTO_APPROVABLE_ACTION_TYPES` has exactly three members, each one an
+existing, already-safe, already-human-triggered mechanism made reversible
+by construction:
+
+- `RECURRING_INVOICE_AUTO_GENERATE` / `RECURRING_BILL_AUTO_GENERATE` —
+  auto-triggers `RecurringInvoiceService.generateDue`/
+  `RecurringBillService.generateDue` (Phase 3/4 Slice 2), the exact same
+  call a human's "Generate due invoices/bills" button already makes. The
+  AI's job here is narrower than full autonomy: "trigger the thing a human
+  would have clicked," not a new kind of judgment. The result is a plain
+  DRAFT invoice/bill — nothing is approved, posted, or sent.
+- `BANK_RECONCILIATION_AUTO_MATCH` — auto-confirms ONLY a deterministic,
+  same-day, exact-amount candidate from `ReconciliationService.
+  findCandidateMatches` (confidence exactly 1.0), via the exact same
+  `confirmMatch` a human's "Confirm match" click already calls.
+  **Deliberately, explicitly never auto-confirms a `FuzzyReconciliationService`
+  suggestion**, however high its self-reported confidence — a probabilistic
+  AI judgment is not the "previously human-approved category" §76
+  describes; fuzzy suggestions stay propose-only at every autonomy level,
+  including 4. This is the one place in this slice where "higher confidence
+  number" and "safe to auto-execute" are explicitly NOT treated as the same
+  thing.
+
+Both the Postgres enum column backing this table and a zod schema in
+`auto-execution-policy.ts` independently enforce this closed set —
+`AutoApprovedActionsService.setEnabled` refuses anything else
+(`InvalidAutoApprovedActionTypeError`) structurally, not merely by omitting
+it from a settings dropdown. `src/tests/unit/ai-controller/
+auto-execution-policy.test.ts` proves the allowlist and a documented
+excluded-category example list (`SUPPLIER_PAYMENT_CREATE`,
+`PAYMENT_RUN_APPROVE`, `BANK_ACCOUNT_DETAIL_CHANGE`, `PAYROLL_ANY`,
+`TAX_SUBMISSION_ANY`, `JOURNAL_ENTRY_UNUSUAL`, `FISCAL_PERIOD_CLOSE`) are
+disjoint, with no database involved — this is a property of the code, not
+of what happens to be configured in any one organization.
+
+**What stays untouched, on purpose**: `PaymentRunService`'s own
+segregation-of-duties check (`SelfApprovalNotAllowedError`) is master spec
+§8's "large payments... always require authorisation" already enforced,
+independently, before this slice existed. `AutoExecutionService` never
+calls `PaymentRunService` at all — there is no code path, gated or
+otherwise, connecting autonomy levels to payment approval.
+`prepare_draft_journal_entry` (Slice 2) is never promoted to
+auto-execute — there is no `JOURNAL_ENTRY` member in the allowlist, so an
+"unusual" manual adjustment stays confirmation-gated at every level,
+structurally. Payroll, tax, bank-account-detail changes, and fiscal period
+closes have no auto-execution path for the simple reason that none of
+those domains (or, for period closes, that status workflow) exist in this
+codebase at all yet — there is nothing to gate because there is nothing to
+call.
+
+**Honest Level 3 vs. 4**: the task that commissioned this slice explicitly
+asked for the real distinction if one exists, or a plain admission if it
+doesn't, rather than a fabricated one. Today, Levels 3 and 4 share the
+identical mechanism (the same whitelist, the same `isAutoExecutionApproved`
+check) and the identical three-item allowlist — there is no second,
+broader-but-still-safe action type this codebase has today to reserve for
+Level 4 alone. A candidate the task itself suggested — auto-promoting an
+auto-drafted invoice/bill into a "ready for review" queue at Level 4 only —
+was deliberately not built: no such status exists in `invoice_status`/
+`bill_status` today, and inventing one purely to manufacture a 3-vs-4
+difference would be exactly the shallow, cosmetic distinction the task
+asked not to produce. This mirrors Slice 2's own precedent for Levels 0/1
+("functionally identical today, kept as distinct values because master
+spec §8 names them distinctly") — the same honest pattern, one level pair
+later. A real Level-4-only action type becomes possible once a second
+low-risk, reversible, already-human-triggered mechanism exists to reserve
+for it.
+
+**No caching, ever — this is what makes the emergency stop work.**
+`isAutoExecutionApproved` queries the organization's current autonomy level
+and the current whitelist row from Postgres on every single call; nothing
+in `AutoExecutionService` or anywhere upstream holds on to a previous
+answer. `AutonomySettingsService.emergencyStop` (master spec §77's
+"pause/override," a distinct control from the normal level-picker form —
+see the Settings page) is not a special code path at all: it is
+`setLevel(actor, 0)` with its own audit action name, and its "immediacy"
+is a direct consequence of there being no cache to invalidate — the very
+next `isAutoExecutionApproved` call anywhere in the app already sees Level
+0. Proven with a real-database test
+(`src/tests/integration/ai-controller/auto-execution.test.ts`): Level 4
+plus a whitelist entry auto-executes once, the emergency stop is
+triggered, new due work is created afterward, and the next
+`runPendingAutoExecutions` call executes nothing — with the whitelist row
+itself still present in the database, proving it's the level being
+re-checked fresh, not the whitelist having been wiped.
+
+**Human override machinery (master spec §77) for whatever gets
+auto-executed**: a new `ai_auto_executions` table records every
+auto-executed action with master spec §44's audit fields (agent, model —
+null for the two deterministic recurring-generation action types, which
+trigger existing business logic rather than an LLM inference — confidence,
+proposed action, and an `approver` field that truthfully records
+"auto-approved under org policy (autonomy level N, action type X
+whitelisted)," never a fabricated human approver). This is what the
+invoice and bill list pages query to render a visible "AI auto" badge
+(not buried in an audit log nobody reads), and what the Daily Finance
+Brief's callout ("The AI Financial Controller auto-executed N whitelisted
+action(s) in the last 24 hours...") surfaces. Every auto-executed action is
+trivially undoable
+(`AutoExecutionService.undo`): `InvoiceService.deleteDraft`/
+`BillService.deleteDraft` for a still-DRAFT auto-generated invoice/bill
+(nothing was posted, so deleting a draft is the correct, non-destructive
+undo exactly like any other draft), and a new `ReconciliationService.unmatch`
+for an auto-confirmed bank match (reverts the link only — it refuses on a
+transaction that was instead reconciled by posting a brand-new journal
+entry, since undoing a posted entry must go through
+`PostingService.reverseEntry`, never a status flip; auto-execution in this
+slice never takes that posting path in the first place, so this guard is
+never actually exercised by anything this slice does, only by misuse).
+
+**Who triggers a check, given no job-queue infrastructure exists** (the
+same documented gap since Phase 2 Slice 2, carried forward through every
+"generate due"/"on-demand" feature in this codebase):
+`FinancialControllerService.ask` runs `AutoExecutionService.
+runPendingAutoExecutions` as a best-effort first step on every conversation
+turn (never blocking the user's actual question if it fails), and the
+Settings page has a dedicated "Run automated actions now" button. Both are
+the same honest "on-demand precursor to real scheduling" framing this
+codebase has used since `RecurringInvoiceService.generateDue` itself.
 
 ## 4. Specialist agents (master spec §9) — Bookkeeping/AR/AP/FP&A built as scoped modes; Payroll/Tax deliberately deferred (Phase 6 Slice 2)
 

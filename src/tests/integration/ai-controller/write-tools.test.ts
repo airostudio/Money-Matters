@@ -61,9 +61,16 @@ describe("AI Controller write tools + draft proposal confirmation (integration)"
       expect(await AutonomySettingsService.getLevel(orgId)).toBe(0);
     });
 
-    it("rejects Level 3/4 — not implemented this slice", async () => {
-      await expect(AutonomySettingsService.setLevel(owner, 3)).rejects.toThrow(InvalidAutonomyLevelError);
-      await expect(AutonomySettingsService.setLevel(owner, 4)).rejects.toThrow(InvalidAutonomyLevelError);
+    it("lets an OWNER raise the level to 3 or 4 (Phase 6 Slice 3 — see auto-execution-policy.test.ts for the whitelist gate)", async () => {
+      await AutonomySettingsService.setLevel(owner, 3);
+      expect(await AutonomySettingsService.getLevel(orgId)).toBe(3);
+      await AutonomySettingsService.setLevel(owner, 4);
+      expect(await AutonomySettingsService.getLevel(orgId)).toBe(4);
+    });
+
+    it("rejects a level outside 0-4", async () => {
+      await expect(AutonomySettingsService.setLevel(owner, 5)).rejects.toThrow(InvalidAutonomyLevelError);
+      await expect(AutonomySettingsService.setLevel(owner, -1)).rejects.toThrow(InvalidAutonomyLevelError);
       expect(await AutonomySettingsService.getLevel(orgId)).toBe(0);
     });
   });

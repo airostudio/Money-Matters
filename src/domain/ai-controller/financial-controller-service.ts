@@ -6,6 +6,7 @@ import { DimensionService } from "@/domain/dimensions/dimension-service";
 import { buildControllerTools, type ControllerToolDefinition, type ToolCitation } from "./controller-tools";
 import { buildWriteTools } from "./write-tools";
 import { AutonomySettingsService } from "./autonomy";
+import { AutoExecutionService } from "./auto-execution-service";
 import { AGENT_MODES, type AgentMode } from "./specialist-agents";
 import type { DraftProposalPreview } from "./draft-proposal-service";
 
@@ -263,6 +264,21 @@ export const FinancialControllerService = {
     }
 
     const mode = AGENT_MODES[agentMode] ?? AGENT_MODES.GENERAL;
+
+    // Phase 6 Slice 3: with no job-queue infrastructure in this codebase
+    // (see docs/roadmap.md), a conversation turn is one of the natural
+    // touchpoints that drives Level 3/4 auto-execution (the Settings page's
+    // "Run automated actions now" button is the other) — see
+    // `auto-execution-service.ts`'s doc comment. This is checked and run
+    // BEFORE anything else below, and failing it never blocks the user's
+    // actual question: a Level 0-2 organization (the overwhelming common
+    // case) pays for nothing but a fresh, uncached policy check per action
+    // type inside `runPendingAutoExecutions` itself.
+    try {
+      await AutoExecutionService.runPendingAutoExecutions(actor);
+    } catch {
+      // Never let an auto-execution failure block the user's question.
+    }
 
     // `run_report`'s tool description is enriched with the organization's
     // real dimension names (see `controller-tools.ts`), but not every role
