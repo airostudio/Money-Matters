@@ -1,11 +1,12 @@
-# AI Agents (architecture; the AI Financial Controller foundation shipped in Phase 6 Slice 1)
+# AI Agents (architecture; the AI Financial Controller foundation shipped in Phase 6 Slice 1, autonomy levels + write tools + specialist agents in Slice 2)
 
-The specialist agents and autonomy levels described below (§3, §4) remain
-Phase 6 Slice 2+ work. The AI Financial Controller itself — the foundation
-those future specialist agents and the autonomy framework will sit on top
-of — shipped in Phase 6 Slice 1; see §0c for what was actually built, in
-place of the "planned shape" this document originally sketched in §2 before
-any of it existed. The onboarding wizard's chart-of-accounts recommender
+§3 and §4 below describe what actually shipped in Phase 6 Slice 2: an
+org-level autonomy setting that gates three write-capable (but
+never-posting) Controller tools, and four specialist agent modes built as
+scoped tool subsets over the same conversational loop. The AI Financial
+Controller itself — the read-only foundation these sit on top of — shipped
+in Phase 6 Slice 1; see §0c for that design, and §0d below for Slice 2's
+additions to it. The onboarding wizard's chart-of-accounts recommender
 (§0) is the first real AI integration in the codebase, shipped ahead of
 Phase 6 as a small, tightly-scoped exception — see §0 for why it doesn't
 violate the rest of this document.
@@ -339,6 +340,115 @@ one. See `docs/roadmap.md`'s Phase 6 Slice 1 entry for the full list of
 what each figure reuses and what's deferred (a scheduled/emailed version,
 blocked on the still-missing job-queue infrastructure).
 
+## 0d. Sixth integration: write-capable tools, the autonomy gate, and specialist agents (Phase 6 Slice 2)
+
+Slice 1 was deliberately all-reads. Master spec §8 and §87.4 treat an AI
+crossing into "something gets written" as a real line, not an
+implementation detail, so Slice 2 draws that line as structurally as §0c's
+permission discipline draws the "AI never sees more than the actor it acts
+for" line:
+
+**The autonomy setting (`src/domain/ai-controller/autonomy.ts`).**
+`organizations.ai_autonomy_level` is a plain integer column (0 by default),
+read/written through `AutonomySettingsService`. Only Levels 0-2 of master
+spec §8's five are implemented — `setLevel` throws
+`InvalidAutonomyLevelError` for 3 or 4 rather than silently storing a value
+nothing honors. Levels 0 (Manual) and 1 (Suggest) are functionally
+identical today: both mean "the Controller may only inform/suggest," which
+was already Slice 1's only behavior, now an explicit, chosen value instead
+of the only possible one. Level 2 (Prepare) is the one that matters
+functionally: it is the only level at which a write-capable tool exists in
+the model's tool list at all. `setLevel` requires `organization:manage`
+(OWNER/ADMINISTRATOR only, per `roles.ts`) — reaching Level 2 is an
+explicit opt-in a human with real authority over the organization makes on
+the Settings page, never a default and never something the AI can do to
+itself.
+
+**The gate is on tool-list construction, not on tool execution.**
+`FinancialControllerService.ask` calls `AutonomySettingsService.getLevel`
+*before* building any tools, and only calls `buildWriteTools()` at all when
+the level is >= 2 — a Level 0/1 organization's `tools` array handed to
+Claude's API literally never contains `prepare_draft_invoice`,
+`prepare_draft_bill`, or `prepare_draft_journal_entry`. This is the same
+"never offer, don't just refuse" discipline the fuzzy-reconciliation
+integration (§0a) and NL reporting (§0b) apply to data visibility, applied
+here to capability visibility — proven in
+`src/tests/unit/ai-controller/autonomy-gating.test.ts` by inspecting the
+actual `tools` array passed to the (mocked) Anthropic call at each level.
+
+**Prepare, never create — the proposal/confirmation split
+(`src/domain/ai-controller/draft-proposal-service.ts`,
+`write-tools.ts`).** Every write-capable tool follows §0c's exact wrapper
+pattern (thin delegation, the real `Actor`, `guarded()`'s permission-refusal
+handling) with one structural addition: **a successful tool call never
+writes an invoice, bill, or journal-entry row.** It:
+
+1. Asserts the real permission up front (`customer_invoice:manage` /
+   `supplier_bill:manage` / `journal:post` — the same permission the
+   underlying `InvoiceService.create`/`BillService.create`/
+   `PostingService.createDraft` call enforces again at step 4, never a
+   looser or different check).
+2. Resolves the model's free-text request (a customer/supplier name, an
+   account name) against **real** organization records — `ContactService.list`/
+   `AccountService.list` — never trusting an id the model merely claims.
+   An unmatched or ambiguous name is a hard failure asking for
+   clarification, the same "only ever trust what was actually in the list
+   handed to the model" discipline §0a's candidate-id matching and §0b's
+   dimension matching both established.
+3. Stores the fully-resolved creation payload (real contact id, real
+   account ids, computed totals via the same `calculateInvoiceTotals`/
+   `calculateBillTotals` pure functions the real UI form uses) as a PENDING
+   row in `ai_draft_proposals`, along with a smaller human-readable
+   `preview` the chat UI renders as a "Create this draft?" card. This row's
+   insert is itself audited (`ai_controller.draft_proposed`, `actorType:
+   "AI"`) — proposing is a real event even though nothing financial moved.
+4. Returns the proposal's id/preview as part of the tool's result. The
+   model is told (system prompt + the tool's own `summary` text) that
+   nothing has been created yet and that it must tell the user a draft was
+   *prepared*, never that it was *created* or *entered*.
+
+**Only `AIDraftProposalService.confirm`, triggered by a separate, explicit
+user click in the chat UI (`confirm-draft-proposal-action.ts`'s own server
+action — a different one from the conversation turn's own
+`askControllerAction`), ever reaches
+`InvoiceService.create`/`BillService.create`/`PostingService.createDraft`.**
+It re-checks the org's autonomy level (in case it was lowered between
+proposal and confirmation), loads the PENDING proposal, and calls the real
+domain-service method under the real, authenticated confirming actor — the
+same `assertPermission` call a human using the Sales/Purchases/Journal UI
+directly would hit. A restricted-role user who is shown someone else's
+proposal (e.g. forwarded a link) is refused at this real call, exactly as
+the UI would refuse them, even though the PENDING row itself was readable.
+On success, the proposal is marked CONFIRMED with `confirmedByUserId` and
+`resultEntityId`, and a second audit row (`ai_controller.draft_confirmed`,
+`actorType: "HUMAN"`, metadata naming the original proposer and the
+confirming user) ties the human-authored DRAFT invoice/bill/journal entry
+(already audited as `HUMAN` by `InvoiceService.create` etc. itself) back to
+the AI proposal that produced it — master spec §44's "for AI actions also
+store: agent, model, ..., proposed action, approver, outcome," both halves
+recorded, neither one overwriting or hiding the other.
+
+This is proven against the real test database in
+`src/tests/integration/ai-controller/write-tools.test.ts` (every tool's
+resolution/permission/balance behavior, and that a tool call alone creates
+zero invoice/bill/journal-entry rows) and
+`src/tests/integration/ai-controller/draft-proposal-flow.test.ts` (the full
+conversation → proposal → separate confirmation → real DRAFT invoice round
+trip, a Level 0 org never offering the tool for the identical request, and
+a restricted-role confirmer being refused at the real creation step).
+
+**Specialist agents as scoped modes
+(`src/domain/ai-controller/specialist-agents.ts`), not a new framework.**
+Per §4 below (now implemented, not just planned): Bookkeeping, AR, AP, and
+FP&A are each a fixed `{ readToolNames, writeToolNames, systemPromptAddendum }`
+record. `FinancialControllerService.ask` takes an `agentMode` parameter
+(default `"GENERAL"`, the full Slice 1 tool set) and filters
+`buildControllerTools()`'s and `buildWriteTools()`'s output down to that
+mode's named subset — it only ever narrows what a plain Controller
+conversation could already do, never widens it, and reuses every bit of
+§0c's loop/guard/audit machinery unmodified. Payroll and Tax & Compliance
+are **not** built as modes — see §4 for why.
+
 ## 1. Why this belongs in the Phase 1 docs
 
 The single most important constraint on the AI layer is: **it must never see
@@ -388,32 +498,86 @@ are all reads. The write side (`prepareBankMatch`-style mutating tool calls,
 behind an autonomy level, with a human-approval gate for high-risk actions)
 is Slice 2's command-bar work, described in §3/§4 below.
 
-## 3. Autonomy levels (master spec §8) — modeled, not enforced yet
+## 3. Autonomy levels (master spec §8) — Levels 0-2 implemented, 3-4 deliberately not (Phase 6 Slice 2)
 
-`Organization` will carry a per-workflow autonomy level (0 Manual .. 4 Finance
-Automation). Not implemented yet; noted here so the eventual column
-(`OrganizationAutomationSetting`) is understood to key off `(organizationId,
-workflowType)`, not a single global switch — different workflows (bank
-reconciliation vs. supplier payments vs. payroll) will carry different
-autonomy levels per master spec §8's examples. This is Phase 6 Slice 2 work:
-it only makes sense once there are mutating tool calls (the command bar) for
-an autonomy level to actually gate — Slice 1's tools are all read-only, so
-every one of them is effectively "Level 0 Manual" today, trivially and
-uniformly, with no column needed yet to say so.
+`organizations.ai_autonomy_level` (`src/domain/ai-controller/autonomy.ts`)
+is a single org-level integer, not yet the per-workflow
+`(organizationId, workflowType)` key master spec §8's full vision describes
+— this slice has exactly three kinds of mutating tool (invoice/bill/journal
+draft preparation), all gated identically, so a single org-wide switch is
+the right amount of complexity today; splitting it per workflow is
+straightforward later if/when those workflows' risk profiles actually
+diverge (e.g. once a supplier-payment-execution tool exists, it would
+reasonably want its own, stricter gate).
 
-## 4. Specialist agents (master spec §9) — not built yet
+- **Level 0 (Manual) / Level 1 (Suggest)** — functionally identical today:
+  the Controller may only read and inform, exactly like Slice 1's only
+  possible behavior. This is every organization's default; reaching a
+  higher level is never automatic.
+- **Level 2 (Prepare)** — additionally offers `prepare_draft_invoice`,
+  `prepare_draft_bill`, and `prepare_draft_journal_entry` to the model (see
+  §0d). The AI still never creates, posts, approves, or confirms anything
+  itself at Level 2 or any other level — "prepare" names the ceiling of
+  what Level 2 unlocks, not a promise that the AI acts unsupervised within
+  it. An OWNER/ADMINISTRATOR must explicitly opt in on the Settings page.
+- **Level 3 (Auto, low-risk) and Level 4 (Finance automation) are
+  deliberately NOT implemented.** `AutonomySettingsService.setLevel`
+  actively rejects them (`InvalidAutonomyLevelError`) rather than accepting
+  and silently ignoring a value nothing honors. Master spec §8 itself lists
+  "large payments, changing bank information, payroll changes, tax
+  submissions, unusual journals, closing financial periods" as always
+  requiring authorisation regardless of autonomy level — and every
+  mutating action this codebase has today (invoice/bill creation, journal
+  posting, payment runs) is exactly this kind of action. Auto-executing any
+  of it without human review needs a trust/audit track record (consistently
+  correct proposals, a real usage history) this codebase does not have yet.
+  Building Level 3/4 now would mean inventing a "the AI acts alone"
+  pathway with no evidence it should be trusted to.
 
-Bookkeeping, AR, AP, Payroll, Tax & Compliance, and FP&A agents are Phase 6
-Slice 2+ work, coordinated by the AI Financial Controller built in Slice 1
-(§0c). Each will be a thin LLM-driven planner over the same domain services
-Slice 1's tool registry already calls — none gets bespoke data access, and
-none bypasses the permission discipline §0c establishes. Concretely, a
-specialist agent is expected to be built as its own, narrower tool registry
-(e.g. an AR agent limited to `aged_receivables`, `find_invoice`, and new
-AR-specific read tools) plus its own system prompt, reusing
-`controller-tools.ts`'s wrapper pattern and `financial-controller-service.ts`'s
-loop/guard/audit machinery rather than a parallel implementation of any of
-them.
+## 4. Specialist agents (master spec §9) — Bookkeeping/AR/AP/FP&A built as scoped modes; Payroll/Tax deliberately deferred (Phase 6 Slice 2)
+
+`src/domain/ai-controller/specialist-agents.ts` implements each specialist
+as a named, narrower *mode* over the one Controller loop built in Slice 1
+— exactly the "thin planner over the same domain services, no bespoke data
+access" shape this section originally sketched, concretely: a fixed
+`{ readToolNames, writeToolNames, systemPromptAddendum }` record per mode,
+never a second orchestration framework, a second permission system, or a
+separate conversation loop. Selecting a mode (via the chat UI's mode picker,
+which calls `FinancialControllerService.ask(..., agentMode)`) only narrows
+`buildControllerTools()`'s/`buildWriteTools()`'s output to that mode's named
+subset and appends a short system-prompt addendum — it can never grant a
+tool a plain `"GENERAL"` conversation couldn't already use, and it reuses
+§0c's loop/guard/citation/audit machinery completely unmodified.
+
+- **Bookkeeping** — `trial_balance`, `find_invoice`, `find_bill`,
+  `find_expense_claim`, `run_report`, plus `prepare_draft_journal_entry` at
+  Level 2 (the "unusual manual adjustment" case). No bank-transaction
+  posting/categorization tool exists in this slice's write-tool list (only
+  invoice/bill/journal-entry preparation), so Bookkeeping has no additional
+  write capability beyond the journal entry — it is mostly a system-prompt
+  specialization today, honestly reflecting what's actually built rather
+  than implying a reconciliation-automation capability that isn't there.
+- **AR** — `aged_receivables`, `find_invoice`, `run_report`, plus
+  `prepare_draft_invoice` at Level 2.
+- **AP** — `aged_payables`, `find_bill`, `run_report`, plus
+  `prepare_draft_bill` at Level 2.
+- **FP&A** — `profit_and_loss`, `balance_sheet`, `trial_balance`,
+  `run_report`. Read-only by design (no write tool at any level) — this is
+  profitability/trend/KPI analysis over reports that already exist, not a
+  budgeting feature. Its system prompt explicitly instructs the model to
+  say plainly that budgeting/forecasting isn't built yet rather than
+  inventing a comparison-to-budget figure, since no budget data exists
+  anywhere in this codebase for it to cite.
+- **Payroll and Tax & Compliance are deliberately NOT built**, not even as
+  a mode with zero tools. There is no payroll domain (employee records, pay
+  runs, PAYG/super) and no tax-filing/BAS domain anywhere in this codebase
+  yet — Phase 8 hasn't started. An agent "for" either would have no real
+  tool behind it, which is exactly the shallow-stub this codebase's
+  roadmap (§82/§85) refuses to ship. `DEFERRED_AGENTS` in
+  `specialist-agents.ts` names both, with the reason, so the chat UI shows
+  them as visibly disabled options rather than omitting them with no
+  explanation (master spec §6's "a why, shown not hidden," applied to what
+  isn't built as much as to what is).
 
 ## 5. Non-negotiables carried into every future phase (master spec §87)
 

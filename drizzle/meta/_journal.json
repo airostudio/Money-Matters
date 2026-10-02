@@ -120,6 +120,20 @@
       "when": 1790946413268,
       "tag": "0016_reporting_slice2_row_level_security",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1790974525142,
+      "tag": "0017_ai_controller_slice2_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1790974525143,
+      "tag": "0018_ai_controller_slice2_row_level_security",
+      "breakpoints": true
     }
   ]
 }

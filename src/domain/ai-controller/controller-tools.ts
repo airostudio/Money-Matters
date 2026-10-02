@@ -64,6 +64,16 @@ export interface ToolSuccess {
   /** Plain-text (not JSON) summary hand‑ed back to the model as the tool_result content — small enough to stay well under the model's context budget even for a large aged-receivables list. */
   summary: string;
   citation: ToolCitation;
+  /**
+   * Set ONLY by a write-capable tool (`write-tools.ts`) that successfully
+   * resolved a proposal and stored it PENDING — never by a read-only tool.
+   * This is a proposal, not a creation: nothing was written to the ledger,
+   * invoices, or bills tables. The chat UI renders `preview` as a distinct
+   * "Create this draft?" confirmation card; only a separate, explicit click
+   * that invokes `AIDraftProposalService.confirm` actually creates anything.
+   * See docs/ai-agents.md's proposal/confirmation design.
+   */
+  proposal?: { id: string; preview: import("./draft-proposal-service").DraftProposalPreview };
 }
 
 export interface ToolFailure {

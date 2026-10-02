@@ -29,7 +29,14 @@ assistant over a fixed set of read-only, permission-checked tools (trial
 balance, P&L, balance sheet, aged receivables/payables, invoice/bill/
 expense-claim lookup, and the report builder) — and an on-demand Daily
 Finance Brief (cash position, money in/out due in the next 7 days, overdue
-receivables/payables, payments awaiting approval). See
+receivables/payables, payments awaiting approval). Phase 6 Slice 2 adds an
+org-level AI autonomy setting (master spec §8; Level 0/1 information-only
+by default, Level 2 "prepare" an explicit opt-in), three write-capable
+tools that PREPARE — never create or post — a draft invoice, bill, or
+journal entry, always behind a separate, explicit human confirmation step
+before anything is written to the database, and four specialist agent
+modes (Bookkeeping, AR, AP, FP&A) as scoped tool subsets/system prompts
+over the same Controller loop. See
 [`docs/roadmap.md`](docs/roadmap.md) for exactly what's built vs.
 explicitly deferred in each (a customer portal, AI-drafted collection
 reminders, a live bank feed provider, Stripe, a background job queue, a
@@ -240,6 +247,6 @@ application code forgets a filter — see
 - [`docs/accounting-engine.md`](docs/accounting-engine.md) — the double-entry posting engine's invariants
 - [`docs/database.md`](docs/database.md) — schema conventions, RLS, a Drizzle/Postgres pitfall worth reading before touching money-bearing queries
 - [`docs/security.md`](docs/security.md) — tenant isolation, auth, threat model
-- [`docs/ai-agents.md`](docs/ai-agents.md) — the AI layer's architecture; the AI Financial Controller foundation is implemented (Phase 6 Slice 1), specialist agents/autonomy levels/command bar are not yet
+- [`docs/ai-agents.md`](docs/ai-agents.md) — the AI layer's architecture: the AI Financial Controller foundation (Phase 6 Slice 1), and the autonomy-level gate, prepare/confirm write tools, and specialist-agent modes (Phase 6 Slice 2). Level 3/4 autonomy (auto-execution) and Payroll/Tax specialist agents are not yet built — see that doc and `docs/roadmap.md` for why
 - [`docs/roadmap.md`](docs/roadmap.md) — phase-by-phase status
 - [`docs/decisions/`](docs/decisions/) — ADRs for the non-obvious technical calls

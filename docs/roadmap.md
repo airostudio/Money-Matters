@@ -1126,9 +1126,140 @@ schedules across both AR and AP) worth building next rather than earlier.
       codebase, only ever exercised via a mocked SDK — never a real network
       call in tests or CI.
 
-### Slice 2 — specialist agents, autonomy levels, command bar (not started)
+### Slice 2 — autonomy levels, prepare-only write tools, specialist agents (complete)
 
-See the Slice 1 deferral note above.
+- [x] **Autonomy setting** (master spec §8, `organizations.ai_autonomy_level`,
+      `src/domain/ai-controller/autonomy.ts`): Levels 0 (Manual) and 1
+      (Suggest) are both "information only" — every organization's default,
+      and identical in behavior to all of Slice 1. Level 2 (Prepare)
+      additionally offers three write-capable tools (below) and is an
+      explicit OWNER/ADMINISTRATOR-only opt-in on the Settings page —
+      `AutonomySettingsService.setLevel` enforces `organization:manage`.
+      Levels 3 (Auto, low-risk) and 4 (Finance automation) are **not
+      implemented** — `setLevel` actively rejects them rather than silently
+      accepting a value nothing honors. Reason: master spec §8 itself names
+      "large payments, bank-detail changes, payroll changes, tax
+      submissions, unusual journals, period closes" as always requiring
+      authorisation, and every mutating action this codebase has today
+      (invoicing, billing, journal posting, payment runs) is exactly that
+      kind of action — auto-executing any of it needs a trust/audit track
+      record this codebase doesn't have yet. The gate is enforced on
+      *tool-list construction*: `FinancialControllerService.ask` only calls
+      `buildWriteTools()` at Level 2+, so a Level 0/1 organization's
+      conversation never has a `prepare_draft_*` tool in its `tools` array
+      at all, proven in `src/tests/unit/ai-controller/autonomy-gating.test.ts`
+      by inspecting the actual payload sent to the (mocked) Anthropic call.
+- [x] **Three write-capable, prepare-only Controller tools**
+      (`src/domain/ai-controller/write-tools.ts`): `prepare_draft_invoice`
+      (wraps `InvoiceService.create`), `prepare_draft_bill` (wraps
+      `BillService.create`), `prepare_draft_journal_entry` (wraps
+      `PostingService.createDraft`) — the exact same DRAFT-only methods a
+      human using the Sales/Purchases/Journal UI calls directly; no new
+      ledger-writing code path was invented. Each tool resolves the model's
+      free-text request (a customer/supplier name, an account name) against
+      real organization records — never trusting an id or name the model
+      merely claims, exactly like Phase 2 Slice 2's fuzzy-reconciliation
+      candidate matching and Phase 5 Slice 2's dimension matching — and an
+      unmatched or ambiguous reference is a hard failure asking for
+      clarification, never a guess.
+- [x] **The proposal/confirmation split is the slice's structural
+      guarantee, not a UI nicety**: a successful tool call creates a
+      PENDING row in a new `ai_draft_proposals` table
+      (`src/domain/ai-controller/draft-proposal-service.ts`) — a resolved,
+      fully-validated creation payload plus a human-readable preview — and
+      **nothing else**. Only `AIDraftProposalService.confirm`, triggered by
+      a separate, explicit "Create this draft?" click in the chat UI (a
+      different server action from the one that ran the conversation turn),
+      ever calls the real `InvoiceService.create`/`BillService.create`/
+      `PostingService.createDraft`, under the real authenticated confirming
+      actor, re-running the real permission check for real. A tool call
+      alone is proven, in a real-database integration test, to create zero
+      invoice/bill/journal-entry rows
+      (`src/tests/integration/ai-controller/write-tools.test.ts`), and the
+      full conversation → proposal → separate confirmation → real DRAFT
+      round trip is proven end-to-end in
+      `src/tests/integration/ai-controller/draft-proposal-flow.test.ts`.
+- [x] **Audit**: proposing is audited as `actorType: "AI"`
+      (`ai_controller.draft_proposed`); confirming is audited separately as
+      `actorType: "HUMAN"` (`ai_controller.draft_confirmed`, metadata naming
+      both the original proposer and the confirming user) — on top of the
+      creation itself already being audited as `HUMAN` by
+      `InvoiceService.create` etc. Both halves are recorded per master spec
+      §44's "for AI actions also store: agent, model, ..., proposed action,
+      approver, outcome," neither hiding the other.
+- [x] **Specialist agents as scoped modes, not a new framework**
+      (`src/domain/ai-controller/specialist-agents.ts`): Bookkeeping, AR,
+      AP, and FP&A are each a fixed tool-subset + system-prompt addendum
+      over the one Controller loop (`FinancialControllerService.ask`'s new
+      `agentMode` parameter) — never a second orchestration framework, never
+      bespoke data access. AR gets `prepare_draft_invoice` at Level 2, AP
+      gets `prepare_draft_bill`, Bookkeeping gets `prepare_draft_journal_entry`
+      (no bank-posting write tool exists this slice, so Bookkeeping is
+      otherwise read-only), and FP&A is read-only by design (profitability/
+      trend/KPI analysis over existing reports — explicitly told to say
+      budgeting isn't built yet rather than invent a budget figure, since no
+      budgeting feature exists anywhere in this codebase).
+- [x] **Payroll and Tax & Compliance specialist agents are deliberately NOT
+      built**, not even as empty-toolset modes. Reason: there is no payroll
+      domain (employee records, pay runs, PAYG/super) and no tax-filing/BAS
+      domain in this codebase yet (Phase 8 hasn't started) — an agent "for"
+      either would have no real tool behind it, which is exactly the
+      shallow-stub this codebase's roadmap (§82/§85) refuses to ship.
+      `DEFERRED_AGENTS` names both with this reason so the chat UI shows
+      them as visibly disabled rather than silently absent.
+- [x] **Weekly Finance Brief — deferred, with a reason.** The task invited
+      widening Slice 1's `DailyFinanceBriefService` to a weekly rollup "only
+      if it's a clean, small addition." A genuinely useful weekly brief
+      means summarizing the *past* week's activity (invoices/bills raised,
+      cash movement, a week-over-week delta) — new aggregation and
+      comparison logic, not a parameter rename. Simply widening the
+      existing "next 7 days" forward-looking window and relabeling it
+      "weekly" would produce numbers close to identical to the daily brief
+      while implying a different kind of report exists — exactly the
+      shallow restyling this codebase's roadmap refuses to ship. Deferred
+      to whenever period-over-period trend reporting is built properly
+      (Phase 9's forecasting work is the natural home), not attempted here.
+- [x] Tests: unit
+      (`src/tests/unit/ai-controller/autonomy-gating.test.ts` — the
+      autonomy-level tool-offering gate at Levels 0/1/2 and per agent mode,
+      against a mocked Anthropic client, no database), integration
+      (`src/tests/integration/ai-controller/write-tools.test.ts` — every
+      write tool's name/account resolution, permission refusal, and
+      balance validation against the real database, plus
+      `AutonomySettingsService`'s own permission/validation behavior and
+      `AIDraftProposalService.confirm`'s full real-DB proof: a real DRAFT
+      invoice/bill/journal entry created only via the real underlying
+      service, audited with both AI-proposal and human-confirmer details,
+      a lowered autonomy level blocking a stale confirmation, and a
+      restricted-role confirmer refused at the real creation step even
+      though the PENDING proposal itself was visible to them;
+      `src/tests/integration/ai-controller/draft-proposal-flow.test.ts` —
+      the full mocked-tool-use conversation → proposal → separate
+      confirmation round trip, a Level 0 org never offering the write tool
+      for the identical request, and an EMPLOYEE actor's tool call being
+      refused inside the tool itself even when the org is at Level 2).
+- [x] `npm run typecheck`, `npm run lint`, `npm test` (516 tests — the 487
+      from Slice 1 plus 29 new) and `npm run build` all pass against a local
+      Postgres (two new migrations: an `ai_autonomy_level` column on
+      `organizations`, and the `ai_draft_proposals` table with the same
+      FORCEd-RLS tenant-isolation policy every other tenant table has —
+      confirmed by `db:migrate`'s own tenant-isolation audit going from
+      45/49 to 46/50 org-scoped tables). The full proposal → confirmation →
+      real DRAFT-invoice → audit-trail round trip, the autonomy-level gate,
+      and every permission refusal (including the "shown a proposal but not
+      permitted to confirm it" case) are verified for real against the test
+      database by the integration tests above — not mocked. The real
+      Anthropic API call itself is, as with every other AI feature in this
+      codebase, only ever exercised via a mocked SDK — never a real network
+      call in tests or CI. A logged-in browser/curl walkthrough of the chat
+      UI's "Create this draft?" confirmation click was not re-driven this
+      slice for the same reason Slice 1's own smoke test stopped at the
+      integration-test level for its server action: a Next.js Server Action
+      invoked imperatively (not via a plain `<form>`) uses a binary RSC wire
+      protocol with no documented curl-reproducible format. `next build`
+      and `next start` were run against a real local Postgres (auth-gated
+      page redirects confirmed over real HTTP) in addition to the
+      real-database integration-test proof above.
 
 ## Phase 7 — Operations (not started)
 

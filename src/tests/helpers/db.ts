@@ -6,6 +6,7 @@ import type { Actor } from "@/domain/permissions/permission-service";
 import type { MembershipRole } from "@/domain/permissions/roles";
 
 const TENANT_TABLES = [
+  "ai_draft_proposals",
   "saved_reports",
   "audit_logs",
   "expense_claim_lines",

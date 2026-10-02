@@ -320,6 +320,17 @@ export const organizations = pgTable("organizations", {
   baseCurrency: text("base_currency").notNull().default("AUD"),
   country: text("country").notNull().default("AU"),
   industry: text("industry"),
+  /**
+   * Master spec §8's autonomy level, Phase 6 Slice 2. Only 0, 1 and 2 are
+   * meaningful today (see `src/domain/ai-controller/autonomy.ts`): 0/1 is
+   * "the AI may only inform/suggest" (the default, and Slice 1's only
+   * behavior), 2 is "the AI may additionally prepare a DRAFT a human must
+   * separately review and confirm." Levels 3/4 (auto-execution) are
+   * deliberately not implemented — see docs/ai-agents.md §3 — and are
+   * rejected by `AutonomySettingsService.setLevel` rather than silently
+   * accepted and ignored.
+   */
+  aiAutonomyLevel: integer("ai_autonomy_level").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
@@ -2444,6 +2455,74 @@ export const savedReports = pgTable("saved_reports", {
 export const savedReportsRelations = relations(savedReports, ({ one }) => ({
   organization: one(organizations, {
     fields: [savedReports.organizationId],
+    references: [organizations.id],
+  }),
+}));
+
+// ---------------------------------------------------------------------------
+// AI Financial Controller — write-capable tool proposals (Phase 6 Slice 2)
+// ---------------------------------------------------------------------------
+
+export const aiDraftProposalTypeEnum = pgEnum("ai_draft_proposal_type", [
+  "INVOICE",
+  "BILL",
+  "JOURNAL_ENTRY",
+]);
+
+export const aiDraftProposalStatusEnum = pgEnum("ai_draft_proposal_status", [
+  "PENDING",
+  "CONFIRMED",
+  "DISMISSED",
+  "EXPIRED",
+]);
+
+/**
+ * The real human-in-the-loop checkpoint master spec §80/§87.4 require: a
+ * write-capable Controller tool (`prepare_draft_invoice`, `prepare_draft_bill`,
+ * `prepare_draft_journal_entry` — see `src/domain/ai-controller/write-tools.ts`)
+ * never creates an invoice/bill/journal entry itself. It only ever resolves
+ * the model's request into a concrete, fully-validated creation payload
+ * (real contact id, real account ids — never an id the model merely claims,
+ * see `docs/ai-agents.md`) and stores THAT here, PENDING, for a human to
+ * review. `AIDraftProposalService.confirm` is the only path that turns a row
+ * here into a real DRAFT invoice/bill/journal entry, via the exact same
+ * `InvoiceService.create`/`BillService.create`/`PostingService.createDraft`
+ * a human using the UI directly would call — never a second ledger-writing
+ * code path. `payload` is the resolved `CreateInvoiceInput`/`CreateBillInput`/
+ * `JournalEntryDraft` (dates as ISO strings); `preview` is the smaller,
+ * human-readable shape the chat UI renders in its "Create this draft?" card.
+ * `createdByUserId` is the user whose conversation produced this proposal;
+ * `confirmedByUserId` (set only on confirm) is who actually clicked confirm —
+ * both are needed per master spec §44's "for AI actions also store: agent,
+ * model, ..., proposed action, approver, outcome," and both are also
+ * recorded as audit-log metadata, never only here.
+ */
+export const aiDraftProposals = pgTable("ai_draft_proposals", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  proposalType: aiDraftProposalTypeEnum("proposal_type").notNull(),
+  status: aiDraftProposalStatusEnum("status").notNull().default("PENDING"),
+  createdByUserId: uuid("created_by_user_id").notNull(),
+  model: text("model").notNull(),
+  conversationQuestion: text("conversation_question").notNull(),
+  payload: jsonb("payload").notNull(),
+  preview: jsonb("preview").notNull(),
+  resultEntityId: uuid("result_entity_id"),
+  confirmedByUserId: uuid("confirmed_by_user_id"),
+  confirmedAt: timestamp("confirmed_at", { withTimezone: true }),
+  dismissedAt: timestamp("dismissed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+}, (table) => ({
+  orgIdx: index("ai_draft_proposals_org_idx").on(table.organizationId),
+  orgStatusIdx: index("ai_draft_proposals_org_status_idx").on(table.organizationId, table.status),
+}));
+
+export const aiDraftProposalsRelations = relations(aiDraftProposals, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [aiDraftProposals.organizationId],
     references: [organizations.id],
   }),
 }));

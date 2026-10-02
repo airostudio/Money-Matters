@@ -4,6 +4,10 @@ import { type Actor } from "@/domain/permissions/permission-service";
 import { AuditService } from "@/domain/audit/audit-service";
 import { DimensionService } from "@/domain/dimensions/dimension-service";
 import { buildControllerTools, type ControllerToolDefinition, type ToolCitation } from "./controller-tools";
+import { buildWriteTools } from "./write-tools";
+import { AutonomySettingsService } from "./autonomy";
+import { AGENT_MODES, type AgentMode } from "./specialist-agents";
+import type { DraftProposalPreview } from "./draft-proposal-service";
 
 /**
  * The AI Financial Controller (master spec §7, Phase 6 Slice 1): a
@@ -45,11 +49,16 @@ export interface ConversationTurn {
   text: string;
 }
 
+export interface PendingDraftProposal {
+  id: string;
+  preview: DraftProposalPreview;
+}
+
 export type ControllerOutcome =
-  | { status: "ok"; answer: string; citations: ToolCitation[] }
+  | { status: "ok"; answer: string; citations: ToolCitation[]; proposals: PendingDraftProposal[] }
   | { status: "unavailable"; reason: string };
 
-function systemPrompt(toolNames: string[]): string {
+function systemPrompt(toolNames: string[], hasWriteTools: boolean, agentAddendum: string): string {
   return [
     "You are the AI Financial Controller for a small business accounting platform.",
     `You may ONLY learn financial facts by calling one of these tools: ${toolNames.join(", ")}.`,
@@ -57,7 +66,13 @@ function systemPrompt(toolNames: string[]): string {
     "If a tool call is refused because the user's role does not have permission, say so plainly and do not attempt another tool or guess at the answer from somewhere else — report the refusal exactly as given.",
     "If a question is not about this organization's financial data (e.g. small talk), you may answer directly without a tool.",
     "When you have enough information, give a concise, plain-English final answer. Do not repeat long raw tables back — summarize them. You do not need to list your sources yourself; the application appends them automatically.",
-  ].join(" ");
+    hasWriteTools
+      ? "Some of your tools PREPARE a draft invoice/bill/journal entry for human review — they never create or post anything by themselves. After calling one, tell the user you've prepared a draft and that they need to review and explicitly confirm it; never say it has been created, entered, or posted. Never call a prepare_draft_* tool unless the user clearly asked you to draft/prepare/create that specific invoice, bill, or journal entry — do not prepare one speculatively."
+      : "You do not have any tool that creates, drafts, or posts anything — you can only look things up and explain them. If asked to create, draft, invoice, or post something, say plainly that this isn't something you can do here (it may require a higher autonomy level the organization hasn't enabled, or isn't supported from chat).",
+    agentAddendum,
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 const MONEY_LIKE = /[$£€]\s?\d|\b\d{1,3}(?:,\d{3})*\.\d{2}\b/;
@@ -113,15 +128,23 @@ async function runToolCallLoop(
   tools: ControllerToolDefinition[],
   apiKey: string,
   messages: Array<{ role: "user" | "assistant"; content: string | AnthropicContentBlock[] }>,
-): Promise<{ answer: string; citations: ToolCitation[]; toolCallLog: Array<{ tool: string; ok: boolean }> }> {
+  hasWriteTools: boolean,
+  agentAddendum: string,
+): Promise<{
+  answer: string;
+  citations: ToolCitation[];
+  toolCallLog: Array<{ tool: string; ok: boolean }>;
+  proposals: PendingDraftProposal[];
+}> {
   const { default: Anthropic } = await import("@anthropic-ai/sdk");
   const client = new Anthropic({ apiKey, timeout: REQUEST_TIMEOUT_MS });
   const model = process.env.ANTHROPIC_CONTROLLER_MODEL || DEFAULT_MODEL;
   const apiTools = tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.inputSchema as any }));
-  const system = systemPrompt(tools.map((t) => t.name));
+  const system = systemPrompt(tools.map((t) => t.name), hasWriteTools, agentAddendum);
 
   const citations: ToolCitation[] = [];
   const toolCallLog: Array<{ tool: string; ok: boolean }> = [];
+  const proposals: PendingDraftProposal[] = [];
   let anyToolCalled = false;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
@@ -151,10 +174,11 @@ async function runToolCallLoop(
             "I can't answer that from memory — let me know a bit more specifically what you'd like (e.g. a period or account), and I'll look it up in your actual records.",
           citations: [],
           toolCallLog,
+          proposals,
         };
       }
 
-      return { answer: text || "I didn't have anything more to add.", citations, toolCallLog };
+      return { answer: text || "I didn't have anything more to add.", citations, toolCallLog, proposals };
     }
 
     anyToolCalled = true;
@@ -185,6 +209,7 @@ async function runToolCallLoop(
       toolCallLog.push({ tool: def.name, ok: outcome.ok });
       if (outcome.ok) {
         citations.push(outcome.citation);
+        if (outcome.proposal) proposals.push(outcome.proposal);
         toolResults.push({ type: "tool_result", tool_use_id: toolUse.id, content: outcome.summary } as any);
       } else {
         toolResults.push({ type: "tool_result", tool_use_id: toolUse.id, is_error: true, content: outcome.error } as any);
@@ -198,6 +223,7 @@ async function runToolCallLoop(
     answer: "I had to stop after gathering several reports — please ask a more specific follow-up and I'll continue from there.",
     citations,
     toolCallLog,
+    proposals,
   };
 }
 
@@ -208,8 +234,23 @@ export const FinancialControllerService = {
    * text-only, not the raw tool-use blocks). Every tool call this turn makes
    * uses `actor` — the real, authenticated user — never an elevated or
    * service-level identity.
+   *
+   * `agentMode` (default `"GENERAL"`) narrows the tool subset and system
+   * prompt per `specialist-agents.ts` — it never widens what a plain
+   * Controller conversation could already do. Write-capable tools
+   * (`prepare_draft_*`) are only even constructed, let alone offered to the
+   * model, when the organization's autonomy level (`AutonomySettingsService`)
+   * is >= 2 — this is checked BEFORE the tool list is built, not only when a
+   * tool is called, so a Level 0/1 organization's conversation never has a
+   * `prepare_draft_*` tool in its `tools` array at all, regardless of
+   * `agentMode`.
    */
-  async ask(actor: Actor, question: string, history: ConversationTurn[] = []): Promise<ControllerOutcome> {
+  async ask(
+    actor: Actor,
+    question: string,
+    history: ConversationTurn[] = [],
+    agentMode: AgentMode = "GENERAL",
+  ): Promise<ControllerOutcome> {
     const trimmed = question.trim();
     if (!trimmed) return { status: "unavailable", reason: "Please type a question first." };
 
@@ -220,6 +261,8 @@ export const FinancialControllerService = {
         reason: "The AI Financial Controller isn't configured in this environment.",
       };
     }
+
+    const mode = AGENT_MODES[agentMode] ?? AGENT_MODES.GENERAL;
 
     // `run_report`'s tool description is enriched with the organization's
     // real dimension names (see `controller-tools.ts`), but not every role
@@ -234,7 +277,17 @@ export const FinancialControllerService = {
     } catch {
       // Fall through with no dimensions.
     }
-    const tools = buildControllerTools(dimensions);
+    const allReadTools = buildControllerTools(dimensions);
+    const readTools = mode.readToolNames ? allReadTools.filter((t) => mode.readToolNames!.includes(t.name)) : allReadTools;
+
+    // THE autonomy gate: write tools are constructed at all only at Level 2+,
+    // and even then only the subset this agent mode names — see this
+    // method's doc comment and docs/ai-agents.md.
+    const autonomyLevel = await AutonomySettingsService.getLevel(actor.organizationId);
+    const model = process.env.ANTHROPIC_CONTROLLER_MODEL || DEFAULT_MODEL;
+    const allWriteTools = autonomyLevel >= 2 ? buildWriteTools(trimmed, model) : [];
+    const writeTools = allWriteTools.filter((t) => mode.writeToolNames.includes(t.name));
+    const tools = [...readTools, ...writeTools];
 
     const messages: Array<{ role: "user" | "assistant"; content: string | AnthropicContentBlock[] }> = [
       ...history.map((h) => ({ role: h.role, content: h.text })),
@@ -243,7 +296,7 @@ export const FinancialControllerService = {
 
     let result: Awaited<ReturnType<typeof runToolCallLoop>>;
     try {
-      result = await runToolCallLoop(actor, tools, apiKey, messages);
+      result = await runToolCallLoop(actor, tools, apiKey, messages, writeTools.length > 0, mode.systemPromptAddendum);
     } catch {
       // Same discipline as every other AI integration in this codebase: never
       // surface the raw error, timeout, or network failure.
@@ -281,6 +334,11 @@ export const FinancialControllerService = {
       }
     }
 
-    return { status: "ok", answer: result.answer + formatSources(result.citations), citations: dedupeCitations(result.citations) };
+    return {
+      status: "ok",
+      answer: result.answer + formatSources(result.citations),
+      citations: dedupeCitations(result.citations),
+      proposals: result.proposals,
+    };
   },
 };

@@ -2,22 +2,25 @@ import { requireOrgAndActor } from "@/lib/session";
 import { OrganizationService } from "@/domain/organizations/organization-service";
 import { roleHasPermission } from "@/domain/permissions/roles";
 import { membershipRoleEnum } from "@/db/schema";
+import { AUTONOMY_LEVELS, AUTONOMY_LEVEL_LABELS } from "@/domain/ai-controller/autonomy";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
-import { inviteMemberAction, removeMemberAction, updateMemberRoleAction } from "./actions";
+import { inviteMemberAction, removeMemberAction, updateAutonomyLevelAction, updateMemberRoleAction } from "./actions";
 import { MemberRoleSelect } from "@/components/shell/member-role-select";
 
 export default async function SettingsPage({ params }: { params: { orgSlug: string } }) {
   const { org, actor } = await requireOrgAndActor(params.orgSlug);
   const canManageMembers = roleHasPermission(actor.role, "membership:manage");
+  const canManageOrganization = roleHasPermission(actor.role, "organization:manage");
 
   const members = canManageMembers ? await OrganizationService.listMembers(actor) : [];
 
   const boundInvite = inviteMemberAction.bind(null, org.slug);
   const boundUpdateRole = updateMemberRoleAction.bind(null, org.slug);
   const boundRemove = removeMemberAction.bind(null, org.slug);
+  const boundUpdateAutonomy = updateAutonomyLevelAction.bind(null, org.slug);
 
   return (
     <div className="max-w-3xl space-y-8">
@@ -47,6 +50,45 @@ export default async function SettingsPage({ params }: { params: { orgSlug: stri
             <p className="text-muted-foreground">Your role</p>
             <p className="font-medium">{actor.role}</p>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">AI Financial Controller autonomy</CardTitle>
+          <CardDescription>
+            Controls whether the AI Financial Controller may only answer questions (Level 0/1) or may additionally
+            prepare a DRAFT invoice, bill, or journal entry for a human to review and confirm (Level 2). The AI never
+            approves, posts, or confirms anything itself, at any level — see docs/ai-agents.md.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {canManageOrganization ? (
+            <form action={boundUpdateAutonomy} className="flex flex-col gap-3">
+              {AUTONOMY_LEVELS.map((level) => (
+                <label key={level} className="flex items-start gap-3 text-sm">
+                  <input
+                    type="radio"
+                    name="autonomyLevel"
+                    value={level}
+                    defaultChecked={org.aiAutonomyLevel === level}
+                    className="mt-1"
+                  />
+                  <span>{AUTONOMY_LEVEL_LABELS[level]}</span>
+                </label>
+              ))}
+              <div>
+                <Button type="submit" size="sm">
+                  Save
+                </Button>
+              </div>
+            </form>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              Current level: <span className="font-medium">{AUTONOMY_LEVEL_LABELS[org.aiAutonomyLevel as 0 | 1 | 2] ?? org.aiAutonomyLevel}</span>.
+              Only an Owner or Administrator can change this.
+            </p>
+          )}
         </CardContent>
       </Card>
 
