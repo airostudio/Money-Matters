@@ -15,6 +15,7 @@ import {
   quotes,
   recurringBillTemplates,
   recurringInvoiceTemplates,
+  savedReports,
   supplierCreditNotes,
 } from "@/db/schema";
 import { db } from "@/db/client";
@@ -32,6 +33,7 @@ import { PaymentRunService } from "@/domain/purchases/payment-run-service";
 import { ExpenseClaimService } from "@/domain/expenses/expense-claim-service";
 import { createExpenseFixtures } from "../helpers/expenses";
 import { ReportingService } from "@/domain/reporting/reporting-service";
+import { ReportBuilderService } from "@/domain/reporting/report-builder-service";
 
 /**
  * Master spec §48 / §87 non-negotiable #7: "A coding mistake must not allow
@@ -159,6 +161,7 @@ describe("Tenant isolation", () => {
       "supplier_credit_allocations",
       "payment_runs",
       "payment_run_items",
+      "saved_reports",
     ];
 
     const rows = await db.execute<{
@@ -401,5 +404,30 @@ describe("Tenant isolation", () => {
       tx.select().from(accounts).where(eq(accounts.code, "9999")),
     );
     expect(leaked).toHaveLength(0);
+  });
+
+  it("a saved report created under org A is invisible to org B, even by direct query with no filter, and cannot be run or deleted as org B", async () => {
+    const created = await ReportBuilderService.saveReport(orgA.owner, {
+      name: "Org A's report",
+      visibility: "ORGANIZATION",
+      config: {
+        rowGroupBy: "ACCOUNT_TYPE",
+        accountTypes: ["REVENUE"],
+        measure: "MOVEMENT",
+        periodBreakdown: "NONE",
+        dateFrom: "2026-01-01",
+        dateTo: "2026-01-31",
+      },
+    });
+
+    expect(await ReportBuilderService.getSavedReport(orgB.owner, created.id)).toBeNull();
+    await expect(ReportBuilderService.runSavedReport(orgB.owner, created.id)).rejects.toThrow();
+    await expect(ReportBuilderService.deleteSavedReport(orgB.owner, created.id)).rejects.toThrow();
+
+    const rowsAsOrgB = await withTenant(orgB.organizationId, (tx) => tx.select().from(savedReports));
+    expect(rowsAsOrgB.some((r) => r.id === created.id)).toBe(false);
+
+    const rowsWithNoTenantContext = await db.select().from(savedReports);
+    expect(rowsWithNoTenantContext).toHaveLength(0);
   });
 });
