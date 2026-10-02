@@ -1,5 +1,5 @@
-import { and, eq, gte, lte, ne, sql } from "drizzle-orm";
-import { accounts, journalEntries, journalLines } from "@/db/schema";
+import { and, eq, gte, inArray, lte, ne, sql } from "drizzle-orm";
+import { accounts, journalEntries, journalLineDimensions, journalLines } from "@/db/schema";
 import type { TenantDb } from "@/db/tenant";
 import type { AccountType } from "@/domain/accounts/account-service";
 
@@ -21,6 +21,16 @@ export interface AccountActivityRange {
   from?: Date;
   /** Inclusive upper bound on `postingDate`. */
   to: Date;
+  /**
+   * Restrict to journal lines tagged with this `dimension_values.id` (master
+   * spec §4's "Universal Dimension Engine" — see
+   * `src/db/schema.ts`'s `journalLineDimensions` join table). This is
+   * Phase 5 Slice 2's dimensional reporting: the one extra join/`and()`
+   * clause Slice 1's doc comment on this function anticipated. Omit for
+   * "every line, regardless of dimension tagging" (the Slice 1 behavior,
+   * unchanged for every existing caller).
+   */
+  dimensionValueId?: string;
 }
 
 /**
@@ -46,6 +56,39 @@ export async function sumPostedActivityByAccount(
   const dateConditions = [lte(journalEntries.postingDate, range.to)];
   if (range.from) dateConditions.push(gte(journalEntries.postingDate, range.from));
 
+  let taggedLineIds: string[] | undefined;
+  if (range.dimensionValueId) {
+    const tagged = await tx
+      .select({ journalLineId: journalLineDimensions.journalLineId })
+      .from(journalLineDimensions)
+      .where(
+        and(
+          eq(journalLineDimensions.organizationId, organizationId),
+          eq(journalLineDimensions.dimensionValueId, range.dimensionValueId),
+        ),
+      );
+    taggedLineIds = tagged.map((t) => t.journalLineId);
+    // No line is tagged with this dimension value at all — every account's
+    // activity is zero rather than running a query with an empty IN(),
+    // which some drivers treat specially (and which is clearer intent).
+    if (taggedLineIds.length === 0) {
+      return tx
+        .select({
+          accountId: accounts.id,
+          code: accounts.code,
+          name: accounts.name,
+          type: accounts.type,
+          subType: accounts.subType,
+          isSystemAccount: accounts.isSystemAccount,
+          totalDebit: sql<string>`'0'`,
+          totalCredit: sql<string>`'0'`,
+        })
+        .from(accounts)
+        .where(eq(accounts.organizationId, organizationId))
+        .orderBy(accounts.code);
+    }
+  }
+
   const postedLines = tx
     .select({
       accountId: journalLines.accountId,
@@ -62,6 +105,7 @@ export async function sumPostedActivityByAccount(
         // only status with no ledger effect.
         ne(journalEntries.status, "DRAFT"),
         ...dateConditions,
+        ...(taggedLineIds ? [inArray(journalLines.id, taggedLineIds)] : []),
       ),
     )
     .as("posted_lines");

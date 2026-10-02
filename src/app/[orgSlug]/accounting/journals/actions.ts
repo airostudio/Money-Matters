@@ -12,6 +12,11 @@ function parseLinesFromFormData(formData: FormData): JournalLineDraft[] {
   const credits = formData.getAll("lineCredit").map(String);
   const memos = formData.getAll("lineMemo").map(String);
   const currencies = formData.getAll("lineCurrency").map(String);
+  // Present only when the form rendered a dimension picker at all (see
+  // JournalLineEditor's `dimensionOptions` prop) — absent entirely for an
+  // org with no dimensions configured, so this stays an empty array rather
+  // than misaligning with the other per-line arrays above.
+  const dimensionValueIds = formData.getAll("lineDimensionValueId").map(String);
 
   const lines: JournalLineDraft[] = [];
   for (let i = 0; i < accountIds.length; i++) {
@@ -21,12 +26,15 @@ function parseLinesFromFormData(formData: FormData): JournalLineDraft[] {
     const credit = credits[i]?.trim();
     if (!debit && !credit) continue;
 
+    const dimensionValueId = dimensionValueIds[i]?.trim();
+
     lines.push({
       accountId,
       debit: debit || undefined,
       credit: credit || undefined,
       currency: currencies[i] || "AUD",
       memo: memos[i]?.trim() || undefined,
+      dimensionValueIds: dimensionValueId ? [dimensionValueId] : undefined,
     });
   }
   return lines;
