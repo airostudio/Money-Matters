@@ -96,7 +96,7 @@ async function persistInvoiceWithLines(
   actor: Actor,
   input: CreateInvoiceInput,
   existingId?: string,
-): Promise<{ id: string; invoiceNumber: string }> {
+): Promise<{ id: string; invoiceNumber: string; lines: { id: string; lineNumber: number }[] }> {
   const customer = await assertActiveCustomer(tx, actor.organizationId, input.customerContactId);
   await assertAccountsUsable(tx, actor.organizationId, [
     input.arAccountId,
@@ -159,20 +159,25 @@ async function persistInvoiceWithLines(
     invoiceId = created.id;
   }
 
-  await tx.insert(invoiceLines).values(
-    totals.lines.map((line, i) => ({
-      organizationId: actor.organizationId,
-      invoiceId,
-      lineNumber: i + 1,
-      description: line.description,
-      quantity: line.quantity,
-      unitPrice: line.unitPrice,
-      accountId: line.accountId,
-      taxCodeId: line.taxCodeId,
-      lineAmount: line.lineAmount,
-      taxAmount: line.taxAmount,
-    })),
-  );
+  const insertedLines = await tx
+    .insert(invoiceLines)
+    .values(
+      totals.lines.map((line, i) => ({
+        organizationId: actor.organizationId,
+        invoiceId,
+        lineNumber: i + 1,
+        description: line.description,
+        quantity: line.quantity,
+        unitPrice: line.unitPrice,
+        accountId: line.accountId,
+        taxCodeId: line.taxCodeId,
+        projectId: line.projectId,
+        taskId: line.taskId,
+        lineAmount: line.lineAmount,
+        taxAmount: line.taxAmount,
+      })),
+    )
+    .returning({ id: invoiceLines.id, lineNumber: invoiceLines.lineNumber });
 
   await AuditService.record(tx, actor, {
     action: existingId ? "invoice.updated" : "invoice.draft_created",
@@ -181,7 +186,7 @@ async function persistInvoiceWithLines(
     after: { invoiceNumber, customer: customer.displayName, ...totals },
   });
 
-  return { id: invoiceId, invoiceNumber };
+  return { id: invoiceId, invoiceNumber, lines: insertedLines };
 }
 
 export const InvoiceService = {

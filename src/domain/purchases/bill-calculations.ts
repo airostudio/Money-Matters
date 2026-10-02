@@ -9,6 +9,8 @@ export interface CalculatedBillLine {
   unitPrice: string;
   accountId: string;
   taxCodeId: string | null;
+  projectId: string | null;
+  taskId: string | null;
   /** quantity × unitPrice, exact Decimal string. */
   lineAmount: string;
   /** lineAmount × the tax code's rate, "0.0000" when there's no tax code. */
@@ -74,6 +76,8 @@ export function calculateBillTotals(
       unitPrice: unitPrice.toString(),
       accountId: line.accountId,
       taxCodeId: line.taxCodeId ?? null,
+      projectId: line.projectId ?? null,
+      taskId: line.taskId ?? null,
       lineAmount: lineAmount.toString(),
       taxAmount: taxAmount.toString(),
     };

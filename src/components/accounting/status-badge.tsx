@@ -31,6 +31,10 @@ const STATUS_STYLES: Record<string, string> = {
   PART_APPLIED: "bg-warning/10 text-warning",
   APPLIED: "bg-success/10 text-success",
   AWAITING_APPROVAL: "bg-warning/10 text-warning",
+  ACTIVE: "bg-success/10 text-success",
+  ON_HOLD: "bg-warning/10 text-warning",
+  COMPLETED: "bg-muted text-muted-foreground",
+  INVOICED: "bg-success/10 text-success",
 };
 
 export function StatusBadge({ status }: { status: string }) {

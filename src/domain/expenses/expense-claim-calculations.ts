@@ -12,6 +12,8 @@ export interface CalculatedExpenseClaimLine {
   taxAmount: string;
   category: string | null;
   receiptId: string | null;
+  projectId: string | null;
+  taskId: string | null;
 }
 
 export interface CalculatedExpenseClaimTotals {
@@ -67,6 +69,8 @@ export function calculateExpenseClaimTotals(
       taxAmount: taxAmount.toString(),
       category: line.category?.trim() || null,
       receiptId: line.receiptId ?? null,
+      projectId: line.projectId ?? null,
+      taskId: line.taskId ?? null,
     };
   });
 

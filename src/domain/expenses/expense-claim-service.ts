@@ -145,6 +145,8 @@ async function persistClaimWithLines(
       taxAmount: line.taxAmount,
       category: line.category,
       receiptId: line.receiptId,
+      projectId: line.projectId,
+      taskId: line.taskId,
     })),
   );
 

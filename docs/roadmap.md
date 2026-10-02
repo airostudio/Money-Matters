@@ -1429,10 +1429,179 @@ the user confirmed.
       stop) involves an LLM call at all, so there was nothing to mock there
       in the first place.
 
-## Phase 7 — Operations (not started)
+## Phase 7 — Operations
 
-Projects/jobs, time tracking, inventory (incl. costing methods, landed
-costs), fixed assets.
+### Slice 1 — Projects/Jobs & Time Tracking (complete)
+
+- [x] **Schema** (`src/db/schema.ts`): `projects` (org-scoped: optional
+      customer, unique-per-org `code`, name, status enum
+      ACTIVE/ON_HOLD/COMPLETED/CANCELLED, `budgetedRevenue`/`budgetedCost`,
+      a simple `defaultHourlyRate`, start/end dates) and `project_tasks`
+      (a deliberately flat per-project task list — name, optional
+      `budgetedHours`, an optional per-task `billingRate` override,
+      done/not-done). An optional `projectId`/`taskId` was added directly to
+      `invoice_lines`, `bill_lines`, and `expense_claim_lines` — **all
+      three**, since none turned out to be riskier to touch than the
+      others; each is additive (nullable columns, no change to existing
+      callers' behavior) and is exercised by the full existing property/unit
+      suite with zero regressions. `timesheet_entries` (org-scoped:
+      employee, project, optional task, `entryDate`, `hours`, optional
+      `startedAt`/`endedAt` for the timer path, `notes`, `billable`, status
+      enum DRAFT/SUBMITTED/APPROVED/REJECTED/INVOICED, and
+      `invoiceId`/`invoiceLineId` set once a line is billed). All three new
+      tables are RLS-enabled + FORCEd + policy + `mm_app`-granted
+      (drizzle/0021–0022), verified by the `db:migrate` tenant-isolation
+      audit, now **51 of 55** organization-scoped tables (up from 46).
+    - **Design decision — dedicated FK columns, not the dimension system**:
+      Phase 5 Slice 2's generic `dimensions`/`dimension_values` +
+      `journal_line_dimensions` exists for exactly this kind of
+      "which business unit does this line belong to" tagging, and was
+      seriously considered. A dedicated `projectId`/`taskId` FK on the
+      cost-bearing line tables was chosen instead, documented here and in
+      `docs/database.md`, because: (1) a project's billable time needs a
+      *structural*, not just reporting-time, link to the invoice line it
+      produced (`timesheetEntries.invoiceLineId` — the mechanism that makes
+      double-billing structurally impossible) — the dimension system has no
+      equivalent concept of "this journal line's dimension tag is the
+      proof a different row was already settled"; (2) project cost/revenue
+      queries (`profitability-service.ts`) need to join and filter
+      efficiently on one indexed foreign key per cost-bearing *line table*,
+      not fan out through a separate tagging join table per journal line —
+      the dimension system tags posted `journal_lines`, one level removed
+      from the invoice/bill/expense-claim *line* a human actually edits,
+      which would require re-deriving "which invoice line" from "which
+      journal line" anyway; (3) a project is a first-class, queryable
+      business entity with its own lifecycle (budget, status, tasks, a
+      billing rate) — modeling it as a `dimension_value` would mean bolting
+      all of that back on as side tables keyed by a dimension value id
+      instead of a real `projects` table. The dimension system remains the
+      right tool for open-ended, user-defined tags (cost centre, region,
+      department); `projectId` is the right tool for a specific, structural,
+      product-level concept the domain layer needs to reason about directly.
+- [x] **`ProjectService`** (`src/domain/projects/project-service.ts`):
+      create/update a project (unique code enforced per org, customer must
+      be an active CUSTOMER/BOTH contact), open/hold/complete/cancel via
+      `setStatus`, and create/update a task. New permissions `project:read`/
+      `project:manage` (`src/domain/permissions/roles.ts`), granted to
+      OWNER/ADMINISTRATOR/ACCOUNTANT/BOOKKEEPER/MANAGER/ACCOUNTS_RECEIVABLE
+      (manage) and ACCOUNTS_PAYABLE/PAYROLL_MANAGER/EMPLOYEE/READ_ONLY
+      (read-only, since AP needs to attribute bills and an employee needs to
+      see which projects they can log time against).
+- [x] **`TimesheetService`** (`src/domain/projects/timesheet-service.ts`):
+      manual entry and a real start/stop timer — **the same underlying row
+      either way**, per master spec §23 (`startTimer`/`stopTimer` fill in
+      `startedAt`/`endedAt` and derive `hours` via
+      `time-calculations.ts`'s `calculateDurationHours`, a pure,
+      `decimal.js`-based function so a long-running timer never accumulates
+      float error). Submit → a manager's single-approver
+      approve/reject, reusing the exact pattern already established for
+      expense claims (`expense_claim:approve`'s mirror, `timesheet:approve`
+      — a distinct permission from `timesheet:manage` so nobody approves
+      their own time). `DRAFT`/`REJECTED` are the only editable statuses;
+      `APPROVED`/`INVOICED` are immutable. New permissions `timesheet:read`/
+      `timesheet:manage`/`timesheet:approve`.
+- [x] **The integration (master spec §23's explicit requirement)**:
+      `ProjectTimeBillingService.createInvoiceFromUnbilledTime`
+      (`src/domain/projects/project-time-billing-service.ts`) pulls every
+      APPROVED, BILLABLE, not-yet-INVOICED timesheet entry for a project
+      (optionally date-bounded), groups it by task (or one line per entry,
+      caller's choice) at the task's `billingRate` override or the
+      project's `defaultHourlyRate`, and creates the invoice through
+      `InvoiceService.create` — the exact same path, exact same validation,
+      as any manually typed invoice. It is still a DRAFT requiring separate
+      `InvoiceService.approveAndPost`; nothing here posts to the ledger by
+      itself. Every selected entry is stamped `status: INVOICED` with
+      `invoiceId`/`invoiceLineId` set, and the unbilled-time query
+      (`queryUnbilledEntries`) filters on `invoiceId IS NULL` — so a second
+      run, even with an overlapping or identical date range, structurally
+      cannot reselect an entry already claimed. Proven by an integration
+      test that runs the action twice and asserts the second run finds
+      nothing left to bill. Correcting already-billed time means voiding
+      the generated invoice (`InvoiceService.voidInvoice`, which reverses
+      its journal, never edits it) and logging fresh time — voiding does
+      **not** auto-revert the entries back to APPROVED in this slice
+      (a documented, deliberate scope cut rather than a half-built
+      auto-reversal that could resurrect an entry onto a second invoice).
+- [x] **Project profitability** (`src/domain/projects/
+      profitability-service.ts` + `profitability-calculations.ts`): master
+      spec §22's Estimated vs. Actual table — Revenue/Cost/Profit/Margin on
+      both sides, a signed variance, and a plain-language explanation per
+      line (e.g. "Cost exceeded estimate by $X", with the same mechanism
+      able to produce a labelled line like "Labour exceeded estimate by
+      $3,200" wherever a caller has a real estimated/actual pair for that
+      category). "Actual" is summed live from `invoice_lines`/`bill_lines`/
+      `expense_claim_lines` whose `projectId` matches and whose parent
+      document has actually posted (not DRAFT, not VOID) — it can never
+      drift from the ledger because nothing is cached. **Honest scope cut**:
+      Actual Cost does **not** include a dollar figure for logged labour —
+      this codebase has no per-employee hourly *cost* rate (only a *billing*
+      rate), so there is no honest number to attribute it at; billable
+      hours and non-billable hours are both reported separately instead, and
+      once billable time is actually invoiced its dollar value appears in
+      Actual Revenue the normal way. A future slice that adds an employee
+      cost rate can fold labour into Actual Cost without changing this
+      service's shape.
+- [x] **UI** (`src/app/[orgSlug]/projects/`): a projects list (filterable by
+      status), a new-project form, and a project detail page with the
+      Estimated-vs-Actual table, task list + add-task form, a real
+      start/stop timer plus a manual time-entry form, a timesheet-entries
+      table with submit/approve/reject actions, and the "create invoice
+      from unbilled time" form (account/tax-code pickers, optional date
+      range, previews the un-invoiced hours total before submitting). The
+      `Operations` nav placeholder is now the real `Projects` section.
+- [x] Tests: unit (`calculateDurationHours`'s banker's-rounding duration
+      math and its reject-a-backwards-range error; `selectUnbilledEntries`'s
+      pure filter against a crafted mix of draft/submitted/approved/
+      already-invoiced/non-billable/wrong-project/out-of-range entries;
+      `computeProjectVariance`'s margin-is-null-not-zero-on-zero-revenue
+      case, signed variance, and plain-language explanations including a
+      per-category breakdown line) and integration against the real test
+      database (create a project with a budget; log time both manually and
+      via start/stop timer; submit/approve; generate an invoice from
+      unbilled time and confirm its total and that entries are marked
+      INVOICED; **re-run the action and confirm it finds nothing left to
+      bill**; attribute a posted bill to a project and confirm Actual Cost
+      reflects it before vs. after posting; confirm Actual Revenue only
+      appears once the time-billed invoice is itself posted; a tenant-
+      isolation case for all three new tables). The full existing suite
+      (557 tests total after this slice, up from 533) still passes.
+- [x] `npm run typecheck`, `npm run lint`, `npm test`, and `npm run build`
+      all pass. Smoke-tested for real against a local Postgres: created a
+      project with a $20,000/$12,000 budget and a $150/hr default rate,
+      logged 5h + 3h of manual billable time, submitted and approved both,
+      generated a draft invoice from unbilled time (8h × $150 = $1,200,
+      correct), confirmed a second invoicing run found zero unbilled time
+      left, posted a $2,000 bill attributed to the project and confirmed
+      Actual Cost moved from $0 to $2,000 only after posting (not while the
+      bill was still DRAFT), and posted the time-billed invoice and
+      confirmed Actual Revenue moved from $0 to $1,500 only then.
+
+**Explicitly deferred, not attempted shallow**:
+
+- **Inventory** (SKU/costing methods — FIFO/weighted-average/standard —
+  landed costs, warehouses/locations): a large, mostly-independent domain
+  in its own right per master spec, intentionally left for its own slice
+  rather than a stub that would need to be half-rebuilt later.
+- **Fixed assets** (asset register, depreciation schedules/methods,
+  disposal): same reasoning — independent of projects/time-tracking, large
+  enough to deserve its own vertical slice.
+- **A full task-management system**: dependencies, assignees beyond the
+  implicit link a timesheet entry already carries, Gantt-style planning.
+  `project_tasks` is deliberately a flat list — just enough for "which task
+  was this time logged against."
+- **A rate-card system beyond a simple default/task-override hourly rate**:
+  tiered rates by employee/skill/date range, multi-currency billing rates,
+  etc. — `projects.defaultHourlyRate` and `project_tasks.billingRate` are
+  the full extent of this slice's billing-rate mechanism.
+- **Subcontractor-specific workflows**: no special subcontractor concept
+  was added — a subcontractor's cost is just a normal bill attributed to
+  the project via `bill_lines.projectId`, which is all master spec §22
+  actually asks for here.
+- **Labour cost in Actual Cost**: see `profitability-service.ts`'s doc
+  comment above — no employee hourly cost-rate concept exists yet, so this
+  is an honest omission rather than a fabricated number.
+- **Auto-reverting INVOICED timesheet entries when their invoice is
+  voided**: documented above under the integration service.
 
 ## Phase 8 — Payroll & Australia Compliance (not started)
 

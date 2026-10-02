@@ -193,6 +193,8 @@ async function persistBillWithLines(
       unitPrice: line.unitPrice,
       accountId: line.accountId,
       taxCodeId: line.taxCodeId,
+      projectId: line.projectId,
+      taskId: line.taskId,
       lineAmount: line.lineAmount,
       taxAmount: line.taxAmount,
       receiptId: input.lines[i]?.receiptId ?? null,

@@ -401,6 +401,79 @@ full design; this is the schema-level summary.
   (a join against `journal_line_dimensions`), exactly the "one more clause"
   Slice 1's doc comment on that function anticipated.
 
+## 2i. Phase 7 Slice 1: `projects`, `project_tasks`, `timesheet_entries`
+
+Three new tables for Projects/Jobs & Time Tracking (master spec §22/§23) —
+`src/domain/projects/`'s own doc comments have the full design; this is the
+schema-level summary, including the one deliberate design decision this
+slice made that's worth calling out loudly.
+
+- `projects` — `organizationId`, an optional `customerContactId` (null for
+  an internal project with no external billing), a unique-per-org `code`,
+  `name`, `status` (`ACTIVE`/`ON_HOLD`/`COMPLETED`/`CANCELLED`),
+  `budgetedRevenue`/`budgetedCost` (the "Estimated" half of Estimated vs.
+  Actual — the "Actual" half is never stored, always computed live, see
+  below), a simple `defaultHourlyRate`, and `startDate`/`endDate`.
+- `project_tasks` — a deliberately flat per-project task list: `name`, an
+  optional `budgetedHours`, and an optional `billingRate` override. No
+  dependencies, no assignees beyond the implicit link a `timesheet_entries`
+  row carries, no Gantt-style planning — a full task-management system is
+  explicitly out of scope for this slice (docs/roadmap.md).
+- `timesheet_entries` — `employeeUserId` (unvalidated against `users`, same
+  convention as `expense_claims.employeeUserId`), `projectId`, an optional
+  `taskId`, `entryDate`, `hours`, optional `startedAt`/`endedAt` (set only
+  by the start/stop timer path — manual entry leaves them null and supplies
+  `hours` directly; **both paths write the same row shape**), `notes`,
+  `billable`, `status`
+  (`DRAFT`/`SUBMITTED`/`APPROVED`/`REJECTED`/`INVOICED`), and
+  `invoiceId`/`invoiceLineId`, set once by
+  `ProjectTimeBillingService.createInvoiceFromUnbilledTime` and never
+  re-pointed — the mechanism that makes double-billing structurally
+  impossible (see that service's own doc comment). A composite index
+  (`organizationId, projectId, status, billable`) exists specifically
+  because that's the exact predicate the unbilled-time query filters on.
+
+### Design decision: a dedicated `projectId`/`taskId` FK, not the dimension system
+
+An optional `projectId`/`taskId` pair was added directly to `invoice_lines`,
+`bill_lines`, and `expense_claim_lines` — all three, not a subset; none
+turned out riskier to touch than the others, since adding a nullable FK
+column changes nothing about how any existing caller already behaves, and
+the full existing property/unit suite confirms it.
+
+Phase 5 Slice 2's generic `dimensions`/`dimension_values` +
+`journal_line_dimensions` (§2h above) exists for exactly this shape of
+problem — "tag a line with which business unit it belongs to" — and was
+seriously considered as the mechanism for "which project does this cost
+belong to" instead of a new column. A dedicated FK was chosen instead, for
+three reasons:
+
+1. **Structural, not just reporting, linkage.** A billed timesheet entry
+   needs a hard pointer to the exact invoice line it produced
+   (`timesheetEntries.invoiceLineId`) so a second invoicing run can
+   structurally never reselect it. The dimension system has no equivalent
+   of "this row's tag is proof a different row already settled it" — it's
+   a reporting-time join, not a claim/settlement mechanism.
+2. **Query shape.** Project cost/revenue reporting
+   (`src/domain/projects/profitability-service.ts`) needs a plain indexed
+   join from `invoice_lines`/`bill_lines`/`expense_claim_lines` straight to
+   a project id. The dimension system tags *posted `journal_lines`*, one
+   level removed from the invoice/bill/expense-claim line a human actually
+   edits and a project needs to attribute — using it here would mean
+   re-deriving "which invoice line" from "which journal line" through an
+   extra join, for no benefit.
+3. **A project is a first-class entity**, not an open-ended tag — it has
+   its own lifecycle (budget, status, tasks, a billing rate) that needs a
+   real table with real columns, not a `dimension_value` row with
+   side-tables bolted on.
+
+The dimension system remains the right tool for open-ended, user-defined
+tags (cost centre, region, department) with no entity of their own behind
+them. `projectId` is the right tool for a specific, structural, already-
+modeled business concept the domain layer reasons about directly. Both
+mechanisms now coexist in this schema, each used for the shape of problem
+it fits.
+
 ## 3. Row-Level Security
 
 Every tenant table gets an RLS policy of the shape:

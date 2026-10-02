@@ -11,12 +11,15 @@ import {
   expenseClaims,
   invoices,
   paymentRuns,
+  projectTasks,
+  projects,
   purchaseOrders,
   quotes,
   recurringBillTemplates,
   recurringInvoiceTemplates,
   savedReports,
   supplierCreditNotes,
+  timesheetEntries,
 } from "@/db/schema";
 import { db } from "@/db/client";
 import { withTenant } from "@/db/tenant";
@@ -34,6 +37,8 @@ import { ExpenseClaimService } from "@/domain/expenses/expense-claim-service";
 import { createExpenseFixtures } from "../helpers/expenses";
 import { ReportingService } from "@/domain/reporting/reporting-service";
 import { ReportBuilderService } from "@/domain/reporting/report-builder-service";
+import { ProjectService } from "@/domain/projects/project-service";
+import { TimesheetService } from "@/domain/projects/timesheet-service";
 
 /**
  * Master spec §48 / §87 non-negotiable #7: "A coding mistake must not allow
@@ -162,6 +167,9 @@ describe("Tenant isolation", () => {
       "payment_runs",
       "payment_run_items",
       "saved_reports",
+      "projects",
+      "project_tasks",
+      "timesheet_entries",
     ];
 
     const rows = await db.execute<{
@@ -429,5 +437,37 @@ describe("Tenant isolation", () => {
 
     const rowsWithNoTenantContext = await db.select().from(savedReports);
     expect(rowsWithNoTenantContext).toHaveLength(0);
+  });
+
+  it("a project (and its task and timesheet entries) created under org A is invisible to org B, even by direct query with no filter", async () => {
+    const fixturesA = await createSalesFixtures(orgA.owner, orgA.baseCurrency);
+    const project = await ProjectService.create(orgA.owner, {
+      customerContactId: fixturesA.customerContactId,
+      code: "TENANT-A-PROJ",
+      name: "Org A's project",
+      currency: "AUD",
+    });
+    const task = await ProjectService.createTask(orgA.owner, project.id, { name: "Org A's task" });
+    const entry = await TimesheetService.createManual(orgA.owner, {
+      employeeUserId: orgA.owner.userId,
+      projectId: project.id,
+      taskId: task.id,
+      entryDate: new Date(),
+      hours: "2.00",
+    });
+
+    expect(await ProjectService.get(orgB.owner, project.id)).toBeNull();
+    await expect(TimesheetService.get(orgB.owner, entry.id)).rejects.toThrow();
+
+    const projectsAsOrgB = await withTenant(orgB.organizationId, (tx) => tx.select().from(projects));
+    expect(projectsAsOrgB.some((r) => r.id === project.id)).toBe(false);
+    const tasksAsOrgB = await withTenant(orgB.organizationId, (tx) => tx.select().from(projectTasks));
+    expect(tasksAsOrgB.some((r) => r.id === task.id)).toBe(false);
+    const entriesAsOrgB = await withTenant(orgB.organizationId, (tx) => tx.select().from(timesheetEntries));
+    expect(entriesAsOrgB.some((r) => r.id === entry.id)).toBe(false);
+
+    expect(await db.select().from(projects)).toHaveLength(0);
+    expect(await db.select().from(projectTasks)).toHaveLength(0);
+    expect(await db.select().from(timesheetEntries)).toHaveLength(0);
   });
 });

@@ -14,6 +14,9 @@ export interface ExpenseClaimLineInput {
   category?: string;
   /** Optional link to an uploaded receipt (Document AI) this line was captured/prefilled from. */
   receiptId?: string;
+  /** Phase 7 Slice 1: attributes this cost line to a project (and optional task) for project profitability. */
+  projectId?: string;
+  taskId?: string;
 }
 
 export interface CreateExpenseClaimInput {

@@ -20,6 +20,9 @@ export interface InvoiceLineInput {
   accountId: string;
   /** Optional — a zero-rated/out-of-scope line has none. */
   taxCodeId?: string;
+  /** Phase 7 Slice 1: attributes this revenue line to a project (and optional task) for project profitability. Set by `ProjectTimeBillingService` when a line was generated from billed time; otherwise omitted. */
+  projectId?: string;
+  taskId?: string;
 }
 
 export interface CreateInvoiceInput {

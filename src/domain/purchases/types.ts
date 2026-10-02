@@ -26,6 +26,9 @@ export interface BillLineInput {
   taxCodeId?: string;
   /** Optional link to an uploaded receipt/invoice (Document AI capture) this line was prefilled from — informational only. */
   receiptId?: string;
+  /** Phase 7 Slice 1: attributes this cost line to a project (and optional task) for project profitability. */
+  projectId?: string;
+  taskId?: string;
 }
 
 export interface CreateBillInput {

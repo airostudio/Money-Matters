@@ -58,6 +58,11 @@ export const PERMISSIONS = [
   "payment_run:approve",
   "financial_report:read",
   "saved_report:manage",
+  "project:read",
+  "project:manage",
+  "timesheet:read",
+  "timesheet:manage",
+  "timesheet:approve",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -126,6 +131,11 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "payment_run:read",
     "payment_run:manage",
     "payment_run:approve",
+    "project:read",
+    "project:manage",
+    "timesheet:read",
+    "timesheet:manage",
+    "timesheet:approve",
   ]),
   BOOKKEEPER: new Set<Permission>([
     "account:read",
@@ -171,6 +181,11 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "payment_run:read",
     "payment_run:manage",
     "payment_run:approve",
+    "project:read",
+    "project:manage",
+    "timesheet:read",
+    "timesheet:manage",
+    "timesheet:approve",
   ]),
   ACCOUNTS_RECEIVABLE: new Set<Permission>([
     "account:read",
@@ -191,6 +206,9 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "expense_claim:read",
     "expense_claim:manage",
     "expense_receipt:manage",
+    "project:read",
+    "project:manage",
+    "timesheet:read",
   ]),
   ACCOUNTS_PAYABLE: new Set<Permission>([
     "account:read",
@@ -218,6 +236,7 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "payment_run:read",
     "payment_run:manage",
     "payment_run:approve",
+    "project:read",
   ]),
   PAYROLL_MANAGER: new Set<Permission>([
     "account:read",
@@ -227,6 +246,9 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "expense_claim:manage",
     "expense_claim:approve",
     "expense_receipt:manage",
+    "project:read",
+    "timesheet:read",
+    "timesheet:approve",
   ]),
   MANAGER: new Set<Permission>([
     "account:read",
@@ -251,8 +273,20 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "expense_claim:manage",
     "expense_claim:approve",
     "expense_receipt:manage",
+    "project:read",
+    "project:manage",
+    "timesheet:read",
+    "timesheet:manage",
+    "timesheet:approve",
   ]),
-  EMPLOYEE: new Set<Permission>(["expense_claim:read", "expense_claim:manage", "expense_receipt:manage"]),
+  EMPLOYEE: new Set<Permission>([
+    "expense_claim:read",
+    "expense_claim:manage",
+    "expense_receipt:manage",
+    "project:read",
+    "timesheet:read",
+    "timesheet:manage",
+  ]),
   READ_ONLY: new Set<Permission>([
     "account:read",
     "journal:read",
@@ -272,6 +306,8 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "supplier_credit:read",
     "payment_run:read",
     "expense_claim:read",
+    "project:read",
+    "timesheet:read",
   ]),
 };
 

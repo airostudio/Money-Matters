@@ -64,7 +64,12 @@ export const NAV_ITEMS: NavItem[] = [
     ],
   },
   { label: "People", href: "/people", icon: Users },
-  { label: "Operations", href: "/operations", icon: Package },
+  {
+    label: "Projects",
+    href: "/projects",
+    icon: Package,
+    permission: "project:read",
+  },
   {
     label: "Accounting",
     href: "/accounting",

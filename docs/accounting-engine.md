@@ -254,3 +254,48 @@ see; it's the *aggregate* P&L/Balance Sheet/Cash Flow views that reveal
 overall profitability/position and get the stricter gate. See
 `docs/roadmap.md`'s Phase 5 Slice 1 section for the exact permission
 grant.
+
+## 9. Phase 7 Slice 1 — project profitability (Estimated vs. Actual)
+
+`src/domain/projects/profitability-service.ts` sums every ledger-backed
+line attributed to a project — `invoice_lines`/`bill_lines`/
+`expense_claim_lines` filtered on their new `projectId` column (see
+`docs/database.md` §2i for why that's a dedicated FK, not the dimension
+system) — but **only for lines whose parent document has actually posted**
+(not `DRAFT`, not `VOID`), the same "has a real ledger effect" rule
+`sumPostedActivityByAccount` applies to journal entries, just expressed
+against each document's own `status` column instead of walking through to
+journal entries directly. This is why a DRAFT invoice generated from
+unbilled time contributes nothing to Actual Revenue until a human
+separately approves and posts it (§1's "every mutation goes through
+`PostingService`" invariant, carried through here as "Actual numbers only
+ever reflect what actually posted").
+
+`src/domain/projects/profitability-calculations.ts`'s `computeProjectVariance`
+is the pure, DB-free arithmetic — Money-safe division for margin (a null
+margin on zero revenue, never a fabricated zero or a division-by-zero
+crash), a signed variance, and a plain-language explanation per line,
+extensible to a labelled cost-category breakdown (master spec §22's
+"Labour exceeded estimate by $3,200" example). It is unit-tested directly,
+independent of the database.
+
+**Honest scope cut**: Actual Cost does not include a dollar figure for
+logged labour. This codebase has no per-employee *hourly cost rate*
+concept yet — only a *billing* rate (`projects.defaultHourlyRate`/
+`project_tasks.billingRate`, what the customer is charged, never what the
+work cost the business) — so there is no honest number to compute labour
+cost from. Billable and non-billable hours are reported alongside the
+financials instead of folded into a fabricated cost total; once billable
+time is actually invoiced, its dollar value already appears in Actual
+Revenue the normal way, through the invoice line it produced. A later
+slice that introduces an employee cost rate can extend `sumProjectActuals`
+to add a labour cost line without changing this service's shape or its
+callers.
+
+Time itself — the start/stop timer's duration — is computed by
+`src/domain/projects/time-calculations.ts`'s `calculateDurationHours`,
+which applies this codebase's money rule to hours too: a `decimal.js`
+calculation from millisecond integers, rounded with the same
+`ROUND_HALF_EVEN` convention `Money` uses (`docs/decisions/0003-monetary-precision.md`),
+never a naive floating-point division that would compound rounding error
+on a long-running timer.

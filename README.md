@@ -42,17 +42,28 @@ confirmation click) a narrow, organization-whitelisted set of actions —
 auto-generating a due recurring invoice/bill, or auto-confirming an exact,
 same-day bank reconciliation match — while supplier payments, bank
 details, payroll, tax, unusual journals, and period closes stay
-human-gated at every level, with no exception. See
-[`docs/roadmap.md`](docs/roadmap.md) for exactly what's built vs.
-explicitly deferred in each (a customer portal, AI-drafted collection
+human-gated at every level, with no exception. Phase 7 Slice 1 adds
+Projects/Jobs & Time Tracking: projects with a budget and a default billing
+rate, flat per-project tasks, a start/stop timer and manual time entry on
+the same underlying row, a single-approver submit/approve/reject workflow,
+and the integration master spec §23 asks for — "create invoice from
+unbilled time" pulls approved, billable, not-yet-invoiced hours straight
+into a draft invoice through the exact same `InvoiceService.create` path as
+any other invoice, marking each entry INVOICED so a second run can never
+double-bill it — plus a live Estimated-vs-Actual project profitability view
+computed from posted invoice/bill/expense-claim lines, never cached data.
+Inventory and fixed assets (Phase 7's other two components) are
+intentionally not attempted yet — each is a large, independent domain of
+its own. See [`docs/roadmap.md`](docs/roadmap.md) for exactly what's built
+vs. explicitly deferred in each (a customer portal, AI-drafted collection
 reminders, a live bank feed provider, Stripe, a background job queue, a
 Redis cache, real bank-file/payment-rail integration, full
-inventory-backed goods receiving, invoice/bill line-level dimension
-tagging, PDF/Excel export, and a configurable fiscal-year start all need
-either infrastructure that doesn't exist yet, external accounts/
-credentials this environment doesn't have, or are next up on top of what's
-built so far). See [`docs/architecture.md`](docs/architecture.md) for how
-it's put together.
+inventory-backed goods receiving, PDF/Excel export, a configurable
+fiscal-year start, inventory, and fixed assets all need either
+infrastructure that doesn't exist yet, external accounts/credentials this
+environment doesn't have, or are next up on top of what's built so far).
+See [`docs/architecture.md`](docs/architecture.md) for how it's put
+together.
 
 ## Stack
 

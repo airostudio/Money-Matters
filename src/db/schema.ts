@@ -857,6 +857,19 @@ export const invoiceLines = pgTable("invoice_lines", {
   taxCodeId: uuid("tax_code_id").references(() => taxCodes.id),
   lineAmount: numeric("line_amount", { precision: 19, scale: 4 }).notNull(),
   taxAmount: numeric("tax_amount", { precision: 19, scale: 4 }).notNull().default("0"),
+  /**
+   * Phase 7 Slice 1 (Projects & Time Tracking). Which project/job this
+   * revenue line should be attributed to for project profitability — see
+   * `src/domain/projects/profitability-service.ts` and docs/database.md's
+   * note on why this is a dedicated FK rather than the generic dimension
+   * system. Null for an invoice line with no project (the common case
+   * outside Operations). Never set directly by a human on an ad hoc line
+   * that also came from billed time — `ProjectTimeBillingService` sets both
+   * this and `taskId` when it builds the line from unbilled timesheet
+   * entries.
+   */
+  projectId: uuid("project_id").references((): AnyPgColumn => projects.id),
+  taskId: uuid("task_id").references((): AnyPgColumn => projectTasks.id),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   invoiceLineUnique: uniqueIndex("invoice_lines_invoice_line_unique").on(
@@ -864,6 +877,7 @@ export const invoiceLines = pgTable("invoice_lines", {
     table.lineNumber,
   ),
   orgInvoiceIdx: index("invoice_lines_org_invoice_idx").on(table.organizationId, table.invoiceId),
+  orgProjectIdx: index("invoice_lines_org_project_idx").on(table.organizationId, table.projectId),
 }));
 
 /**
@@ -1205,10 +1219,14 @@ export const billLines = pgTable("bill_lines", {
    * truth once a human has confirmed the line.
    */
   receiptId: uuid("receipt_id").references((): AnyPgColumn => uploadedReceipts.id),
+  /** Phase 7 Slice 1: which project/job this cost line is attributed to — see `invoiceLines.projectId`'s comment for why this is a dedicated FK. */
+  projectId: uuid("project_id").references((): AnyPgColumn => projects.id),
+  taskId: uuid("task_id").references((): AnyPgColumn => projectTasks.id),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   billLineUnique: uniqueIndex("bill_lines_bill_line_unique").on(table.billId, table.lineNumber),
   orgBillIdx: index("bill_lines_org_bill_idx").on(table.organizationId, table.billId),
+  orgProjectIdx: index("bill_lines_org_project_idx").on(table.organizationId, table.projectId),
 }));
 
 /**
@@ -1813,6 +1831,9 @@ export const expenseClaimLines = pgTable("expense_claim_lines", {
   taxAmount: numeric("tax_amount", { precision: 19, scale: 4 }).notNull().default("0"),
   category: text("category"),
   receiptId: uuid("receipt_id").references(() => uploadedReceipts.id),
+  /** Phase 7 Slice 1: which project/job this cost line is attributed to — see `invoiceLines.projectId`'s comment for why this is a dedicated FK. */
+  projectId: uuid("project_id").references((): AnyPgColumn => projects.id),
+  taskId: uuid("task_id").references((): AnyPgColumn => projectTasks.id),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   expenseClaimLineUnique: uniqueIndex("expense_claim_lines_claim_line_unique").on(
@@ -1820,6 +1841,7 @@ export const expenseClaimLines = pgTable("expense_claim_lines", {
     table.lineNumber,
   ),
   orgClaimIdx: index("expense_claim_lines_org_claim_idx").on(table.organizationId, table.expenseClaimId),
+  orgProjectIdx: index("expense_claim_lines_org_project_idx").on(table.organizationId, table.projectId),
 }));
 
 // ---------------------------------------------------------------------------
@@ -2157,6 +2179,14 @@ export const invoiceLinesRelations = relations(invoiceLines, ({ one }) => ({
   taxCode: one(taxCodes, {
     fields: [invoiceLines.taxCodeId],
     references: [taxCodes.id],
+  }),
+  project: one(projects, {
+    fields: [invoiceLines.projectId],
+    references: [projects.id],
+  }),
+  task: one(projectTasks, {
+    fields: [invoiceLines.taskId],
+    references: [projectTasks.id],
   }),
 }));
 
@@ -2630,5 +2660,225 @@ export const aiAutoExecutionsRelations = relations(aiAutoExecutions, ({ one }) =
   organization: one(organizations, {
     fields: [aiAutoExecutions.organizationId],
     references: [organizations.id],
+  }),
+}));
+
+// ---------------------------------------------------------------------------
+// Phase 7 Slice 1 — Projects/Jobs & Time Tracking
+// ---------------------------------------------------------------------------
+
+/**
+ * A project/job's lifecycle. `ACTIVE` is open for new time/cost. `ON_HOLD`
+ * is paused (still visible, new timesheet entries are refused). `COMPLETED`
+ * and `CANCELLED` are both terminal — see `ProjectService.close`. There is
+ * no "won/lost" pipeline stage here (that belongs to CRM, not yet built);
+ * a project exists once work is actually planned/underway.
+ */
+export const projectStatusEnum = pgEnum("project_status", [
+  "ACTIVE",
+  "ON_HOLD",
+  "COMPLETED",
+  "CANCELLED",
+]);
+
+/**
+ * A timesheet entry's approval/billing lifecycle (master spec §23). `DRAFT`
+ * and `REJECTED` are the only editable states — see
+ * `src/domain/projects/timesheet-service.ts`'s `EDITABLE_STATUSES`.
+ * `SUBMITTED` awaits a manager's single-approver decision (same pattern as
+ * `expense_claim_status`): `APPROVED` or back to `REJECTED` (which an
+ * employee can edit and resubmit). `INVOICED` is a one-way terminal state
+ * set only by `ProjectTimeBillingService.createInvoiceFromUnbilledTime`,
+ * never by hand — once set, the entry is immutable in the same spirit as a
+ * posted invoice (see that service's doc comment for the correction path).
+ * There is no ledger posting of a timesheet entry by itself; its only
+ * financial effect is becoming an invoice line (revenue) when billable, and
+ * informing the Estimated-vs-Actual labour figure either way.
+ */
+export const timesheetEntryStatusEnum = pgEnum("timesheet_entry_status", [
+  "DRAFT",
+  "SUBMITTED",
+  "APPROVED",
+  "REJECTED",
+  "INVOICED",
+]);
+
+/**
+ * A project/job (master spec §22). `customerContactId` is optional — an
+ * internal project (no external billing) is legitimate, but
+ * `ProjectTimeBillingService.createInvoiceFromUnbilledTime` requires one.
+ * `budgetedRevenue`/`budgetedCost` are the "Estimated" side of the
+ * Estimated-vs-Actual comparison; the "Actual" side is never stored here —
+ * it is always computed live from posted invoice/bill/expense-claim lines
+ * and approved timesheet entries attributed to this project (see
+ * `src/domain/projects/profitability-service.ts`), so it can never drift
+ * from the ledger. `defaultHourlyRate` is the simple billing-rate mechanism
+ * master spec §22/§23 ask for in this slice — a full rate-card system is
+ * explicitly deferred (docs/roadmap.md).
+ */
+export const projects = pgTable("projects", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  customerContactId: uuid("customer_contact_id").references(() => contacts.id),
+  code: text("code").notNull(),
+  name: text("name").notNull(),
+  status: projectStatusEnum("status").notNull().default("ACTIVE"),
+  currency: text("currency").notNull(),
+  budgetedRevenue: numeric("budgeted_revenue", { precision: 19, scale: 4 }).notNull().default("0"),
+  budgetedCost: numeric("budgeted_cost", { precision: 19, scale: 4 }).notNull().default("0"),
+  /** Default hourly rate billed to the customer for time logged against this project, unless a task overrides it. Null means time on this project can't be invoiced until one is set (on the project or every task used). */
+  defaultHourlyRate: numeric("default_hourly_rate", { precision: 19, scale: 4 }),
+  startDate: timestamp("start_date", { withTimezone: true, mode: "date" }),
+  endDate: timestamp("end_date", { withTimezone: true, mode: "date" }),
+  memo: text("memo"),
+  closedAt: timestamp("closed_at", { withTimezone: true }),
+  closedById: uuid("closed_by_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+  updatedById: uuid("updated_by_id"),
+}, (table) => ({
+  orgCodeUnique: uniqueIndex("projects_org_code_unique").on(table.organizationId, table.code),
+  orgStatusIdx: index("projects_org_status_idx").on(table.organizationId, table.status),
+  orgCustomerIdx: index("projects_org_customer_idx").on(table.organizationId, table.customerContactId),
+}));
+
+/**
+ * A flat task within a project — deliberately not a full task-management
+ * system (no dependencies, no assignees beyond the implicit link from a
+ * timesheet entry, no Gantt planning — see docs/roadmap.md). Exists so a
+ * timesheet entry can record "which task on which project", and so a task
+ * can carry its own `budgetedHours`/`billingRate` override.
+ */
+export const projectTasks = pgTable("project_tasks", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  projectId: uuid("project_id")
+    .notNull()
+    .references(() => projects.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  budgetedHours: numeric("budgeted_hours", { precision: 19, scale: 2 }),
+  /** Overrides `projects.defaultHourlyRate` for time logged against this task specifically. */
+  billingRate: numeric("billing_rate", { precision: 19, scale: 4 }),
+  isDone: boolean("is_done").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  orgProjectIdx: index("project_tasks_org_project_idx").on(table.organizationId, table.projectId),
+}));
+
+/**
+ * One row per logged time entry (master spec §23) — the SAME row whether it
+ * came from a start/stop timer (`startedAt`/`endedAt` set, `hours` derived
+ * from their difference) or manual entry (`hours` typed directly,
+ * `startedAt`/`endedAt` null). `employeeUserId` is unvalidated against
+ * `users`, same convention as `expense_claims.employeeUserId`. `billable`
+ * decides whether the entry is eligible for
+ * `ProjectTimeBillingService.createInvoiceFromUnbilledTime` at all; a
+ * non-billable entry still counts toward project labour reporting. Once
+ * `invoiceId`/`invoiceLineId` are set (status INVOICED), the row is
+ * immutable — see `timesheet_entry_status`'s own comment for the correction
+ * path.
+ */
+export const timesheetEntries = pgTable("timesheet_entries", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  employeeUserId: uuid("employee_user_id").notNull(),
+  projectId: uuid("project_id")
+    .notNull()
+    .references(() => projects.id),
+  taskId: uuid("task_id").references(() => projectTasks.id),
+  entryDate: timestamp("entry_date", { withTimezone: true, mode: "date" }).notNull(),
+  hours: numeric("hours", { precision: 19, scale: 2 }).notNull(),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  endedAt: timestamp("ended_at", { withTimezone: true }),
+  notes: text("notes"),
+  billable: boolean("billable").notNull().default(true),
+  status: timesheetEntryStatusEnum("status").notNull().default("DRAFT"),
+  /** Snapshot of the hourly rate actually billed, captured at invoicing time — never recomputed later even if the project/task rate subsequently changes. Null until invoiced. */
+  billedRate: numeric("billed_rate", { precision: 19, scale: 4 }),
+  /** Set once, when `ProjectTimeBillingService.createInvoiceFromUnbilledTime` creates the draft invoice this entry's time was billed on. Never re-pointed — a re-run never reselects an entry with this set. */
+  invoiceId: uuid("invoice_id").references((): AnyPgColumn => invoices.id),
+  invoiceLineId: uuid("invoice_line_id").references((): AnyPgColumn => invoiceLines.id),
+  submittedAt: timestamp("submitted_at", { withTimezone: true }),
+  submittedById: uuid("submitted_by_id"),
+  approvedAt: timestamp("approved_at", { withTimezone: true }),
+  approvedById: uuid("approved_by_id"),
+  rejectedAt: timestamp("rejected_at", { withTimezone: true }),
+  rejectedById: uuid("rejected_by_id"),
+  rejectionReason: text("rejection_reason"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+  updatedById: uuid("updated_by_id"),
+}, (table) => ({
+  orgProjectIdx: index("timesheet_entries_org_project_idx").on(table.organizationId, table.projectId),
+  orgEmployeeIdx: index("timesheet_entries_org_employee_idx").on(table.organizationId, table.employeeUserId),
+  orgStatusIdx: index("timesheet_entries_org_status_idx").on(table.organizationId, table.status),
+  /**
+   * The exact predicate `ProjectTimeBillingService.createInvoiceFromUnbilledTime`
+   * selects on — approved, billable, not-yet-invoiced, for a given project —
+   * so that query is a cheap index scan, not a sequential scan over every
+   * timesheet entry the org has ever logged.
+   */
+  unbilledLookupIdx: index("timesheet_entries_unbilled_idx").on(
+    table.organizationId,
+    table.projectId,
+    table.status,
+    table.billable,
+  ),
+}));
+
+export const projectsRelations = relations(projects, ({ one, many }) => ({
+  organization: one(organizations, {
+    fields: [projects.organizationId],
+    references: [organizations.id],
+  }),
+  customer: one(contacts, {
+    fields: [projects.customerContactId],
+    references: [contacts.id],
+  }),
+  tasks: many(projectTasks),
+  timesheetEntries: many(timesheetEntries),
+}));
+
+export const projectTasksRelations = relations(projectTasks, ({ one, many }) => ({
+  organization: one(organizations, {
+    fields: [projectTasks.organizationId],
+    references: [organizations.id],
+  }),
+  project: one(projects, {
+    fields: [projectTasks.projectId],
+    references: [projects.id],
+  }),
+  timesheetEntries: many(timesheetEntries),
+}));
+
+export const timesheetEntriesRelations = relations(timesheetEntries, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [timesheetEntries.organizationId],
+    references: [organizations.id],
+  }),
+  project: one(projects, {
+    fields: [timesheetEntries.projectId],
+    references: [projects.id],
+  }),
+  task: one(projectTasks, {
+    fields: [timesheetEntries.taskId],
+    references: [projectTasks.id],
+  }),
+  invoice: one(invoices, {
+    fields: [timesheetEntries.invoiceId],
+    references: [invoices.id],
+  }),
+  invoiceLine: one(invoiceLines, {
+    fields: [timesheetEntries.invoiceLineId],
+    references: [invoiceLines.id],
   }),
 }));
