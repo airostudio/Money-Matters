@@ -213,40 +213,57 @@ export const ReportingService = {
    * Profit & Loss (Income Statement) for `current`, optionally alongside a
    * `comparison` period. Read-only: only ever queries
    * `sumPostedActivityByAccount`, never writes.
+   *
+   * `dimensionValueId` (Phase 5 Slice 2, master spec §4) restricts both
+   * periods to journal lines tagged with that dimension value — e.g. "P&L
+   * for Project X only" — by passing straight through to
+   * `sumPostedActivityByAccount`'s own filter; see that function's doc
+   * comment for how the join works.
    */
   async getProfitAndLoss(
     actor: Actor,
     current: PeriodRange,
     comparison?: PeriodRange,
+    dimensionValueId?: string,
   ): Promise<ProfitAndLossReport> {
     assertPermission(actor, "financial_report:read");
     return withTenant(actor.organizationId, async (tx) => {
       const currency = await loadOrgCurrency(tx, actor.organizationId);
-      const currentRows = await sumPostedActivityByAccount(tx, actor.organizationId, current);
+      const currentRows = await sumPostedActivityByAccount(tx, actor.organizationId, { ...current, dimensionValueId });
       const comparisonRows = comparison
-        ? await sumPostedActivityByAccount(tx, actor.organizationId, comparison)
+        ? await sumPostedActivityByAccount(tx, actor.organizationId, { ...comparison, dimensionValueId })
         : undefined;
 
       return buildProfitAndLoss(toAccountAmounts(currentRows), currency, comparisonRows && toAccountAmounts(comparisonRows));
     });
   },
 
-  /** Balance Sheet as of `asOfDate`, optionally alongside a `comparisonAsOfDate`. */
+  /**
+   * Balance Sheet as of `asOfDate`, optionally alongside a
+   * `comparisonAsOfDate`. `dimensionValueId` has the same meaning as in
+   * `getProfitAndLoss` above — note it only filters the balance-sheet
+   * account rows themselves; the computed Retained Earnings/Current Year
+   * Earnings lines are always whole-of-organization (a dimension-filtered
+   * "retained earnings for Project X" isn't a meaningful figure the way a
+   * dimension-filtered asset/liability/equity *account* balance is).
+   */
   async getBalanceSheet(
     actor: Actor,
     asOfDate: Date,
     comparisonAsOfDate?: Date,
+    dimensionValueId?: string,
   ): Promise<BalanceSheetReport> {
     assertPermission(actor, "financial_report:read");
     return withTenant(actor.organizationId, async (tx) => {
       const currency = await loadOrgCurrency(tx, actor.organizationId);
-      const currentRows = await sumPostedActivityByAccount(tx, actor.organizationId, { to: asOfDate });
+      const currentRows = await sumPostedActivityByAccount(tx, actor.organizationId, { to: asOfDate, dimensionValueId });
       const retainedEarnings = await getRetainedEarningsSplit(tx, actor.organizationId, asOfDate, currency);
 
       let comparison: { rows: AccountAmount[]; retainedEarnings: RetainedEarningsSplit } | undefined;
       if (comparisonAsOfDate) {
         const comparisonRows = await sumPostedActivityByAccount(tx, actor.organizationId, {
           to: comparisonAsOfDate,
+          dimensionValueId,
         });
         const comparisonRetainedEarnings = await getRetainedEarningsSplit(
           tx,

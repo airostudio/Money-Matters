@@ -15,8 +15,9 @@ export async function GET(request: Request, { params }: { params: { orgSlug: str
   const compareMode: ComparisonMode =
     compareParam === "previous_year" || compareParam === "none" ? compareParam : "previous_period";
   const comparison = resolveComparisonRange({ from, to }, compareMode);
+  const dimensionValueId = url.searchParams.get("dimension")?.trim() || undefined;
 
-  const report = await ReportingService.getProfitAndLoss(actor, { from, to }, comparison);
+  const report = await ReportingService.getProfitAndLoss(actor, { from, to }, comparison, dimensionValueId);
   const csv = profitAndLossToCsv(report);
 
   return new NextResponse(csv, {

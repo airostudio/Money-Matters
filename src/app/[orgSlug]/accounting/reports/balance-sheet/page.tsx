@@ -2,9 +2,11 @@ import Link from "next/link";
 import { requireOrgAndActor } from "@/lib/session";
 import { ReportingService } from "@/domain/reporting/reporting-service";
 import { formatDateParam, parseDateParam } from "@/domain/reporting/period-presets";
+import { DimensionService } from "@/domain/dimensions/dimension-service";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { MoneyDisplay } from "@/components/accounting/money-display";
+import { DimensionFilterField } from "@/components/accounting/dimension-filter-field";
 import type { BalanceSheetLine } from "@/domain/reporting/financial-statements";
 
 function SectionRows({
@@ -55,14 +57,16 @@ export default async function BalanceSheetPage({
   searchParams,
 }: {
   params: { orgSlug: string };
-  searchParams: { asOf?: string; compareAsOf?: string };
+  searchParams: { asOf?: string; compareAsOf?: string; dimension?: string };
 }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
 
   const asOf = parseDateParam(searchParams.asOf) ?? new Date();
   const compareAsOf = parseDateParam(searchParams.compareAsOf);
+  const dimensionValueId = searchParams.dimension?.trim() || undefined;
+  const dimensions = await DimensionService.listActive(actor);
 
-  const report = await ReportingService.getBalanceSheet(actor, asOf, compareAsOf);
+  const report = await ReportingService.getBalanceSheet(actor, asOf, compareAsOf, dimensionValueId);
   const hasComparison = compareAsOf !== undefined;
   const currency = org.baseCurrency;
   const asOfParam = formatDateParam(asOf);
@@ -81,7 +85,7 @@ export default async function BalanceSheetPage({
         </div>
         <Button asChild variant="outline" size="sm">
           <a
-            href={`/${org.slug}/accounting/reports/balance-sheet/export?asOf=${asOfParam}${compareAsOf ? `&compareAsOf=${formatDateParam(compareAsOf)}` : ""}`}
+            href={`/${org.slug}/accounting/reports/balance-sheet/export?asOf=${asOfParam}${compareAsOf ? `&compareAsOf=${formatDateParam(compareAsOf)}` : ""}${dimensionValueId ? `&dimension=${dimensionValueId}` : ""}`}
           >
             Export CSV
           </a>
@@ -113,6 +117,7 @@ export default async function BalanceSheetPage({
             className="h-9 rounded-md border border-input bg-background px-3 text-sm"
           />
         </div>
+        <DimensionFilterField dimensions={dimensions} selectedValueId={dimensionValueId} />
         <Button type="submit" size="sm">
           Update
         </Button>

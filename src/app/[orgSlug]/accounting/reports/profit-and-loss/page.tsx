@@ -8,9 +8,11 @@ import {
   resolveComparisonRange,
   type ComparisonMode,
 } from "@/domain/reporting/period-presets";
+import { DimensionService } from "@/domain/dimensions/dimension-service";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { MoneyDisplay } from "@/components/accounting/money-display";
+import { DimensionFilterField } from "@/components/accounting/dimension-filter-field";
 import type { ProfitAndLossLine } from "@/domain/reporting/financial-statements";
 
 function VarianceCell({ variance, currency }: { variance?: string; currency: string }) {
@@ -65,7 +67,7 @@ export default async function ProfitAndLossPage({
   searchParams,
 }: {
   params: { orgSlug: string };
-  searchParams: { from?: string; to?: string; compare?: string };
+  searchParams: { from?: string; to?: string; compare?: string; dimension?: string };
 }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
 
@@ -75,8 +77,10 @@ export default async function ProfitAndLossPage({
   const compareMode: ComparisonMode =
     searchParams.compare === "previous_year" || searchParams.compare === "none" ? searchParams.compare : "previous_period";
   const comparison = resolveComparisonRange({ from, to }, compareMode);
+  const dimensionValueId = searchParams.dimension?.trim() || undefined;
+  const dimensions = await DimensionService.listActive(actor);
 
-  const report = await ReportingService.getProfitAndLoss(actor, { from, to }, comparison);
+  const report = await ReportingService.getProfitAndLoss(actor, { from, to }, comparison, dimensionValueId);
   const hasComparison = comparison !== undefined;
 
   return (
@@ -99,7 +103,7 @@ export default async function ProfitAndLossPage({
         </div>
         <Button asChild variant="outline" size="sm">
           <a
-            href={`/${org.slug}/accounting/reports/profit-and-loss/export?from=${formatDateParam(from)}&to=${formatDateParam(to)}&compare=${compareMode}`}
+            href={`/${org.slug}/accounting/reports/profit-and-loss/export?from=${formatDateParam(from)}&to=${formatDateParam(to)}&compare=${compareMode}${dimensionValueId ? `&dimension=${dimensionValueId}` : ""}`}
           >
             Export CSV
           </a>
@@ -146,6 +150,7 @@ export default async function ProfitAndLossPage({
             <option value="none">No comparison</option>
           </select>
         </div>
+        <DimensionFilterField dimensions={dimensions} selectedValueId={dimensionValueId} />
         <Button type="submit" size="sm">
           Update
         </Button>

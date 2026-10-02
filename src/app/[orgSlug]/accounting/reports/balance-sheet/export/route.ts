@@ -10,8 +10,9 @@ export async function GET(request: Request, { params }: { params: { orgSlug: str
 
   const asOf = parseDateParam(url.searchParams.get("asOf") ?? undefined) ?? new Date();
   const compareAsOf = parseDateParam(url.searchParams.get("compareAsOf") ?? undefined);
+  const dimensionValueId = url.searchParams.get("dimension")?.trim() || undefined;
 
-  const report = await ReportingService.getBalanceSheet(actor, asOf, compareAsOf);
+  const report = await ReportingService.getBalanceSheet(actor, asOf, compareAsOf, dimensionValueId);
   const csv = balanceSheetToCsv(report);
 
   return new NextResponse(csv, {
