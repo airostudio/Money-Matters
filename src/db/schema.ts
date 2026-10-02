@@ -285,6 +285,19 @@ export const documentExtractionStatusEnum = pgEnum("document_extraction_status",
   "FAILED",
 ]);
 
+/**
+ * `saved_reports.visibility` — Phase 5 Slice 2's report builder (master spec
+ * §33). PERSONAL is visible only to its creator; ORGANIZATION is visible to
+ * anyone in the org who holds `financial_report:read`. There is no
+ * `DASHBOARD_WIDGET`/`SCHEDULED` value yet — master spec §33 also describes
+ * saving a report as a dashboard widget or a scheduled pack, but no
+ * dashboard-widget surface or job-queue infrastructure exists in this
+ * codebase yet (see docs/roadmap.md's Phase 5 Slice 2 notes and Phase 2
+ * Slice 2's job-queue deferral) to attach either to, so only the two
+ * visibilities that are actually usable today are modeled.
+ */
+export const reportVisibilityEnum = pgEnum("report_visibility", ["PERSONAL", "ORGANIZATION"]);
+
 // ---------------------------------------------------------------------------
 // Identity & tenancy
 // ---------------------------------------------------------------------------
@@ -2397,5 +2410,40 @@ export const expenseClaimLinesRelations = relations(expenseClaimLines, ({ one })
   receipt: one(uploadedReceipts, {
     fields: [expenseClaimLines.receiptId],
     references: [uploadedReceipts.id],
+  }),
+}));
+
+// ---------------------------------------------------------------------------
+// Reporting (Phase 5 Slice 2) — report builder saved queries
+// ---------------------------------------------------------------------------
+
+/**
+ * A saved report-builder query (master spec §33) — `config` is a JSON-
+ * serialized `ReportBuilderConfig` (see
+ * `src/domain/reporting/report-builder-service.ts`), never a cached result.
+ * Running a saved report always re-executes `config` against current data —
+ * see that module's doc comment for why no result column exists here at all.
+ */
+export const savedReports = pgTable("saved_reports", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  description: text("description"),
+  visibility: reportVisibilityEnum("visibility").notNull().default("PERSONAL"),
+  config: jsonb("config").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id").notNull(),
+  updatedById: uuid("updated_by_id"),
+}, (table) => ({
+  orgIdx: index("saved_reports_org_idx").on(table.organizationId),
+}));
+
+export const savedReportsRelations = relations(savedReports, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [savedReports.organizationId],
+    references: [organizations.id],
   }),
 }));
