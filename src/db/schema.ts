@@ -3149,3 +3149,227 @@ export const inventoryAdjustmentsRelations = relations(inventoryAdjustments, ({ 
     references: [products.id],
   }),
 }));
+
+// ---------------------------------------------------------------------------
+// Phase 7 Slice 3 — Fixed Assets (master spec §28)
+// ---------------------------------------------------------------------------
+
+/**
+ * How a fixed asset's depreciable base is expensed over its useful life.
+ * Only `STRAIGHT_LINE` is implemented this slice — see
+ * `src/domain/fixed-assets/depreciation.ts`'s doc comment for why
+ * declining-balance and the other master-spec-§28 methods (units-of-
+ * production, sum-of-years-digits) are deferred rather than half-built.
+ * An enum (not a boolean), same reasoning as `inventoryCostingMethodEnum`,
+ * so a second method can be added later with no column restructuring.
+ */
+export const depreciationMethodEnum = pgEnum("depreciation_method", ["STRAIGHT_LINE"]);
+
+/**
+ * A fixed asset's lifecycle. `ACTIVE` depreciates every period it's run for;
+ * `DISPOSED` (sold, with proceeds) and `WRITTEN_OFF` (no proceeds) are both
+ * terminal and one-way — see `FixedAssetService.disposeAsset`/`writeOffAsset`'s
+ * doc comments for why correcting one is a correcting journal, never an edit.
+ */
+export const fixedAssetStatusEnum = pgEnum("fixed_asset_status", [
+  "ACTIVE",
+  "DISPOSED",
+  "WRITTEN_OFF",
+]);
+
+/**
+ * A simple per-org lookup/template for a category of fixed asset (e.g.
+ * "Motor Vehicles" / 60 months / straight-line, "Computer Equipment" / 36
+ * months / straight-line) — master spec §28's "asset class", deliberately
+ * kept this simple rather than a full depreciation-policy engine. Registering
+ * an asset copies `defaultUsefulLifeMonths`/`defaultDepreciationMethod` onto
+ * the asset's own columns (both overridable per-asset at registration time),
+ * exactly like `products.costingMethod` defaulting from the (single-value)
+ * enum — the class is a convenience prefill, never re-consulted afterwards,
+ * so changing a class's defaults never retroactively changes an already
+ * registered asset's depreciation.
+ */
+export const fixedAssetClasses = pgTable("fixed_asset_classes", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  defaultDepreciationMethod: depreciationMethodEnum("default_depreciation_method")
+    .notNull()
+    .default("STRAIGHT_LINE"),
+  /** Useful life in whole months — see `fixedAssets.usefulLifeMonths`'s comment for why months, not years, is this slice's one consistent unit. */
+  defaultUsefulLifeMonths: integer("default_useful_life_months").notNull(),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+  updatedById: uuid("updated_by_id"),
+}, (table) => ({
+  orgNameIdx: index("fixed_asset_classes_org_name_idx").on(table.organizationId, table.name),
+  orgActiveIdx: index("fixed_asset_classes_org_active_idx").on(table.organizationId, table.isActive),
+}));
+
+/**
+ * One capitalized fixed asset (master spec §28), org-scoped. This is a
+ * subsidiary register, not a source of new GL postings for the acquisition
+ * itself: `FixedAssetService.registerAsset`/`registerFromBillLine` never
+ * post anything — the designated `assetAccountId`'s balance must already
+ * reflect the acquisition, either because a bill line was coded directly to
+ * it (the normal path; see `registerFromBillLine`'s doc comment for why
+ * that needs no new "purchase" plumbing) or via a manual journal/opening-
+ * balance import (the standalone path). `FixedAssetRegisterService`
+ * reconciles the register's total net book value against
+ * `assetAccountId`/`accumulatedDepreciationAccountId`'s own GL balances —
+ * the same correctness-check spirit as `InventoryValuationService`, see
+ * that module's doc comment and `docs/accounting-engine.md` §10/§11.
+ *
+ * `accumulatedDepreciation` is this asset's perpetually-maintained running
+ * total (like `products.quantityOnHand`), updated only by
+ * `DepreciationService.runForPeriod` and `disposeAsset`/`writeOffAsset` —
+ * `depreciation_entries` is the append-only audit trail of how it got
+ * there, never recomputed by summing history on read.
+ *
+ * Useful life is stored in **months**, the one consistent unit this slice
+ * uses throughout (straight-line's per-period amount is simplest expressed
+ * as a monthly charge, and it lets a sub-year useful life — e.g. a 18-month
+ * leased fit-out — be represented exactly, which "useful life in years"
+ * cannot).
+ */
+export const fixedAssets = pgTable("fixed_assets", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  assetClassId: uuid("asset_class_id")
+    .notNull()
+    .references(() => fixedAssetClasses.id),
+  name: text("name").notNull(),
+  description: text("description"),
+  acquisitionDate: timestamp("acquisition_date", { withTimezone: true, mode: "date" }).notNull(),
+  acquisitionCost: numeric("acquisition_cost", { precision: 19, scale: 4 }).notNull(),
+  usefulLifeMonths: integer("useful_life_months").notNull(),
+  depreciationMethod: depreciationMethodEnum("depreciation_method").notNull().default("STRAIGHT_LINE"),
+  /** Decimal string, >= 0 and < acquisitionCost — the value never depreciated away. Defaults to "0". */
+  residualValue: numeric("residual_value", { precision: 19, scale: 4 }).notNull().default("0"),
+  status: fixedAssetStatusEnum("status").notNull().default("ACTIVE"),
+  /** The ASSET-type GL account this asset's cost sits in (e.g. "Motor Vehicles — Cost"). Debited at acquisition (elsewhere — see this table's doc comment), credited for the remaining cost at disposal/write-off. */
+  assetAccountId: uuid("asset_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  /** The contra-asset GL account depreciation accumulates into (e.g. "Accumulated Depreciation — Motor Vehicles"). Modeled as an ordinary ASSET-type account carrying a credit balance, the same convention `InventoryValuationService`'s reconciliation relies on for a normal-signed balance to come out negative. */
+  accumulatedDepreciationAccountId: uuid("accumulated_depreciation_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  /** The EXPENSE-type GL account each period's depreciation charge debits. */
+  depreciationExpenseAccountId: uuid("depreciation_expense_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  /** Perpetually-maintained running total, decimal string — see this table's doc comment. Always "0" for a brand-new asset. Capped at `acquisitionCost - residualValue`; never exceeds it regardless of how many periods are run. */
+  accumulatedDepreciation: numeric("accumulated_depreciation", { precision: 19, scale: 4 }).notNull().default("0"),
+  /** Free-text physical location or custody reference (master spec §28). A plain editable field, not a tracked transfer workflow — see docs/roadmap.md. */
+  locationReference: text("location_reference"),
+  serialNumber: text("serial_number"),
+  /** Set when this asset was registered from a posted bill line (`registerFromBillLine`) — traceability only, never re-read to post anything. Null for a standalone registration. */
+  sourceBillLineId: uuid("source_bill_line_id").references((): AnyPgColumn => billLines.id),
+  disposedAt: timestamp("disposed_at", { withTimezone: true, mode: "date" }),
+  /** Decimal string — cash/other consideration received on a sale disposal. Null for a WRITTEN_OFF asset (no proceeds by definition) and for an asset still ACTIVE. */
+  disposalProceeds: numeric("disposal_proceeds", { precision: 19, scale: 4 }),
+  /** Signed decimal string: proceeds − net book value at disposal. Positive = gain, negative = loss. For a write-off this is always −(net book value) — a full loss, no proceeds. Null while ACTIVE. */
+  disposalGainLoss: numeric("disposal_gain_loss", { precision: 19, scale: 4 }),
+  disposalJournalEntryId: uuid("disposal_journal_entry_id").references((): AnyPgColumn => journalEntries.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+  updatedById: uuid("updated_by_id"),
+}, (table) => ({
+  orgStatusIdx: index("fixed_assets_org_status_idx").on(table.organizationId, table.status),
+  orgClassIdx: index("fixed_assets_org_class_idx").on(table.organizationId, table.assetClassId),
+  orgAssetAccountIdx: index("fixed_assets_org_asset_account_idx").on(table.organizationId, table.assetAccountId),
+}));
+
+/**
+ * The append-only per-period depreciation audit trail for one fixed asset —
+ * one row per (asset, calendar month) run of `DepreciationService.runForPeriod`,
+ * in period order. `periodStart`/`periodEnd` are the first/last calendar day
+ * of the month depreciated (UTC); the unique index on
+ * (`organizationId`, `assetId`, `periodStart`) is this slice's idempotency
+ * guarantee — see that service's doc comment — re-running the same month
+ * for the same asset is a structural no-op, not just a convention. A $0
+ * row (an asset not yet acquired as of this period, or already fully
+ * depreciated) is still inserted, so the "has this asset/period already
+ * been run" check never needs to reason about amount, only existence.
+ * `journalEntryId` is null for a $0 row (nothing to post) and otherwise
+ * points at the one combined journal entry
+ * `DepreciationService.runForPeriod` posts for the whole run (a line pair
+ * per non-zero asset) — never a separate entry per asset, see that
+ * service's doc comment.
+ */
+export const depreciationEntries = pgTable("depreciation_entries", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  assetId: uuid("asset_id")
+    .notNull()
+    .references(() => fixedAssets.id),
+  periodStart: timestamp("period_start", { withTimezone: true, mode: "date" }).notNull(),
+  periodEnd: timestamp("period_end", { withTimezone: true, mode: "date" }).notNull(),
+  /** Decimal string, >= 0. This period's depreciation charge for this asset — "0" when not yet acquired or already fully depreciated. */
+  amount: numeric("amount", { precision: 19, scale: 4 }).notNull(),
+  /** Snapshot of `fixedAssets.accumulatedDepreciation` immediately after this row — audit/debugging transparency, same convention as `inventory_movements.balanceQuantityAfter`. */
+  accumulatedDepreciationAfter: numeric("accumulated_depreciation_after", { precision: 19, scale: 4 }).notNull(),
+  journalEntryId: uuid("journal_entry_id").references((): AnyPgColumn => journalEntries.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+}, (table) => ({
+  orgAssetPeriodUnique: uniqueIndex("depreciation_entries_org_asset_period_unique").on(
+    table.organizationId,
+    table.assetId,
+    table.periodStart,
+  ),
+  orgAssetIdx: index("depreciation_entries_org_asset_idx").on(table.organizationId, table.assetId),
+}));
+
+export const fixedAssetClassesRelations = relations(fixedAssetClasses, ({ one, many }) => ({
+  organization: one(organizations, {
+    fields: [fixedAssetClasses.organizationId],
+    references: [organizations.id],
+  }),
+  assets: many(fixedAssets),
+}));
+
+export const fixedAssetsRelations = relations(fixedAssets, ({ one, many }) => ({
+  organization: one(organizations, {
+    fields: [fixedAssets.organizationId],
+    references: [organizations.id],
+  }),
+  assetClass: one(fixedAssetClasses, {
+    fields: [fixedAssets.assetClassId],
+    references: [fixedAssetClasses.id],
+  }),
+  assetAccount: one(accounts, {
+    fields: [fixedAssets.assetAccountId],
+    references: [accounts.id],
+  }),
+  accumulatedDepreciationAccount: one(accounts, {
+    fields: [fixedAssets.accumulatedDepreciationAccountId],
+    references: [accounts.id],
+  }),
+  depreciationExpenseAccount: one(accounts, {
+    fields: [fixedAssets.depreciationExpenseAccountId],
+    references: [accounts.id],
+  }),
+  entries: many(depreciationEntries),
+}));
+
+export const depreciationEntriesRelations = relations(depreciationEntries, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [depreciationEntries.organizationId],
+    references: [organizations.id],
+  }),
+  asset: one(fixedAssets, {
+    fields: [depreciationEntries.assetId],
+    references: [fixedAssets.id],
+  }),
+}));

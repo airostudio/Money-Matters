@@ -370,3 +370,77 @@ entry.
   above), no backorders, no landed costs, no bundles/kits, no serial/lot
   tracking. See `docs/roadmap.md`'s Phase 7 Slice 2 entry for the full
   deferral list and reasoning.
+
+## 11. Phase 7 Slice 3 — fixed assets: depreciation, disposal, and a register that never posts its own acquisition
+
+Fixed assets differ from inventory in one structural way worth calling out
+explicitly: **registering an asset never posts a journal for the
+acquisition itself.** For inventory, `InventoryService` posts alongside
+`BillService`/`InvoiceService` in the very same transaction (§10 above).
+For a fixed asset, the cost is **already** sitting in the designated asset
+account by the time `FixedAssetService.registerAsset`/`registerFromBillLine`
+runs — either because a bill line was coded directly to that account (the
+normal path: the bill's own existing debit already covers it, so
+`registerFromBillLine` only reads the already-posted line's
+`accountId`/`lineAmount`/the bill's `issueDate` and links them, the same
+"no second posting needed" reasoning §10 gives for a PURCHASE movement) or
+because a manual journal/opening-balance import put it there (the
+standalone path — required to exist since not every asset arrives via a
+bill in this codebase). `FixedAssetService` is purely a subsidiary ledger;
+`FixedAssetRegisterService` is the correctness check that proves the
+register and the GL agree, in the same spirit as `InventoryValuationService`
+(§10's "correctness check") and the Balance Sheet equation check (§8) — it
+sums `acquisitionCost - accumulatedDepreciation` across every ACTIVE asset,
+grouped by (asset account, accumulated-depreciation account) pair, and
+compares that against those two accounts' own posted GL balances. A
+non-zero difference is a real bug (a bill coded to the wrong account, an
+asset registered against the wrong pair), never a rounding footnote.
+
+- **Depreciation is periodic, not continuous, and strictly monthly**:
+  `DepreciationService.runForPeriod` always depreciates one calendar month
+  at a time — a deliberate, simple choice (master spec §28 specifies no
+  particular cadence) that makes idempotency a structural property rather
+  than a convention callers have to honor correctly: `depreciation_entries`
+  has a `UNIQUE (organizationId, assetId, periodStart)` index, so a given
+  asset/month pair can be inserted at most once, full stop. `runForPeriod`
+  checks for that row before computing anything and skips an asset outright
+  if found — running the same month twice is a no-op the second time, not
+  just "produces the same answer twice."
+- **One combined journal entry per run**, not one per asset: a line pair
+  (debit Depreciation Expense, credit Accumulated Depreciation) per asset
+  with a non-zero charge, all on the same entry, so reviewing a month's
+  depreciation across a whole register is one journal, not N. An asset
+  whose charge is exactly $0 this period (not yet acquired as of
+  `periodEnd`, or already fully depreciated) still gets a
+  `depreciation_entries` row — necessary for the idempotency check above to
+  ever see it as "already run" for that month — but contributes no line to
+  the journal, since `PostingService` rejects a $0 debit/credit line as
+  neither a debit nor a credit.
+- **Straight-line only**: `(acquisitionCost - residualValue) /
+  usefulLifeMonths` per month, computed in `decimal.js` per §4, prorated by
+  whole days for an asset acquired mid-period
+  (`src/domain/fixed-assets/depreciation-calculations.ts`), and capped so
+  `accumulatedDepreciation` never exceeds the depreciable base regardless
+  of how many periods are run past full depreciation.
+  `depreciationMethodEnum` is a Postgres enum with a single value today,
+  the same "room for a second value later with no restructuring" reasoning
+  `inventoryCostingMethodEnum` documents for FIFO — declining-balance and
+  the other master-spec-§28 methods are deferred rather than half-built
+  alongside it (see that module's doc comment for why).
+- **Disposal and write-off are one-way, like voiding an invoice**:
+  `disposeAsset` (sale) and `writeOffAsset` (no proceeds) both remove the
+  asset's full cost and accumulated depreciation via `PostingService`, and
+  both are terminal — `fixedAssetStatusEnum` has no path back to `ACTIVE`.
+  A mistaken disposal/write-off is corrected with a manual correcting
+  journal, never an edit to the original event — the same reversal-only
+  discipline `PostingService.reverseEntry` enforces for every other posted
+  entry (§1). `disposeAsset` recognizes `proceeds - netBookValue` as a gain
+  (credited) or loss (debited); `writeOffAsset` always recognizes the full
+  remaining net book value as a loss, since there are no proceeds to net
+  against it.
+- **Scope**: straight-line depreciation only (see above), no tracked
+  asset-transfer workflow (`locationReference` is a plain editable field,
+  not a workflow with its own audit trail), no automatic/scheduled
+  depreciation runs (the same job-queue gap every recurring process in this
+  codebase has), no revaluation/impairment. See `docs/roadmap.md`'s Phase 7
+  Slice 3 entry for the full deferral list and reasoning.

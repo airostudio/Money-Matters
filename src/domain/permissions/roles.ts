@@ -67,6 +67,8 @@ export const PERMISSIONS = [
   "product:manage",
   "inventory:read",
   "inventory:manage",
+  "fixed_asset:read",
+  "fixed_asset:manage",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -144,6 +146,8 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "product:manage",
     "inventory:read",
     "inventory:manage",
+    "fixed_asset:read",
+    "fixed_asset:manage",
   ]),
   BOOKKEEPER: new Set<Permission>([
     "account:read",
@@ -198,6 +202,8 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "product:manage",
     "inventory:read",
     "inventory:manage",
+    "fixed_asset:read",
+    "fixed_asset:manage",
   ]),
   ACCOUNTS_RECEIVABLE: new Set<Permission>([
     "account:read",
@@ -255,6 +261,8 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "product:manage",
     "inventory:read",
     "inventory:manage",
+    "fixed_asset:read",
+    "fixed_asset:manage",
   ]),
   PAYROLL_MANAGER: new Set<Permission>([
     "account:read",
@@ -298,6 +306,7 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "timesheet:approve",
     "product:read",
     "inventory:read",
+    "fixed_asset:read",
   ]),
   EMPLOYEE: new Set<Permission>([
     "expense_claim:read",
@@ -330,6 +339,7 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "timesheet:read",
     "product:read",
     "inventory:read",
+    "fixed_asset:read",
   ]),
 };
 

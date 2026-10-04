@@ -1429,7 +1429,7 @@ the user confirmed.
       stop) involves an LLM call at all, so there was nothing to mock there
       in the first place.
 
-## Phase 7 — Operations
+## Phase 7 — Operations — **complete**
 
 ### Slice 1 — Projects/Jobs & Time Tracking (complete)
 
@@ -1817,6 +1817,188 @@ below) rather than shallow-covering everything.
   entire "Inventory Intelligence" surface.
 - **Preserving a line's `productId` across a draft edit-and-resave** on
   the invoice/bill edit pages — see the UI note above.
+
+### Slice 3 — Fixed Assets (complete, scoped down from master spec §28) — **Phase 7 is now fully complete**
+
+Master spec §28 describes acquisition, asset classes, depreciation methods,
+useful life, opening value, accumulated depreciation, disposal, write-off,
+transfer, and location/serial reference, plus "generate depreciation
+journals automatically." This slice builds a production-quality **core** —
+a real asset register with correct, idempotent, reconciled GL postings for
+depreciation and disposal — and explicitly defers the rest (listed below).
+
+- [x] **Schema** (`src/db/schema.ts`): `fixed_asset_classes` (org-scoped: a
+      simple per-category template — name, default depreciation method,
+      default useful life in months — never re-consulted after an asset is
+      registered, so changing a class never retroactively changes an
+      existing asset) and `fixed_assets` (org-scoped: asset class, name/
+      description, acquisition date and cost, useful life in **months** —
+      the one consistent unit this slice uses, so a sub-year life like an
+      18-month fit-out is representable exactly — depreciation method,
+      residual value, status enum ACTIVE/DISPOSED/WRITTEN_OFF, the three
+      GL accounts it posts to (asset/cost, accumulated depreciation,
+      depreciation expense), a perpetually-maintained
+      `accumulatedDepreciation` running total (same pattern as
+      `products.quantityOnHand`), optional location/serial reference,
+      optional `sourceBillLineId` traceability link, and disposal
+      proceeds/gain-loss/journal columns once terminal) and
+      `depreciation_entries` (the append-only per-asset-per-period audit
+      trail behind that running total, with a `UNIQUE
+      (organizationId, assetId, periodStart)` index that makes idempotency
+      a structural property, not just a convention — see below). All three
+      new tables are RLS-enabled + FORCEd + policy + `mm_app`-granted
+      (drizzle/0025–0026), verified by the `db:migrate` tenant-isolation
+      audit, now **57 of 61** organization-scoped tables (up from 54).
+    - **Design decision — the register never posts the acquisition
+      itself**: unlike inventory (where `InventoryService` posts alongside
+      `BillService`/`InvoiceService` in the same transaction), a fixed
+      asset's acquisition is **already** posted by whatever put the cost
+      into the designated asset account — a bill line coded directly to it
+      (the normal path) or a manual journal/opening-balance import (the
+      standalone path, required to exist since not every asset arrives via
+      a bill in this system). `FixedAssetService.registerAsset`/
+      `registerFromBillLine` only ever create the subsidiary-ledger record;
+      `FixedAssetRegisterService` is the correctness check that confirms
+      the register and the GL agree, the same spirit as
+      `InventoryValuationService` (`docs/accounting-engine.md` §10) but a
+      different mechanism — see §11 there for the full reasoning.
+    - **Depreciation method — straight-line only**: `depreciationMethodEnum`
+      has a single value (`STRAIGHT_LINE`) today, the same "enum with one
+      value now" pattern `inventoryCostingMethodEnum` uses for FIFO.
+      Declining-balance (which re-bases off net book value every period,
+      not a fixed monthly amount) and units-of-production/sum-of-years-
+      digits (which need an input this codebase has no honest source for)
+      were judged to dilute this slice's quality if half-built alongside
+      straight-line, rather than a deliberate exclusion — see
+      `depreciation-calculations.ts`'s doc comment.
+- [x] **`FixedAssetClassService`** (`src/domain/fixed-assets/
+      asset-class-service.ts`): create/update/deactivate/reactivate a
+      class. **`FixedAssetService`** (`fixed-asset-service.ts`):
+      `registerAsset` (standalone) and `registerFromBillLine` (reads an
+      already-posted bill line's own `accountId`/`lineAmount`/the bill's
+      `issueDate`, confirms the line was coded to the stated asset account,
+      and links them — no second posting), `updateDetails` (name/
+      description/location/serial — never the financial fields, since
+      editing cost/date/life/method after depreciation has started would
+      desynchronize `depreciation_entries`' history), `disposeAsset`, and
+      `writeOffAsset`. New permissions `fixed_asset:read`/
+      `fixed_asset:manage` (`src/domain/permissions/roles.ts`), granted to
+      OWNER/ADMINISTRATOR/ACCOUNTANT/BOOKKEEPER/ACCOUNTS_PAYABLE (manage,
+      since assets most often arrive via a bill) and MANAGER/
+      ACCOUNTS_RECEIVABLE/EMPLOYEE/READ_ONLY (read-only).
+- [x] **`DepreciationService.runForPeriod`** (`depreciation-service.ts`):
+      the on-demand precursor to real scheduling (no job queue exists, same
+      reasoning as `RecurringInvoiceService`/`RecurringBillService.
+      generateDue`) — a human-triggered "run depreciation for calendar
+      month X" that computes straight-line depreciation per ACTIVE asset
+      (`depreciation-calculations.ts`'s `calculateStraightLineDepreciation`:
+      `(cost - residual) / usefulLifeMonths` per month, prorated by whole
+      days for a mid-month acquisition, capped so accumulated depreciation
+      never exceeds the depreciable base) and posts **one combined journal
+      entry per run**, one debit-expense/credit-accumulated-depreciation
+      line pair per asset with a non-zero charge — not a separate entry per
+      asset, so a business running this across a whole register reviews one
+      journal, not N. **Idempotent per asset per period structurally**: a
+      `depreciation_entries` row (even a $0 one, for an asset not yet
+      acquired or already fully depreciated) is checked for and, if
+      present, that asset is skipped outright before any computation —
+      proven by an integration test that runs the same month twice and
+      confirms only one journal and one row per asset exist afterward.
+- [x] **Disposal / write-off**: `disposeAsset` (sale) removes the asset's
+      full cost and accumulated depreciation and recognizes
+      `proceeds - netBookValue` as a gain (credited) or loss (debited) via
+      `PostingService`; `writeOffAsset` is the same removal with no
+      proceeds line, the full remaining net book value always posting as a
+      loss. Both are one-way and terminal (`fixedAssetStatusEnum` has no
+      path back to ACTIVE) — a mistaken disposal is corrected with a manual
+      correcting journal, never an edit to the original event, the same
+      reversal-only discipline `PostingService.reverseEntry` enforces
+      everywhere else.
+- [x] **Reporting** (`fixed-asset-register-service.ts`): the Fixed Asset
+      Register (every ACTIVE asset's cost/accumulated depreciation/net book
+      value, reconciled in aggregate — grouped by asset-account/
+      accumulated-depreciation-account pair — against those accounts' own
+      posted GL balances, the same correctness-check spirit as
+      `InventoryValuationService` and the Balance Sheet equation check) and
+      a per-asset depreciation schedule (`projectDepreciationSchedule`:
+      real history plus pure-arithmetic projection to the end of useful
+      life, landing exactly at residual value).
+- [x] **UI** (`src/app/[orgSlug]/fixed-assets/`): the register with its GL
+      reconciliation banner, asset classes list/create, a "register asset"
+      form (standalone or from a posted-bill-line picker that only lists
+      ASSET-coded lines not already registered), an asset detail page
+      (financials, editable non-financial details, dispose/write-off forms,
+      the full depreciation schedule), and an on-demand "run depreciation
+      for month X" page. The `Fixed Assets` nav section is new.
+- [x] Tests: unit (`calculateStraightLineDepreciation`'s even monthly
+      amount, residual-value reduction of the depreciable base, mid-period
+      proration by whole days, not-yet-acquired and already-fully-
+      depreciated zero cases, capping at the final period, and input
+      validation; `calculateDisposalGainLoss`'s gain/loss/break-even cases;
+      `calculateWriteOffLoss`'s full-loss and already-fully-depreciated
+      cases; `projectDepreciationSchedule`'s exact full-depreciation-to-
+      residual-value property, including the one-extra-period case a
+      prorated first period needs) and integration against the real test
+      database (register an asset both standalone and from a posted bill
+      line; refuse registering from a DRAFT bill line; run depreciation for
+      a period and confirm the journal and new net book value; **run the
+      same period again and confirm no duplicate posting**; run a second
+      period and confirm accumulated depreciation is cumulative; dispose of
+      an asset with proceeds above and below net book value and confirm
+      the gain/loss posts correctly; write off an asset and confirm the
+      full remaining net book value posts as a loss; refuse depreciating/
+      disposing/writing off a non-ACTIVE asset; confirm the register's
+      total net book value reconciles exactly to the GL, including after a
+      disposal removes an asset from both; confirm the depreciation
+      schedule projects to zero/residual value at the end of useful life; a
+      tenant-isolation case for all three new tables). The full existing
+      suite (619 tests total after this slice, up from 588) still passes.
+- [x] `npm run typecheck`, `npm run lint`, `npm test`, and `npm run build`
+      all pass. Smoke-tested for real against a local Postgres (a script
+      exercising the real services, not just the test suite): posted a
+      $12,000 opening-balance journal to a Motor Vehicles cost account,
+      registered a Delivery Van asset against it (60-month straight-line,
+      no residual value), ran depreciation for January 2026 ($200.00
+      posted, debit Depreciation Expense / credit Accumulated
+      Depreciation), ran it again for February 2026 (another $200.00,
+      cumulative $400.00 — confirmed NOT double-posted for January), and
+      confirmed the Fixed Asset Register's total net book value
+      ($11,600.00) reconciled exactly to the GL. Disposed of the asset for
+      $12,000.00 proceeds against a $11,600.00 net book value and confirmed
+      a $400.00 gain posted correctly, the asset and accumulated
+      depreciation accounts both returned to $0.00, and the register (now
+      with zero assets) still reconciled exactly.
+
+**Explicitly deferred, not attempted shallow**:
+
+- **A tracked asset-transfer workflow**: `fixedAssets.locationReference` is
+  a plain editable text field (see `updateDetails`) — moving an asset is
+  just editing it, with no dedicated transfer event, approval, or audit
+  trail beyond the ordinary `fixed_asset.updated` audit-log entry. A real
+  transfer workflow (from/to location, requested-by/approved-by, its own
+  history) is independent scope deserving its own design, not a field edit
+  dressed up as one.
+- **Automatic/scheduled depreciation runs**: the same job-queue gap every
+  recurring process in this codebase has (`RecurringInvoiceService`/
+  `RecurringBillService.generateDue`) — `DepreciationService.runForPeriod`
+  is deliberately human-triggered, "run month X now," never a cron job.
+- **Any depreciation method beyond straight-line**: declining-balance,
+  units-of-production, sum-of-years-digits — see this slice's design-
+  decision note above. `depreciationMethodEnum` is a Postgres enum with a
+  single value specifically so a second method can be added later without
+  restructuring.
+- **Asset revaluation/impairment**: no mechanism to write an asset's
+  carrying value up or down outside of ordinary depreciation and disposal/
+  write-off — a revaluation reserve, impairment testing, and the resulting
+  equity-side postings are all out of scope this slice.
+- **A depreciation-run preview/undo**: `runForPeriod` posts immediately
+  once called — the run itself is the deliberate human action master spec
+  §28 asks for ("generate depreciation journals"), with no draft/review
+  step to preserve, unlike `RecurringBillService.generateDue` which
+  produces a DRAFT bill a human still approves separately. A mistaken run
+  is corrected with `PostingService.reverseEntry` on the resulting journal
+  plus a manual correction to `accumulatedDepreciation`, not a built-in
+  undo.
 
 ## Phase 8 — Payroll & Australia Compliance (not started)
 

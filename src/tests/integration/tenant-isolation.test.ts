@@ -23,6 +23,8 @@ import {
   products,
   inventoryMovements,
   inventoryAdjustments,
+  fixedAssets,
+  depreciationEntries,
 } from "@/db/schema";
 import { db } from "@/db/client";
 import { withTenant } from "@/db/tenant";
@@ -45,6 +47,9 @@ import { TimesheetService } from "@/domain/projects/timesheet-service";
 import { ProductService } from "@/domain/inventory/product-service";
 import { InventoryAdjustmentService } from "@/domain/inventory/inventory-adjustment-service";
 import { createInventoryFixtures } from "../helpers/inventory";
+import { createFixedAssetFixtures } from "../helpers/fixed-assets";
+import { FixedAssetService } from "@/domain/fixed-assets/fixed-asset-service";
+import { DepreciationService } from "@/domain/fixed-assets/depreciation-service";
 
 /**
  * Master spec §48 / §87 non-negotiable #7: "A coding mistake must not allow
@@ -179,6 +184,9 @@ describe("Tenant isolation", () => {
       "products",
       "inventory_movements",
       "inventory_adjustments",
+      "fixed_asset_classes",
+      "fixed_assets",
+      "depreciation_entries",
     ];
 
     const rows = await db.execute<{
@@ -503,5 +511,38 @@ describe("Tenant isolation", () => {
     expect(await db.select().from(products)).toHaveLength(0);
     expect(await db.select().from(inventoryMovements)).toHaveLength(0);
     expect(await db.select().from(inventoryAdjustments)).toHaveLength(0);
+  });
+
+  it("a fixed asset (and its depreciation entries) created under org A is invisible to org B, even by direct query with no filter", async () => {
+    const fixturesA = await createFixedAssetFixtures(orgA.owner, orgA.baseCurrency);
+
+    await PostingService.postJournal(orgA.owner, {
+      postingDate: new Date("2026-01-01"),
+      lines: [
+        { accountId: fixturesA.assetAccountId, debit: "12000.00", currency: orgA.baseCurrency },
+        { accountId: fixturesA.openingBalanceEquityAccountId, credit: "12000.00", currency: orgA.baseCurrency },
+      ],
+    });
+    const asset = await FixedAssetService.registerAsset(orgA.owner, {
+      assetClassId: fixturesA.assetClassId,
+      name: "Delivery Van",
+      acquisitionDate: new Date("2026-01-01"),
+      acquisitionCost: "12000.00",
+      assetAccountId: fixturesA.assetAccountId,
+      accumulatedDepreciationAccountId: fixturesA.accumulatedDepreciationAccountId,
+      depreciationExpenseAccountId: fixturesA.depreciationExpenseAccountId,
+    });
+
+    expect(await FixedAssetService.get(orgB.owner, asset.id)).toBeNull();
+
+    await DepreciationService.runForPeriod(orgA.owner, { periodMonth: new Date("2026-01-15") });
+
+    const assetsAsOrgB = await withTenant(orgB.organizationId, (tx) => tx.select().from(fixedAssets));
+    expect(assetsAsOrgB.some((r) => r.id === asset.id)).toBe(false);
+    const entriesAsOrgB = await withTenant(orgB.organizationId, (tx) => tx.select().from(depreciationEntries));
+    expect(entriesAsOrgB.some((r) => r.assetId === asset.id)).toBe(false);
+
+    expect(await db.select().from(fixedAssets)).toHaveLength(0);
+    expect(await db.select().from(depreciationEntries)).toHaveLength(0);
   });
 });

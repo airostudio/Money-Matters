@@ -523,6 +523,56 @@ The dimension system remains the tool for open-ended user-defined tags;
 `productId` is the tool for this specific, structural, already-modeled
 business concept.
 
+## 2k. Phase 7 Slice 3: `fixed_asset_classes`, `fixed_assets`, `depreciation_entries`
+
+Three new tables for Fixed Assets (master spec §28, scoped down — see
+`docs/roadmap.md`'s Phase 7 Slice 3 entry and `docs/accounting-engine.md`
+§11 for the depreciation/disposal posting conventions).
+`src/domain/fixed-assets/`'s own doc comments have the full design; this is
+the schema-level summary.
+
+- `fixed_asset_classes` — `organizationId`, `name`, `defaultDepreciationMethod`
+  (an enum with a single value, `STRAIGHT_LINE`, today — same reasoning as
+  `inventoryCostingMethodEnum` for FIFO), `defaultUsefulLifeMonths`,
+  `isActive`. A simple per-org lookup/template, never re-consulted after an
+  asset copies its defaults at registration time.
+- `fixed_assets` — `organizationId`, `assetClassId`, `name`/`description`,
+  `acquisitionDate`/`acquisitionCost`, `usefulLifeMonths` (months, not
+  years — the one consistent unit this slice uses, so a sub-year life is
+  representable exactly), `depreciationMethod`, `residualValue`, `status`
+  (`ACTIVE`/`DISPOSED`/`WRITTEN_OFF` — the latter two terminal, no path
+  back), the three GL accounts it posts to (`assetAccountId`,
+  `accumulatedDepreciationAccountId`, `depreciationExpenseAccountId`),
+  `accumulatedDepreciation` (the perpetually-maintained running total — the
+  authoritative number, never recomputed by replaying
+  `depreciation_entries`, same convention as `products.quantityOnHand`),
+  `locationReference`/`serialNumber`, an optional `sourceBillLineId`
+  traceability link, and `disposedAt`/`disposalProceeds`/
+  `disposalGainLoss`/`disposalJournalEntryId` (all null while `ACTIVE`).
+  `accumulatedDepreciationAccountId` points at an ordinary `ASSET`-type
+  account carrying a credit balance (this schema has no dedicated
+  contra-asset account type) — the same convention
+  `InventoryValuationService`'s reconciliation relies on for that balance
+  to come out negative when normal-signed.
+- `depreciation_entries` — the append-only per-asset-per-period audit
+  trail: `assetId`, `periodStart`/`periodEnd` (the first/last calendar day
+  of the depreciated month), `amount` (that period's charge, possibly
+  `0`), `accumulatedDepreciationAfter` (a post-entry snapshot, kept purely
+  for audit transparency, same convention as
+  `inventory_movements.balanceQuantityAfter`), and `journalEntryId` (null
+  for a `$0` row, otherwise the one combined entry
+  `DepreciationService.runForPeriod` posted for that whole run — never a
+  separate entry per asset). The `UNIQUE (organizationId, assetId,
+  periodStart)` index is this slice's idempotency guarantee: a given
+  asset/month pair can be inserted at most once, full stop — see §11.
+
+No new column was added to `bill_lines`/`invoice_lines` for this slice —
+unlike Phase 7 Slices 1/2's `projectId`/`productId`, a fixed asset's link
+back to its acquiring bill line is a single FK the other direction
+(`fixed_assets.sourceBillLineId`), since at most one asset is ever
+registered from a given bill line, never the reverse fan-out `projectId`/
+`productId` needed.
+
 ## 3. Row-Level Security
 
 Every tenant table gets an RLS policy of the shape:

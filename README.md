@@ -64,16 +64,27 @@ GL's own inventory-asset balance, and deterministic reorder-point
 alerting. Multi-warehouse tracking, FIFO costing, serial/lot tracking,
 landed costs, bundles/kits, and sales-velocity stockout forecasting are
 explicitly deferred — see `docs/roadmap.md` for the full list and why.
-Fixed assets (Phase 7's remaining component) is intentionally not
-attempted yet — a large, independent domain of its own. See
+Phase 7 Slice 3 — the last piece of Phase 7 — adds Fixed Assets: an asset
+register (asset classes as simple depreciation-default templates, assets
+registered either standalone or from a posted bill line already coded to
+the asset account — the register itself never posts the acquisition, since
+whichever path was used already did), on-demand straight-line depreciation
+runs (one combined journal per calendar month, idempotent per asset per
+period — running the same month twice never double-posts), and one-way
+disposal/write-off that recognizes a gain or loss via the normal posting
+path. A Fixed Asset Register report reconciles exactly against the GL, the
+same correctness-check discipline as inventory's valuation report.
+Declining-balance and other depreciation methods, asset-transfer workflows,
+and automatic/scheduled depreciation runs are explicitly deferred — see
+`docs/roadmap.md` for the full list and why. See
 [`docs/roadmap.md`](docs/roadmap.md) for exactly what's built
-vs. explicitly deferred in each (a customer portal, AI-drafted collection
-reminders, a live bank feed provider, Stripe, a background job queue, a
-Redis cache, real bank-file/payment-rail integration, full
-inventory-backed goods receiving, PDF/Excel export, a configurable
-fiscal-year start, inventory, and fixed assets all need either
-infrastructure that doesn't exist yet, external accounts/credentials this
-environment doesn't have, or are next up on top of what's built so far).
+vs. explicitly deferred in each phase (a customer portal, AI-drafted
+collection reminders, a live bank feed provider, Stripe, a background job
+queue, a Redis cache, real bank-file/payment-rail integration, full
+inventory-backed goods receiving, PDF/Excel export, and a configurable
+fiscal-year start all need either infrastructure that doesn't exist yet,
+external accounts/credentials this environment doesn't have, or are next up
+on top of what's built so far).
 See [`docs/architecture.md`](docs/architecture.md) for how it's put
 together.
 

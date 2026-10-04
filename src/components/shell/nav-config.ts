@@ -6,6 +6,7 @@ import {
   Bot,
   Building2,
   Home,
+  Landmark,
   LineChart,
   Package,
   Scale,
@@ -80,6 +81,17 @@ export const NAV_ITEMS: NavItem[] = [
       { label: "Products", href: "/inventory", permission: "product:read" },
       { label: "Valuation", href: "/inventory/valuation", permission: "inventory:read" },
       { label: "Reorder Alerts", href: "/inventory/reorder", permission: "inventory:read" },
+    ],
+  },
+  {
+    label: "Fixed Assets",
+    href: "/fixed-assets",
+    icon: Landmark,
+    permission: "fixed_asset:read",
+    children: [
+      { label: "Register", href: "/fixed-assets", permission: "fixed_asset:read" },
+      { label: "Asset Classes", href: "/fixed-assets/classes", permission: "fixed_asset:read" },
+      { label: "Run Depreciation", href: "/fixed-assets/depreciation", permission: "fixed_asset:manage" },
     ],
   },
   {
