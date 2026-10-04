@@ -64,16 +64,22 @@ function parseLinesFromFormData(formData: FormData): BillLineInput[] {
   const unitPrices = formData.getAll("lineUnitPrice").map(String);
   const accountIds = formData.getAll("lineAccountId").map(String);
   const taxCodeIds = formData.getAll("lineTaxCodeId").map(String);
+  // Present only on a form that rendered InvoiceLineEditor's `products`
+  // prop (new/edit bill) — absent (empty array) for supplier credits/POs,
+  // which don't support a catalog product yet.
+  const productIds = formData.getAll("lineProductId").map(String);
 
   const lines: BillLineInput[] = [];
   for (let i = 0; i < descriptions.length; i++) {
-    if (!accountIds[i]) continue;
+    const productId = productIds[i] || undefined;
+    if (!accountIds[i] && !productId) continue;
     lines.push({
       description: descriptions[i] ?? "",
       quantity: quantities[i] ?? "0",
       unitPrice: unitPrices[i] ?? "0",
-      accountId: accountIds[i]!,
+      accountId: accountIds[i] || undefined,
       taxCodeId: taxCodeIds[i] || undefined,
+      productId,
     });
   }
   return lines;

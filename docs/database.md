@@ -474,6 +474,55 @@ modeled business concept the domain layer reasons about directly. Both
 mechanisms now coexist in this schema, each used for the shape of problem
 it fits.
 
+## 2j. Phase 7 Slice 2: `products`, `inventory_movements`, `inventory_adjustments`
+
+Three new tables for Inventory (master spec §20/§21, scoped down hard —
+see `docs/roadmap.md`'s Phase 7 Slice 2 entry and
+`docs/accounting-engine.md` §10 for the perpetual-inventory/COGS posting
+convention). `src/domain/inventory/`'s own doc comments have the full
+design; this is the schema-level summary.
+
+- `products` — `organizationId`, a unique-per-org `sku`, `name`,
+  `description`, `type` (`TRACKED_INVENTORY`/`NON_INVENTORY`/`SERVICE` —
+  the latter two share the exact same catalog and line-item UI as a
+  tracked product but never touch a movement, a quantity, or a COGS
+  posting), `costingMethod` (an enum with a single value,
+  `WEIGHTED_AVERAGE`, today — see §10's reasoning for why FIFO is a future
+  enum value, not a future column), `sellPrice` (a UI prefill only, never
+  authoritative), `revenueAccountId` (always required), `purchaseAccountId`
+  (required for `NON_INVENTORY`/`SERVICE`, null for `TRACKED_INVENTORY`),
+  `inventoryAssetAccountId`/`cogsAccountId` (required for
+  `TRACKED_INVENTORY`, null otherwise), `quantityOnHand`/`averageUnitCost`
+  (the perpetually-maintained current state — the authoritative numbers,
+  never recomputed by replaying `inventory_movements`), and
+  `reorderPoint`/`reorderQuantity`/`preferredSupplierContactId` for
+  `ReorderAlertService`.
+- `inventory_movements` — the append-only audit trail: `productId`,
+  `movementType` (`PURCHASE`/`SALE`/`ADJUSTMENT`), a signed
+  `quantityDelta`, the `unitCost` this movement was valued at, its signed
+  `totalValue`, and `balanceQuantityAfter`/`balanceAverageCostAfter` — a
+  post-movement snapshot kept purely for audit transparency, not as the
+  source of truth (that's `products` itself, updated under a
+  `SELECT ... FOR UPDATE` row lock in the same transaction — see
+  `InventoryService`'s doc comment). Exactly one of
+  `invoiceLineId`/`billLineId`/`adjustmentId` is set, matching
+  `movementType`; `journalEntryId` points at the invoice's/bill's/
+  adjustment's own posted entry (never a separate one for a SALE/PURCHASE
+  — see §10).
+- `inventory_adjustments` — a manual correction: `productId`, signed
+  `quantityDelta`, the `unitCost` it was valued at, a required `reason`,
+  the `adjustmentAccountId` chosen by whoever recorded it, and its own
+  `journalEntryId`.
+
+An optional `productId` was added directly to `invoice_lines` and
+`bill_lines` — the same dedicated-FK decision §2i above documents for
+`projectId`/`taskId`, for the same reasons: a sale/purchase needs a
+*structural* link the posting code reads to decide whether to move stock
+at all and which accounts to resolve onto, not just a reporting-time tag.
+The dimension system remains the tool for open-ended user-defined tags;
+`productId` is the tool for this specific, structural, already-modeled
+business concept.
+
 ## 3. Row-Level Security
 
 Every tenant table gets an RLS policy of the shape:

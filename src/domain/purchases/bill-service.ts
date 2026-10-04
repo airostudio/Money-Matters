@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull } from "drizzle-orm";
 import {
   accounts,
   billLines,
@@ -26,8 +26,10 @@ import {
 } from "./errors";
 import { calculateBillTotals } from "./bill-calculations";
 import { nextBillNumber } from "./numbering";
-import type { CreateBillInput, UpdateBillInput } from "./types";
-import { supplierCreditAllocations, supplierPaymentAllocations } from "@/db/schema";
+import type { BillLineInput, CreateBillInput, UpdateBillInput } from "./types";
+import { supplierCreditAllocations, supplierPaymentAllocations, products, organizations } from "@/db/schema";
+import { InventoryService } from "@/domain/inventory/inventory-service";
+import { ProductCurrencyMismatchError, VoidWouldDesyncInventoryError } from "@/domain/inventory/errors";
 
 type BillStatus = (typeof billStatusEnum.enumValues)[number];
 
@@ -70,6 +72,49 @@ async function loadTaxCodes(tx: TenantDb, organizationId: string, taxCodeIds: st
     .from(taxCodes)
     .where(and(eq(taxCodes.organizationId, organizationId), inArray(taxCodes.id, uniqueIds)));
   return new Map(rows.map((r) => [r.id, { rate: r.rate, receivableAccountId: r.receivableAccountId, code: r.code }]));
+}
+
+/**
+ * For every line that carries a `productId`, resolves/overwrites its
+ * `accountId` from the product's own wiring rather than whatever account
+ * the caller passed — the purchase-side mirror of
+ * `src/domain/sales/invoice-service.ts`'s `resolveProductLines`. For a
+ * `TRACKED_INVENTORY` product that's `inventoryAssetAccountId` (buying
+ * stock is an asset increase, not an expense); otherwise it's
+ * `purchaseAccountId`. Also enforces the base-currency-only restriction
+ * for `TRACKED_INVENTORY` — see that function's doc comment.
+ */
+async function resolveProductLines(
+  tx: TenantDb,
+  organizationId: string,
+  lines: BillLineInput[],
+  currency: string,
+): Promise<BillLineInput[]> {
+  const productIds = [...new Set(lines.map((l) => l.productId).filter((id): id is string => !!id))];
+  if (productIds.length === 0) return lines;
+
+  const [org] = await tx.select().from(organizations).where(eq(organizations.id, organizationId));
+  const baseCurrency = org?.baseCurrency ?? currency;
+
+  const rows = await tx
+    .select()
+    .from(products)
+    .where(and(eq(products.organizationId, organizationId), inArray(products.id, productIds)));
+  const byId = new Map(rows.map((p) => [p.id, p]));
+
+  return lines.map((line, index) => {
+    if (!line.productId) return line;
+    const product = byId.get(line.productId);
+    if (!product) throw new InvalidBillLineError(`Line ${index + 1}: unknown product.`);
+    if (!product.isActive) throw new InvalidBillLineError(`Line ${index + 1}: product ${product.sku} is inactive.`);
+    if (product.type === "TRACKED_INVENTORY") {
+      if (currency !== baseCurrency) {
+        throw new ProductCurrencyMismatchError(product.sku, currency, baseCurrency);
+      }
+      return { ...line, accountId: product.inventoryAssetAccountId! };
+    }
+    return { ...line, accountId: product.purchaseAccountId! };
+  });
 }
 
 async function loadBillOr404(tx: TenantDb, organizationId: string, billId: string) {
@@ -118,16 +163,17 @@ async function persistBillWithLines(
   existingId?: string,
 ): Promise<{ id: string; billNumber: string }> {
   const supplier = await assertActiveSupplier(tx, actor.organizationId, input.supplierContactId);
+  const resolvedLines = await resolveProductLines(tx, actor.organizationId, input.lines, input.currency);
   await assertAccountsUsable(tx, actor.organizationId, [
     input.apAccountId,
-    ...input.lines.map((l) => l.accountId),
+    ...resolvedLines.map((l) => l.accountId).filter((id): id is string => !!id),
   ]);
 
-  const taxCodeIds = input.lines.map((l) => l.taxCodeId).filter((id): id is string => !!id);
+  const taxCodeIds = resolvedLines.map((l) => l.taxCodeId).filter((id): id is string => !!id);
   const taxCodesById = await loadTaxCodes(tx, actor.organizationId, taxCodeIds);
   const rateByCode = new Map([...taxCodesById.entries()].map(([id, v]) => [id, v.rate]));
 
-  const totals = calculateBillTotals(input.lines, input.currency, rateByCode);
+  const totals = calculateBillTotals(resolvedLines, input.currency, rateByCode);
 
   let billId: string;
   let billNumber: string;
@@ -195,6 +241,7 @@ async function persistBillWithLines(
       taxCodeId: line.taxCodeId,
       projectId: line.projectId,
       taskId: line.taskId,
+      productId: line.productId,
       lineAmount: line.lineAmount,
       taxAmount: line.taxAmount,
       receiptId: input.lines[i]?.receiptId ?? null,
@@ -379,6 +426,27 @@ export const BillService = {
         lines: journalLines,
       });
 
+      // Phase 7 Slice 2 (Inventory): every line buying a TRACKED_INVENTORY
+      // product increases its quantity and recomputes its weighted-average
+      // cost. No extra journal lines are needed here — persistBillWithLines
+      // already resolved such a line's accountId onto
+      // products.inventoryAssetAccountId, so the debit aggregation above
+      // already lands on the right asset account.
+      for (const line of lines) {
+        if (!line.productId) continue;
+        const [product] = await tx.select().from(products).where(eq(products.id, line.productId));
+        if (!product || product.type !== "TRACKED_INVENTORY") continue;
+
+        await InventoryService.recordPurchase(tx, actor, {
+          productId: line.productId,
+          quantity: line.quantity,
+          unitCost: line.unitPrice,
+          billLineId: line.id,
+          occurredAt: bill.issueDate,
+          journalEntryId: posted.entryId,
+        });
+      }
+
       const [updated] = await tx
         .update(bills)
         .set({
@@ -423,6 +491,23 @@ export const BillService = {
       const allocated = await loadAllocatedTotal(tx, actor.organizationId, billId);
       if (!Money.of(allocated, bill.currency).isZero()) {
         throw new BillHasPaymentsError(bill.billNumber);
+      }
+
+      // Phase 7 Slice 2 (Inventory): voiding a bill with a TRACKED_INVENTORY
+      // line is refused — see VoidWouldDesyncInventoryError's doc comment.
+      const linesWithProducts = await tx
+        .select({ productId: billLines.productId })
+        .from(billLines)
+        .where(and(eq(billLines.billId, billId), isNotNull(billLines.productId)));
+      if (linesWithProducts.length > 0) {
+        const productIds = linesWithProducts.map((l) => l.productId!);
+        const trackedRows = await tx
+          .select({ id: products.id })
+          .from(products)
+          .where(and(inArray(products.id, productIds), eq(products.type, "TRACKED_INVENTORY")));
+        if (trackedRows.length > 0) {
+          throw new VoidWouldDesyncInventoryError(bill.billNumber);
+        }
       }
 
       const reversal = await PostingService.reverseEntry(actor, bill.journalEntryId, reason);

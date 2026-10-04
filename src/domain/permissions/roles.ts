@@ -63,6 +63,10 @@ export const PERMISSIONS = [
   "timesheet:read",
   "timesheet:manage",
   "timesheet:approve",
+  "product:read",
+  "product:manage",
+  "inventory:read",
+  "inventory:manage",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -136,6 +140,10 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "timesheet:read",
     "timesheet:manage",
     "timesheet:approve",
+    "product:read",
+    "product:manage",
+    "inventory:read",
+    "inventory:manage",
   ]),
   BOOKKEEPER: new Set<Permission>([
     "account:read",
@@ -186,6 +194,10 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "timesheet:read",
     "timesheet:manage",
     "timesheet:approve",
+    "product:read",
+    "product:manage",
+    "inventory:read",
+    "inventory:manage",
   ]),
   ACCOUNTS_RECEIVABLE: new Set<Permission>([
     "account:read",
@@ -209,6 +221,8 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "project:read",
     "project:manage",
     "timesheet:read",
+    "product:read",
+    "inventory:read",
   ]),
   ACCOUNTS_PAYABLE: new Set<Permission>([
     "account:read",
@@ -237,6 +251,10 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "payment_run:manage",
     "payment_run:approve",
     "project:read",
+    "product:read",
+    "product:manage",
+    "inventory:read",
+    "inventory:manage",
   ]),
   PAYROLL_MANAGER: new Set<Permission>([
     "account:read",
@@ -278,6 +296,8 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "timesheet:read",
     "timesheet:manage",
     "timesheet:approve",
+    "product:read",
+    "inventory:read",
   ]),
   EMPLOYEE: new Set<Permission>([
     "expense_claim:read",
@@ -308,6 +328,8 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "expense_claim:read",
     "project:read",
     "timesheet:read",
+    "product:read",
+    "inventory:read",
   ]),
 };
 

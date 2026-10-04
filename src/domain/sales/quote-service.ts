@@ -74,7 +74,11 @@ async function persistQuoteWithLines(
   existingId?: string,
 ): Promise<{ id: string; quoteNumber: string }> {
   const customer = await assertActiveCustomer(tx, actor.organizationId, input.customerContactId);
-  await assertAccountsUsable(tx, actor.organizationId, input.lines.map((l) => l.accountId));
+  await assertAccountsUsable(
+    tx,
+    actor.organizationId,
+    input.lines.map((l) => l.accountId).filter((id): id is string => !!id),
+  );
 
   const taxCodeIds = input.lines.map((l) => l.taxCodeId).filter((id): id is string => !!id);
   const rateByCode = await loadTaxRates(tx, actor.organizationId, taxCodeIds);

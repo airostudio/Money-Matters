@@ -3,6 +3,7 @@ import { requireOrgAndActor } from "@/lib/session";
 import { ContactService } from "@/domain/contacts/contact-service";
 import { AccountService } from "@/domain/accounts/account-service";
 import { TaxCodeService } from "@/domain/tax/tax-code-service";
+import { ProductService } from "@/domain/inventory/product-service";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -19,11 +20,12 @@ export default async function NewBillPage({
 }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
 
-  const [suppliersOnly, both, accounts, taxCodes] = await Promise.all([
+  const [suppliersOnly, both, accounts, taxCodes, products] = await Promise.all([
     ContactService.list(actor, { kind: "SUPPLIER" }),
     ContactService.list(actor, { kind: "BOTH" }),
     AccountService.list(actor),
     TaxCodeService.list(actor),
+    ProductService.list(actor, { isActive: true }),
   ]);
   const suppliers = [...suppliersOnly, ...both].sort((a, b) => a.displayName.localeCompare(b.displayName));
   const apAccounts = accounts.filter((a) => a.type === "LIABILITY" && a.isControlAccount);
@@ -127,6 +129,7 @@ export default async function NewBillPage({
             <InvoiceLineEditor
               accounts={expenseAccounts.map((a) => ({ id: a.id, code: a.code, name: a.name }))}
               taxCodes={taxCodes.map((t) => ({ id: t.id, code: t.code, name: t.name, rate: t.rate }))}
+              products={products.map((p) => ({ id: p.id, sku: p.sku, name: p.name, sellPrice: p.sellPrice }))}
             />
           </CardContent>
           <div className="flex justify-end gap-2 border-t border-border px-6 py-4">

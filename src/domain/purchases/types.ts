@@ -18,10 +18,15 @@ export interface BillLineInput {
   description: string;
   /** Decimal string, e.g. "2.00". Must be positive. */
   quantity: string;
+  /**
+   * Expense/asset account this line's amount is debited to on posting.
+   * Required when `productId` is omitted; when `productId` is set,
+   * `BillService` resolves (and overwrites) this instead — see that
+   * field's comment below. May be omitted here in that case.
+   */
+  accountId?: string;
   /** Decimal string, e.g. "150.00". May be zero, never negative. */
   unitPrice: string;
-  /** Expense/asset account this line's amount is debited to on posting. */
-  accountId: string;
   /** Optional — a zero-rated/out-of-scope line has none. */
   taxCodeId?: string;
   /** Optional link to an uploaded receipt/invoice (Document AI capture) this line was prefilled from — informational only. */
@@ -29,6 +34,16 @@ export interface BillLineInput {
   /** Phase 7 Slice 1: attributes this cost line to a project (and optional task) for project profitability. */
   projectId?: string;
   taskId?: string;
+  /**
+   * Phase 7 Slice 2 (Inventory): which catalog product this line buys.
+   * When set, `accountId` is ignored/overwritten — with the product's
+   * `inventoryAssetAccountId` for a `TRACKED_INVENTORY` product (buying
+   * stock increases an asset, not an expense) or its `purchaseAccountId`
+   * otherwise — and, for `TRACKED_INVENTORY`, posting this bill also
+   * records a stock-in movement and recomputes the product's
+   * weighted-average cost.
+   */
+  productId?: string;
 }
 
 export interface CreateBillInput {

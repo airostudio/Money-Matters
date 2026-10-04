@@ -299,3 +299,74 @@ calculation from millisecond integers, rounded with the same
 `ROUND_HALF_EVEN` convention `Money` uses (`docs/decisions/0003-monetary-precision.md`),
 never a naive floating-point division that would compound rounding error
 on a long-running timer.
+
+## 10. Phase 7 Slice 2 — perpetual inventory and COGS-at-sale-time
+
+Inventory in this codebase is **perpetual, not periodic**: there is no
+period-end "count stock, back into COGS" process. Every purchase and sale
+of a `TRACKED_INVENTORY` product (`src/db/schema.ts`'s `products`) updates
+its on-hand quantity and weighted-average cost the moment it's posted, and
+a sale's COGS is posted **in the same transaction, and the same journal
+entry, as the sale's own revenue/tax lines** — not a separate disconnected
+batch job, not a month-end adjustment. This is the standard double-entry
+treatment a perpetual-inventory system requires: a sale is never "just"
+Debit AR / Credit Revenue (+ tax); it is also Debit COGS / Credit Inventory
+Asset for a tracked product, both legs landing on the invoice's own posted
+entry.
+
+- **Costing method**: weighted-average only
+  (`src/domain/inventory/costing.ts`). On a purchase, the new average is
+  `(oldQty × oldAvgCost + purchaseQty × purchaseUnitCost) / (oldQty +
+  purchaseQty)` — the textbook formula, computed in `decimal.js`, never a
+  float. A sale never changes the average — it consumes at whatever the
+  average currently is. `inventoryCostingMethodEnum` is a Postgres enum
+  with a single value today specifically so FIFO (master spec §20) can be
+  added as a second value later without a schema restructuring — the same
+  reasoning `ai_autonomy_level`'s doc comment gives for levels 3/4.
+- **Where the postings happen**: `InvoiceService.approveAndPost` and
+  `BillService.approveAndPost` are the only two call sites that touch
+  inventory, and both already own a `PostingService.postJournal` call for
+  the document's normal revenue/tax or expense/tax lines — `InventoryService`
+  (`src/domain/inventory/inventory-service.ts`) is invoked from inside
+  that same transaction, under a `SELECT ... FOR UPDATE` lock on the
+  product row, so a stock mutation and its accompanying journal entry
+  always commit or roll back together. A purchase needs no *extra* journal
+  lines at all: `BillService` resolves a tracked-inventory line's
+  `accountId` onto the product's own `inventoryAssetAccountId` before the
+  normal debit aggregation runs, so the existing debit already lands on
+  the right asset account. A sale needs an extra COGS debit/inventory-asset
+  credit pair, computed from `InventoryService.recordSale`'s return value
+  and appended to the same `journalLines` array `InvoiceService` was
+  already building.
+- **Oversell is a hard refusal, not a soft one**: `costing.ts`'s
+  `applySale` throws `InsufficientStockError` before any mutation happens
+  if the sale would take quantity negative, which aborts the whole
+  transaction — the invoice is never posted, no partial state exists. This
+  codebase has no backorder concept; an oversell is never queued.
+- **Void is refused for a tracked-inventory line**: `PostingService`'s
+  reversal-only rule (§1 above) says a posted entry is never edited, only
+  reversed — and reversing an invoice/bill's journal is easy. Reversing the
+  *stock* and *weighted-average cost history* correctly is not: a later
+  movement may already have built its own average on top of this one, so
+  simply "undoing" it would compute a wrong number, not a safe no-op. Both
+  `InvoiceService.voidInvoice` and `BillService.voidBill` refuse outright
+  (`VoidWouldDesyncInventoryError`) when any line carries a
+  `TRACKED_INVENTORY` product, rather than performing an incorrect
+  reversal — the correction path is a manual `InventoryAdjustmentService`
+  entry for the stock, plus an accountant's manual journal for the
+  revenue/COGS reversal, until a real reversal scheme is built.
+- **The correctness check**: `InventoryValuationService` sums
+  `quantityOnHand × averageUnitCost` across every `TRACKED_INVENTORY`
+  product, grouped by `inventoryAssetAccountId`, and compares it against
+  that account's own posted GL balance (`sumPostedActivityByAccount`,
+  §8a's shared helper) — the same spirit as §8's Balance Sheet equation
+  check. Since every movement's value and its accompanying journal line
+  are posted together (never one without the other), the two numbers are
+  independent paths to the same fact and should always agree exactly; a
+  non-zero difference is a real bug to fix, not a rounding footnote to
+  paper over.
+- **Scope**: one implicit location per org (no warehouse/bin model, so
+  nothing to allocate across), weighted-average only (FIFO deferred, see
+  above), no backorders, no landed costs, no bundles/kits, no serial/lot
+  tracking. See `docs/roadmap.md`'s Phase 7 Slice 2 entry for the full
+  deferral list and reasoning.

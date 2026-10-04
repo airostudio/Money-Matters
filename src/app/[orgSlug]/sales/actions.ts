@@ -61,16 +61,22 @@ function parseLinesFromFormData(formData: FormData): InvoiceLineInput[] {
   const unitPrices = formData.getAll("lineUnitPrice").map(String);
   const accountIds = formData.getAll("lineAccountId").map(String);
   const taxCodeIds = formData.getAll("lineTaxCodeId").map(String);
+  // Present only on a form that rendered InvoiceLineEditor's `products`
+  // prop (new/edit invoice) — absent (empty array) everywhere else, e.g.
+  // quotes/recurring templates, which don't support a catalog product yet.
+  const productIds = formData.getAll("lineProductId").map(String);
 
   const lines: InvoiceLineInput[] = [];
   for (let i = 0; i < descriptions.length; i++) {
-    if (!accountIds[i]) continue;
+    const productId = productIds[i] || undefined;
+    if (!accountIds[i] && !productId) continue;
     lines.push({
       description: descriptions[i] ?? "",
       quantity: quantities[i] ?? "0",
       unitPrice: unitPrices[i] ?? "0",
-      accountId: accountIds[i]!,
+      accountId: accountIds[i] || undefined,
       taxCodeId: taxCodeIds[i] || undefined,
+      productId,
     });
   }
   return lines;
@@ -318,7 +324,16 @@ export async function convertQuoteToInvoiceAction(orgSlug: string, quoteId: stri
 const RECURRING_FREQUENCIES = new Set(recurringFrequencyEnum.enumValues);
 
 function parseRecurringTemplateLinesFromFormData(formData: FormData): RecurringInvoiceTemplateLineInput[] {
-  return parseLinesFromFormData(formData);
+  // `parseLinesFromFormData` already drops any line with no accountId, so
+  // every line here has one — recurring templates don't support a
+  // catalog `productId` in this slice, unlike `InvoiceLineInput` itself.
+  return parseLinesFromFormData(formData).map((line) => ({
+    description: line.description,
+    quantity: line.quantity,
+    unitPrice: line.unitPrice,
+    accountId: line.accountId!,
+    taxCodeId: line.taxCodeId,
+  }));
 }
 
 function parseRecurringTemplateHeader(formData: FormData, currency: string) {

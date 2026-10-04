@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull } from "drizzle-orm";
 import {
   accounts,
   contacts,
@@ -26,8 +26,10 @@ import {
 } from "./errors";
 import { calculateInvoiceTotals } from "./invoice-calculations";
 import { nextInvoiceNumber } from "./numbering";
-import type { CreateInvoiceInput, UpdateInvoiceInput } from "./types";
-import { paymentAllocations } from "@/db/schema";
+import type { CreateInvoiceInput, InvoiceLineInput, UpdateInvoiceInput } from "./types";
+import { paymentAllocations, products, organizations } from "@/db/schema";
+import { InventoryService } from "@/domain/inventory/inventory-service";
+import { ProductCurrencyMismatchError, VoidWouldDesyncInventoryError } from "@/domain/inventory/errors";
 
 type InvoiceStatus = (typeof invoiceStatusEnum.enumValues)[number];
 
@@ -71,6 +73,45 @@ async function loadTaxCodes(tx: TenantDb, organizationId: string, taxCodeIds: st
   return new Map(rows.map((r) => [r.id, { rate: r.rate, payableAccountId: r.payableAccountId, code: r.code }]));
 }
 
+/**
+ * For every line that carries a `productId`, resolves/overwrites its
+ * `accountId` from the product's own wiring rather than whatever account
+ * the caller passed — see `InvoiceLineInput.productId`'s comment and
+ * `products`' doc comment in src/db/schema.ts for exactly which account.
+ * A `TRACKED_INVENTORY` product may only be sold in the organization's
+ * base currency this slice (no multi-currency inventory costing — see
+ * docs/roadmap.md), checked here before any calculation runs.
+ */
+async function resolveProductLines(
+  tx: TenantDb,
+  organizationId: string,
+  lines: InvoiceLineInput[],
+  currency: string,
+): Promise<InvoiceLineInput[]> {
+  const productIds = [...new Set(lines.map((l) => l.productId).filter((id): id is string => !!id))];
+  if (productIds.length === 0) return lines;
+
+  const [org] = await tx.select().from(organizations).where(eq(organizations.id, organizationId));
+  const baseCurrency = org?.baseCurrency ?? currency;
+
+  const rows = await tx
+    .select()
+    .from(products)
+    .where(and(eq(products.organizationId, organizationId), inArray(products.id, productIds)));
+  const byId = new Map(rows.map((p) => [p.id, p]));
+
+  return lines.map((line, index) => {
+    if (!line.productId) return line;
+    const product = byId.get(line.productId);
+    if (!product) throw new InvalidInvoiceLineError(`Line ${index + 1}: unknown product.`);
+    if (!product.isActive) throw new InvalidInvoiceLineError(`Line ${index + 1}: product ${product.sku} is inactive.`);
+    if (product.type === "TRACKED_INVENTORY" && currency !== baseCurrency) {
+      throw new ProductCurrencyMismatchError(product.sku, currency, baseCurrency);
+    }
+    return { ...line, accountId: product.revenueAccountId };
+  });
+}
+
 async function loadInvoiceOr404(tx: TenantDb, organizationId: string, invoiceId: string) {
   const [invoice] = await tx
     .select()
@@ -98,16 +139,17 @@ async function persistInvoiceWithLines(
   existingId?: string,
 ): Promise<{ id: string; invoiceNumber: string; lines: { id: string; lineNumber: number }[] }> {
   const customer = await assertActiveCustomer(tx, actor.organizationId, input.customerContactId);
+  const resolvedLines = await resolveProductLines(tx, actor.organizationId, input.lines, input.currency);
   await assertAccountsUsable(tx, actor.organizationId, [
     input.arAccountId,
-    ...input.lines.map((l) => l.accountId),
+    ...resolvedLines.map((l) => l.accountId).filter((id): id is string => !!id),
   ]);
 
-  const taxCodeIds = input.lines.map((l) => l.taxCodeId).filter((id): id is string => !!id);
+  const taxCodeIds = resolvedLines.map((l) => l.taxCodeId).filter((id): id is string => !!id);
   const taxCodesById = await loadTaxCodes(tx, actor.organizationId, taxCodeIds);
   const rateByCode = new Map([...taxCodesById.entries()].map(([id, v]) => [id, v.rate]));
 
-  const totals = calculateInvoiceTotals(input.lines, input.currency, rateByCode);
+  const totals = calculateInvoiceTotals(resolvedLines, input.currency, rateByCode);
 
   let invoiceId: string;
   let invoiceNumber: string;
@@ -173,6 +215,7 @@ async function persistInvoiceWithLines(
         taxCodeId: line.taxCodeId,
         projectId: line.projectId,
         taskId: line.taskId,
+        productId: line.productId,
         lineAmount: line.lineAmount,
         taxAmount: line.taxAmount,
       })),
@@ -335,6 +378,38 @@ export const InvoiceService = {
 
       const total = Money.of(invoice.total, invoice.currency);
 
+      // Phase 7 Slice 2 (Inventory): every line selling a TRACKED_INVENTORY
+      // product also records a SALE movement — decreasing quantity and
+      // computing COGS at the then-current weighted-average cost — and
+      // that COGS debit/inventory-asset credit is added to this SAME
+      // journal entry, posted alongside (not after, not in a separate
+      // process) the sale's own revenue/tax lines. Oversell is rejected by
+      // InventoryService.recordSale (InsufficientStockError), which aborts
+      // this whole transaction before anything is posted.
+      const cogsByAccount = new Map<string, ReturnType<typeof Money.zero>>();
+      const inventoryAssetByAccount = new Map<string, ReturnType<typeof Money.zero>>();
+      const movementIds: string[] = [];
+      for (const line of lines) {
+        if (!line.productId) continue;
+        const [product] = await tx.select().from(products).where(eq(products.id, line.productId));
+        if (!product || product.type !== "TRACKED_INVENTORY") continue;
+
+        const sale = await InventoryService.recordSale(tx, actor, {
+          productId: line.productId,
+          quantity: line.quantity,
+          invoiceLineId: line.id,
+          occurredAt: invoice.issueDate,
+        });
+        movementIds.push(sale.movementId);
+
+        const cogsAmount = Money.of(sale.cogsAmount, invoice.currency);
+        cogsByAccount.set(sale.cogsAccountId, (cogsByAccount.get(sale.cogsAccountId) ?? Money.zero(invoice.currency)).add(cogsAmount));
+        inventoryAssetByAccount.set(
+          sale.inventoryAssetAccountId,
+          (inventoryAssetByAccount.get(sale.inventoryAssetAccountId) ?? Money.zero(invoice.currency)).add(cogsAmount),
+        );
+      }
+
       const journalLines: JournalLineDraft[] = [
         { accountId: invoice.arAccountId, debit: total.toString(), currency: invoice.currency },
         ...[...revenueByAccount.entries()].map(([accountId, amount]) => ({
@@ -348,6 +423,12 @@ export const InvoiceService = {
           credit: amount.toString(),
           currency: invoice.currency,
         })),
+        ...[...cogsByAccount.entries()]
+          .filter(([, amount]) => !amount.isZero())
+          .map(([accountId, amount]) => ({ accountId, debit: amount.toString(), currency: invoice.currency })),
+        ...[...inventoryAssetByAccount.entries()]
+          .filter(([, amount]) => !amount.isZero())
+          .map(([accountId, amount]) => ({ accountId, credit: amount.toString(), currency: invoice.currency })),
       ];
 
       const posted = await PostingService.postJournal(actor, {
@@ -356,6 +437,10 @@ export const InvoiceService = {
         sourceType: "MANUAL",
         lines: journalLines,
       });
+
+      if (movementIds.length > 0) {
+        await InventoryService.linkMovementsToJournalEntry(tx, movementIds, posted.entryId);
+      }
 
       const [updated] = await tx
         .update(invoices)
@@ -418,6 +503,25 @@ export const InvoiceService = {
       const allocated = await loadAllocatedTotal(tx, actor.organizationId, invoiceId);
       if (!Money.of(allocated, invoice.currency).isZero()) {
         throw new InvoiceHasPaymentsError(invoice.invoiceNumber);
+      }
+
+      // Phase 7 Slice 2 (Inventory): voiding an invoice with a
+      // TRACKED_INVENTORY line is refused — see VoidWouldDesyncInventoryError's
+      // doc comment for why reversing stock/weighted-average history is
+      // deferred rather than done incorrectly.
+      const linesWithProducts = await tx
+        .select({ productId: invoiceLines.productId })
+        .from(invoiceLines)
+        .where(and(eq(invoiceLines.invoiceId, invoiceId), isNotNull(invoiceLines.productId)));
+      if (linesWithProducts.length > 0) {
+        const productIds = linesWithProducts.map((l) => l.productId!);
+        const trackedRows = await tx
+          .select({ id: products.id })
+          .from(products)
+          .where(and(inArray(products.id, productIds), eq(products.type, "TRACKED_INVENTORY")));
+        if (trackedRows.length > 0) {
+          throw new VoidWouldDesyncInventoryError(invoice.invoiceNumber);
+        }
       }
 
       const reversal = await PostingService.reverseEntry(actor, invoice.journalEntryId, reason);

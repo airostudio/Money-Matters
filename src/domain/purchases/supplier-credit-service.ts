@@ -105,7 +105,10 @@ async function persistCreditWithLines(
   existingId?: string,
 ): Promise<{ id: string; creditNoteNumber: string }> {
   const supplier = await assertActiveSupplier(tx, actor.organizationId, input.supplierContactId);
-  await assertAccountsUsable(tx, actor.organizationId, [input.apAccountId, ...input.lines.map((l) => l.accountId)]);
+  await assertAccountsUsable(tx, actor.organizationId, [
+    input.apAccountId,
+    ...input.lines.map((l) => l.accountId).filter((id): id is string => !!id),
+  ]);
 
   const taxCodeIds = input.lines.map((l) => l.taxCodeId).filter((id): id is string => !!id);
   const taxCodesById = await loadTaxCodes(tx, actor.organizationId, taxCodeIds);

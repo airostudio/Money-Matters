@@ -162,6 +162,20 @@
       "when": 1790979125601,
       "tag": "0022_projects_slice1_row_level_security",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1791104153951,
+      "tag": "0023_inventory_slice2_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1791104153952,
+      "tag": "0024_inventory_slice2_row_level_security",
+      "breakpoints": true
     }
   ]
 }

@@ -20,6 +20,9 @@ import {
   savedReports,
   supplierCreditNotes,
   timesheetEntries,
+  products,
+  inventoryMovements,
+  inventoryAdjustments,
 } from "@/db/schema";
 import { db } from "@/db/client";
 import { withTenant } from "@/db/tenant";
@@ -39,6 +42,9 @@ import { ReportingService } from "@/domain/reporting/reporting-service";
 import { ReportBuilderService } from "@/domain/reporting/report-builder-service";
 import { ProjectService } from "@/domain/projects/project-service";
 import { TimesheetService } from "@/domain/projects/timesheet-service";
+import { ProductService } from "@/domain/inventory/product-service";
+import { InventoryAdjustmentService } from "@/domain/inventory/inventory-adjustment-service";
+import { createInventoryFixtures } from "../helpers/inventory";
 
 /**
  * Master spec §48 / §87 non-negotiable #7: "A coding mistake must not allow
@@ -170,6 +176,9 @@ describe("Tenant isolation", () => {
       "projects",
       "project_tasks",
       "timesheet_entries",
+      "products",
+      "inventory_movements",
+      "inventory_adjustments",
     ];
 
     const rows = await db.execute<{
@@ -469,5 +478,30 @@ describe("Tenant isolation", () => {
     expect(await db.select().from(projects)).toHaveLength(0);
     expect(await db.select().from(projectTasks)).toHaveLength(0);
     expect(await db.select().from(timesheetEntries)).toHaveLength(0);
+  });
+
+  it("a product (and its movements and adjustments) created under org A is invisible to org B, even by direct query with no filter", async () => {
+    const fixturesA = await createInventoryFixtures(orgA.owner, orgA.baseCurrency);
+
+    expect(await ProductService.get(orgB.owner, fixturesA.productId)).toBeNull();
+
+    const adjustment = await InventoryAdjustmentService.create(orgA.owner, {
+      productId: fixturesA.productId,
+      quantityDelta: "5",
+      unitCost: "10.00",
+      reason: "Initial stock",
+      adjustmentAccountId: fixturesA.adjustmentAccountId,
+    });
+
+    const productsAsOrgB = await withTenant(orgB.organizationId, (tx) => tx.select().from(products));
+    expect(productsAsOrgB.some((r) => r.id === fixturesA.productId)).toBe(false);
+    const movementsAsOrgB = await withTenant(orgB.organizationId, (tx) => tx.select().from(inventoryMovements));
+    expect(movementsAsOrgB.some((r) => r.productId === fixturesA.productId)).toBe(false);
+    const adjustmentsAsOrgB = await withTenant(orgB.organizationId, (tx) => tx.select().from(inventoryAdjustments));
+    expect(adjustmentsAsOrgB.some((r) => r.id === adjustment.id)).toBe(false);
+
+    expect(await db.select().from(products)).toHaveLength(0);
+    expect(await db.select().from(inventoryMovements)).toHaveLength(0);
+    expect(await db.select().from(inventoryAdjustments)).toHaveLength(0);
   });
 });

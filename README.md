@@ -52,9 +52,21 @@ into a draft invoice through the exact same `InvoiceService.create` path as
 any other invoice, marking each entry INVOICED so a second run can never
 double-bill it — plus a live Estimated-vs-Actual project profitability view
 computed from posted invoice/bill/expense-claim lines, never cached data.
-Inventory and fixed assets (Phase 7's other two components) are
-intentionally not attempted yet — each is a large, independent domain of
-its own. See [`docs/roadmap.md`](docs/roadmap.md) for exactly what's built
+Phase 7 Slice 2 adds a scoped-down Inventory core: a product catalog
+(tracked-inventory vs. non-inventory/service items sharing one catalog and
+line-item UI), single-location perpetual weighted-average costing — buying
+stock via a bill recomputes the average cost, selling stock via an invoice
+posts COGS in the SAME journal entry as the sale's revenue (never a
+separate periodic process), an oversell is always refused rather than
+back-ordered, manual stock adjustments always post a journal and require a
+reason, an Inventory Valuation report that reconciles exactly against the
+GL's own inventory-asset balance, and deterministic reorder-point
+alerting. Multi-warehouse tracking, FIFO costing, serial/lot tracking,
+landed costs, bundles/kits, and sales-velocity stockout forecasting are
+explicitly deferred — see `docs/roadmap.md` for the full list and why.
+Fixed assets (Phase 7's remaining component) is intentionally not
+attempted yet — a large, independent domain of its own. See
+[`docs/roadmap.md`](docs/roadmap.md) for exactly what's built
 vs. explicitly deferred in each (a customer portal, AI-drafted collection
 reminders, a live bank feed provider, Stripe, a background job queue, a
 Redis cache, real bank-file/payment-rail integration, full

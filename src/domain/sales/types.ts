@@ -16,13 +16,29 @@ export interface InvoiceLineInput {
   quantity: string;
   /** Decimal string, e.g. "150.00". May be zero, never negative. */
   unitPrice: string;
-  /** Revenue account this line's amount is credited to on posting. */
-  accountId: string;
+  /**
+   * Revenue account this line's amount is credited to on posting. Required
+   * when `productId` is omitted; when `productId` is set, `InvoiceService`
+   * resolves (and overwrites) this from `products.revenueAccountId`
+   * instead — see that field's comment below. May be omitted here in that
+   * case.
+   */
+  accountId?: string;
   /** Optional — a zero-rated/out-of-scope line has none. */
   taxCodeId?: string;
   /** Phase 7 Slice 1: attributes this revenue line to a project (and optional task) for project profitability. Set by `ProjectTimeBillingService` when a line was generated from billed time; otherwise omitted. */
   projectId?: string;
   taskId?: string;
+  /**
+   * Phase 7 Slice 2 (Inventory): which catalog product this line sells.
+   * When set, `accountId` is ignored/overwritten with the product's own
+   * revenue account, and — for a `TRACKED_INVENTORY` product — posting
+   * this invoice also records a stock-out movement and a same-journal
+   * COGS debit/inventory-asset credit at the then-current
+   * weighted-average cost. Omitted for an ad hoc line with no catalog
+   * product (the common case outside Operations/Sales of goods).
+   */
+  productId?: string;
 }
 
 export interface CreateInvoiceInput {

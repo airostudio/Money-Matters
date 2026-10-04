@@ -2,6 +2,7 @@ import type { Permission } from "@/domain/permissions/roles";
 import type { LucideIcon } from "lucide-react";
 import {
   Banknote,
+  Boxes,
   Bot,
   Building2,
   Home,
@@ -69,6 +70,17 @@ export const NAV_ITEMS: NavItem[] = [
     href: "/projects",
     icon: Package,
     permission: "project:read",
+  },
+  {
+    label: "Inventory",
+    href: "/inventory",
+    icon: Boxes,
+    permission: "product:read",
+    children: [
+      { label: "Products", href: "/inventory", permission: "product:read" },
+      { label: "Valuation", href: "/inventory/valuation", permission: "inventory:read" },
+      { label: "Reorder Alerts", href: "/inventory/reorder", permission: "inventory:read" },
+    ],
   },
   {
     label: "Accounting",

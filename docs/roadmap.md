@@ -1603,6 +1603,221 @@ the user confirmed.
 - **Auto-reverting INVOICED timesheet entries when their invoice is
   voided**: documented above under the integration service.
 
+### Slice 2 — Inventory (complete, scoped down hard from master spec §20/§21)
+
+Master spec §20/§21 describes a very large feature — SKU/barcode/variants/
+serial/lot tracking, multiple warehouses/locations/bins, stock transfers,
+backorders, damaged stock, landed costs, reorder points, bundles/kits, stock
+takes, multiple costing methods, sales-velocity stockout forecasting. This
+slice builds a production-quality **core** — a real perpetual-inventory
+system with correct GL postings — and explicitly defers the rest (listed
+below) rather than shallow-covering everything.
+
+- [x] **Schema** (`src/db/schema.ts`): `products` (org-scoped, unique-per-org
+      `sku`, `type` enum TRACKED_INVENTORY/NON_INVENTORY/SERVICE,
+      `costingMethod` enum — currently only `WEIGHTED_AVERAGE`, see below —
+      `sellPrice`, `revenueAccountId` always required,
+      `inventoryAssetAccountId`/`cogsAccountId` required for
+      TRACKED_INVENTORY, `purchaseAccountId` required otherwise,
+      `quantityOnHand`/`averageUnitCost` as the perpetually-maintained
+      current state, `reorderPoint`/`reorderQuantity`,
+      `preferredSupplierContactId`, `isActive`), `inventory_movements` (the
+      append-only audit trail of every PURCHASE/SALE/ADJUSTMENT, with a
+      post-movement balance snapshot for transparency), and
+      `inventory_adjustments` (a manual correction, always with a `reason`
+      and its own posted journal). An optional `productId` was added
+      directly to `invoice_lines` and `bill_lines`. All three new tables
+      are RLS-enabled + FORCEd + policy + `mm_app`-granted
+      (drizzle/0023–0024), verified by the `db:migrate` tenant-isolation
+      audit, now **54 of 58** organization-scoped tables (up from 51).
+    - **Design decision — dedicated FK, not the dimension system**: same
+      reasoning as Phase 7 Slice 1's `projectId`/`taskId` (see that
+      section above and `docs/database.md`) — a product needs a
+      *structural* link invoice/bill posting can resolve accounts and
+      trigger stock movements from, not just a reporting-time tag. The
+      dimension system stays the tool for open-ended user-defined tags;
+      `productId` is the tool for a specific, structural, product-level
+      concept (`InventoryService` reads it to decide whether to move
+      stock at all, and which accounts to post to).
+- [x] **`ProductService`** (`src/domain/inventory/product-service.ts`):
+      create/update/deactivate/reactivate, enforcing a unique SKU per org
+      and the account wiring each `type` requires (see schema doc comment
+      above) — a product's `type` cannot be changed while it has non-zero
+      stock. New permissions `product:read`/`product:manage`,
+      `inventory:read`/`inventory:manage` (`src/domain/permissions/
+      roles.ts`), granted to OWNER/ADMINISTRATOR/ACCOUNTANT/BOOKKEEPER/
+      ACCOUNTS_PAYABLE (manage) and MANAGER/ACCOUNTS_RECEIVABLE/READ_ONLY
+      (read-only, since a salesperson needs to pick products on an invoice
+      without managing the catalog).
+- [x] **Single-location, weighted-average perpetual costing**
+      (`src/domain/inventory/costing.ts` — pure, `decimal.js`-based,
+      unit-tested directly — and `inventory-service.ts`, which applies it
+      transactionally under a `SELECT ... FOR UPDATE` row lock on the
+      product so two concurrent sales/purchases of the same product can't
+      race the weighted-average recomputation). **Explicitly one implicit
+      location per org** — no warehouse/bin model exists, so there is
+      nothing to allocate across. **Explicitly weighted-average only**:
+      `costingMethod` is an enum with a single value today specifically so
+      FIFO (master spec §20) can be added later as a second enum value
+      with no column/table restructuring, rather than half-building both
+      methods side by side now.
+    - **Purchase** (a bill line with `productId` set to a
+      TRACKED_INVENTORY product): `BillService` resolves that line's
+      `accountId` to the product's own `inventoryAssetAccountId` — never
+      whatever account the caller passed — so the bill's own existing
+      debit aggregation already lands on the right asset account with no
+      extra journal lines. `InventoryService.recordPurchase` then
+      increases quantity and recomputes the weighted average from the
+      line's own unit price, inside the SAME transaction as the bill's
+      posting.
+    - **Sale** (an invoice line with `productId` set to a
+      TRACKED_INVENTORY product): `InvoiceService` resolves the line's
+      `accountId` to the product's `revenueAccountId` for the normal
+      revenue credit, and separately calls `InventoryService.recordSale`,
+      which decreases quantity (valued at the CURRENT weighted-average
+      cost — a sale never changes the average itself) and returns the
+      COGS amount. `InvoiceService.approveAndPost` adds that COGS
+      debit/inventory-asset credit to the exact SAME journal entry as the
+      sale's own revenue/tax lines — perpetual inventory, COGS posted at
+      the moment of sale, never a separate disconnected process.
+    - **Oversell rejection**: `InventoryService.recordSale` (via
+      `costing.ts`'s `applySale`) refuses, with `InsufficientStockError`
+      naming the SKU/available/requested quantities, any sale that would
+      take quantity negative — the whole transaction (including the
+      invoice's own posting) rolls back. **No backorder support** — an
+      oversell is always refused outright, never queued.
+    - **Void is refused for a tracked-inventory line**: voiding a posted
+      invoice/bill with any TRACKED_INVENTORY line throws
+      `VoidWouldDesyncInventoryError` — correctly reversing both the
+      weighted-average cost history and a quantity a later movement may
+      have built on needs either a correcting-movement scheme or full
+      history replay, which is deferred. Use a manual
+      `InventoryAdjustmentService` correction for stock, and consult an
+      accountant for the revenue/COGS reversal, in the meantime — an
+      honest refusal rather than an incorrect reversal.
+- [x] **`InventoryAdjustmentService`**
+      (`src/domain/inventory/inventory-adjustment-service.ts`): a manual
+      quantity correction (stocktake, damage, shrinkage) — org-scoped,
+      always requires a `reason`, always posts its own small balanced
+      journal through `PostingService` (debiting/crediting the inventory
+      asset account against a caller-chosen adjustment account), audited.
+      An increasing adjustment requires a stated unit cost (what the found
+      stock is valued at); a decreasing one is valued at the current
+      weighted average and is refused the same way an oversell is if it
+      would take quantity negative.
+- [x] **Inventory Valuation report**
+      (`src/domain/inventory/valuation-service.ts`): on-hand quantity ×
+      weighted-average cost per product and in aggregate, **reconciled
+      against the inventory asset account's own posted GL balance**, the
+      same spirit as Phase 5's Balance Sheet equation check. Grouped by
+      `inventoryAssetAccountId` (several products may share one account);
+      a non-zero difference is flagged as a real bug, never silently
+      absorbed, the same discipline as that check.
+- [x] **Reorder alerting** (`src/domain/inventory/
+      reorder-alert-service.ts`) — the one piece of master spec §21
+      "Inventory Intelligence" that's cheaply real without a forecasting
+      model: a deterministic `quantityOnHand <= reorderPoint` list for
+      active TRACKED_INVENTORY products with a reorder point set. No
+      "likely to reach zero stock in approximately N days" prediction —
+      that needs real sales-velocity forecasting (a trend over historical
+      SALE movements, seasonality, lead time), a materially bigger
+      feature, deferred rather than faked with a guessed number.
+- [x] **UI** (`src/app/[orgSlug]/inventory/`): a product catalog (filterable
+      by nothing yet, just a flat list with on-hand qty/avg cost),
+      a new-product form (type-aware account wiring with inline guidance),
+      a product detail page (stock summary, a manual-adjustment form, full
+      movement history), a Valuation report page (the GL reconciliation
+      front and center, flagged red if it ever fails), and a Reorder
+      Alerts page. The existing invoice/bill line editor
+      (`InvoiceLineEditor`) gained an optional per-line Product picker —
+      selecting one clears and disables that line's own account field,
+      since the server resolves it from the product instead; this only
+      renders on the invoice/bill "new" pages (quotes, purchase orders,
+      recurring templates and the draft-edit pages don't offer product
+      selection in this slice — a product chosen while originally creating
+      an invoice/bill line is not currently preserved across a later
+      edit-and-resave of that same draft, a known minor gap rather than a
+      silent data-loss risk since the line's own `productId` column is
+      simply left as whatever was last persisted if the edit form omits
+      it). A new "Inventory" nav section was added alongside Projects.
+- [x] Tests: unit (`costing.ts`'s weighted-average recomputation across
+      multiple purchases at different costs, a sale leaving the average
+      unchanged, fractional-quantity exactness, oversell/negative-stock
+      rejection, increasing/decreasing adjustment math, the
+      `assertWeightedAverage` guard) and integration against the real test
+      database (buy stock via a bill and confirm quantity/average cost;
+      a second purchase at a different cost recomputes the average
+      correctly; sell stock via an invoice and confirm quantity decreases,
+      COGS posts in the SAME journal entry as the sale, and the GL
+      reflects both the inventory-asset credit and the trial balance;
+      gross margin on a P&L for that period is correct; **attempt to
+      oversell and confirm rejection with nothing posted**; a manual
+      adjustment — both increasing and decreasing — posts correctly and
+      updates quantity; a reason is required; **inventory valuation
+      reconciles exactly to the GL inventory asset account balance across
+      a sequence of two purchases, a sale and an adjustment**; reorder
+      alerting flags exactly the right products as stock crosses the
+      threshold; deactivate/reactivate; voiding a posted invoice or bill
+      with a tracked-inventory line is refused; a tenant-isolation case
+      for all three new tables). The full existing suite (588 tests total
+      after this slice, up from 557) still passes.
+- [x] `npm run typecheck`, `npm run lint`, `npm test`, and `npm run build`
+      all pass. Smoke-tested for real against a local Postgres: created a
+      TRACKED_INVENTORY product with its own inventory-asset/COGS/revenue
+      accounts, bought 10 units @ $5.00 via a bill (quantity → 10, average
+      cost → $5.00, inventory asset account debited $50.00), bought a
+      further 10 @ $7.00 (quantity → 20, average cost recomputed to
+      $6.00), sold 4 units @ $20.00 via an invoice (quantity → 16, COGS
+      $24.00 debited and inventory asset credited $24.00 in the SAME
+      journal as the $80.00 revenue credit, P&L gross margin correct at
+      $56.00), attempted to sell 50 more units and confirmed
+      `InsufficientStockError` with nothing posted, posted a −2 unit
+      shrinkage adjustment (inventory asset credited $12.00 at the $6.00
+      average, quantity → 14), and confirmed the Valuation report's
+      $84.00 total reconciles exactly to the inventory asset account's own
+      $84.00 GL balance (50 + 70 − 24 − 12).
+
+**Explicitly deferred, not attempted shallow**:
+
+- **Multi-warehouse/location/bin tracking**: one implicit location per org
+  this slice; `products.quantityOnHand` has nowhere to be split across
+  locations yet. A real multi-location slice needs its own `locations`
+  table, a `warehouseId` on every movement, and a materially different
+  valuation-reconciliation query (per-location, not just per-account).
+- **Barcode scanning**: no barcode field or scan workflow exists; `sku` is
+  typed, not scanned.
+- **Serial/lot/batch tracking**: `inventory_movements` has no serial/lot
+  identity — a unit of a tracked product is fungible with every other unit
+  of the same product, which is what weighted-average costing itself
+  assumes.
+- **Stock transfers between locations**: meaningless without locations;
+  deferred alongside them.
+- **Backorder support**: documented above — an oversell is always refused,
+  never queued or partially fulfilled.
+- **A damaged-stock-specific workflow beyond the generic adjustment**:
+  `InventoryAdjustmentService` covers damage/shrinkage/stocktake correction
+  identically; no separate damage-claim or write-off approval flow exists.
+- **Landed costs** (freight/duty/insurance allocated into unit cost): a
+  purchase's unit cost is exactly the bill line's own unit price; nothing
+  apportions a separate freight bill into it.
+- **Bundles/kits/assemblies**: a product is a single sellable/purchasable
+  item; there is no "this product's sale consumes N units of several
+  component products" concept.
+- **A formal stock-take/cycle-count workflow**: no count-sheet, variance
+  report, or count-approval flow — a stocktake correction is just a normal
+  `InventoryAdjustmentService.create` call with that reason typed in.
+- **FIFO costing**: `inventoryCostingMethodEnum` has a single value
+  (`WEIGHTED_AVERAGE`) specifically so FIFO can be added as a second value
+  later without restructuring — see this slice's costing doc comment.
+- **Sales-velocity-based stockout prediction** (master spec §21's "likely
+  to reach zero stock in approximately N days"): needs real forecasting
+  logic (a trend over SALE movement history, seasonality, lead time), not
+  a guess — deferred rather than faked. `ReorderAlertService`'s
+  deterministic `quantityOnHand <= reorderPoint` check is this slice's
+  entire "Inventory Intelligence" surface.
+- **Preserving a line's `productId` across a draft edit-and-resave** on
+  the invoice/bill edit pages — see the UI note above.
+
 ## Phase 8 — Payroll & Australia Compliance (not started)
 
 Employee records, AU payroll engine (PAYG, super, STP), leave, BAS

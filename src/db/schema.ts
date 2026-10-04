@@ -870,6 +870,21 @@ export const invoiceLines = pgTable("invoice_lines", {
    */
   projectId: uuid("project_id").references((): AnyPgColumn => projects.id),
   taskId: uuid("task_id").references((): AnyPgColumn => projectTasks.id),
+  /**
+   * Phase 7 Slice 2 (Inventory). Which catalog product this line sells —
+   * a dedicated FK, not the generic dimension system, for the same reason
+   * `projectId` above is one: see that field's comment and
+   * docs/database.md's note on this slice's own instance of the same
+   * judgment call. Null for a line with no catalog product (an ad hoc
+   * line, same as always). When set and the product is
+   * `TRACKED_INVENTORY`, `accountId` above is resolved from
+   * `products.revenueAccountId` by `InvoiceService` — never left to
+   * whatever account the caller passed — and posting the invoice also
+   * records a `inventory_movements` SALE row and a same-journal COGS
+   * debit/inventory-asset credit; see
+   * `src/domain/inventory/inventory-service.ts`.
+   */
+  productId: uuid("product_id").references((): AnyPgColumn => products.id),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   invoiceLineUnique: uniqueIndex("invoice_lines_invoice_line_unique").on(
@@ -878,6 +893,7 @@ export const invoiceLines = pgTable("invoice_lines", {
   ),
   orgInvoiceIdx: index("invoice_lines_org_invoice_idx").on(table.organizationId, table.invoiceId),
   orgProjectIdx: index("invoice_lines_org_project_idx").on(table.organizationId, table.projectId),
+  orgProductIdx: index("invoice_lines_org_product_idx").on(table.organizationId, table.productId),
 }));
 
 /**
@@ -1222,11 +1238,22 @@ export const billLines = pgTable("bill_lines", {
   /** Phase 7 Slice 1: which project/job this cost line is attributed to — see `invoiceLines.projectId`'s comment for why this is a dedicated FK. */
   projectId: uuid("project_id").references((): AnyPgColumn => projects.id),
   taskId: uuid("task_id").references((): AnyPgColumn => projectTasks.id),
+  /**
+   * Phase 7 Slice 2 (Inventory). Which catalog product this line buys —
+   * see `invoiceLines.productId`'s comment for why this is a dedicated
+   * FK. When set and the product is `TRACKED_INVENTORY`, `accountId`
+   * above is resolved from `products.inventoryAssetAccountId` by
+   * `BillService` (buying stock is an asset increase, not an expense),
+   * and posting the bill also records an `inventory_movements` PURCHASE
+   * row and recomputes that product's weighted-average cost.
+   */
+  productId: uuid("product_id").references((): AnyPgColumn => products.id),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   billLineUnique: uniqueIndex("bill_lines_bill_line_unique").on(table.billId, table.lineNumber),
   orgBillIdx: index("bill_lines_org_bill_idx").on(table.organizationId, table.billId),
   orgProjectIdx: index("bill_lines_org_project_idx").on(table.organizationId, table.projectId),
+  orgProductIdx: index("bill_lines_org_product_idx").on(table.organizationId, table.productId),
 }));
 
 /**
@@ -2880,5 +2907,245 @@ export const timesheetEntriesRelations = relations(timesheetEntries, ({ one }) =
   invoiceLine: one(invoiceLines, {
     fields: [timesheetEntries.invoiceLineId],
     references: [invoiceLines.id],
+  }),
+}));
+
+// ---------------------------------------------------------------------------
+// Phase 7 Slice 2 — Inventory
+// ---------------------------------------------------------------------------
+
+/**
+ * What a catalog item is, for whether inventory-tracking logic applies to
+ * it at all (master spec §20). `TRACKED_INVENTORY` is quantity-tracked with
+ * perpetual weighted-average costing (`inventory_movements`,
+ * `quantityOnHand`/`averageUnitCost` below). `NON_INVENTORY` and `SERVICE`
+ * are both sold/bought through the exact same invoice/bill line UI and the
+ * same `productId` FK, but never touch a movement row, a quantity, or a
+ * COGS posting — they're here so a service or a non-stock good can share
+ * one catalog and one set of line-item affordances with real inventory,
+ * per the master spec's own grouping, not two parallel systems.
+ */
+export const productTypeEnum = pgEnum("product_type", [
+  "TRACKED_INVENTORY",
+  "NON_INVENTORY",
+  "SERVICE",
+]);
+
+/**
+ * How a `TRACKED_INVENTORY` product's unit cost is computed as purchases
+ * and sales move through it. Only `WEIGHTED_AVERAGE` is implemented this
+ * slice (`src/domain/inventory/costing.ts`) — see that module's doc
+ * comment for why FIFO is deferred rather than half-built. This is an enum
+ * (not a boolean) specifically so FIFO can be added later as a new value
+ * with no column/table restructuring, the same reasoning
+ * `ai_autonomy_level` documents for levels 3/4.
+ */
+export const inventoryCostingMethodEnum = pgEnum("inventory_costing_method", [
+  "WEIGHTED_AVERAGE",
+]);
+
+/**
+ * What caused an `inventory_movements` row. `PURCHASE` and `SALE` are the
+ * two perpetual-inventory legs — a bought or sold `TRACKED_INVENTORY` line
+ * always produces exactly one, posted (or, for `SALE`, co-posted) in the
+ * same transaction as the bill/invoice it came from. `ADJUSTMENT` is a
+ * manual correction (`InventoryAdjustmentService`) — stocktake correction,
+ * damage, shrinkage — always carrying a `reason` and its own small journal.
+ */
+export const inventoryMovementTypeEnum = pgEnum("inventory_movement_type", [
+  "PURCHASE",
+  "SALE",
+  "ADJUSTMENT",
+]);
+
+/**
+ * A sellable/purchasable catalog item (master spec §20), org-scoped and
+ * identified by `sku`. One implicit location per org — multi-warehouse/bin
+ * tracking (master spec §20's full scope) is explicitly deferred; see
+ * docs/roadmap.md. `quantityOnHand`/`averageUnitCost` are this slice's
+ * perpetual-inventory state for a `TRACKED_INVENTORY` product: the
+ * authoritative current balance, updated transactionally (under a row
+ * lock — see `InventoryService`) by every purchase/sale/adjustment, never
+ * recomputed by summing history on read. `inventory_movements` is the
+ * append-only ledger of how it got there; the Inventory Valuation report
+ * reconciles `quantityOnHand × averageUnitCost`, summed by
+ * `inventoryAssetAccountId`, against that account's own GL balance — the
+ * correctness check documented in `src/domain/inventory/valuation-service.ts`.
+ *
+ * Account wiring: `revenueAccountId` is always required (credited when an
+ * invoice line sells this product, `TRACKED_INVENTORY` or not).
+ * `NON_INVENTORY`/`SERVICE` products also require `purchaseAccountId` (the
+ * expense/asset account debited when a bill line buys this product).
+ * `TRACKED_INVENTORY` products instead require `inventoryAssetAccountId`
+ * (debited on purchase, credited on sale — never `purchaseAccountId`,
+ * which is null and unused) and `cogsAccountId` (debited, at the
+ * then-current weighted-average cost, in the SAME journal entry as the
+ * sale's revenue/tax lines — see `InvoiceService.approveAndPost`).
+ */
+export const products = pgTable("products", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  sku: text("sku").notNull(),
+  name: text("name").notNull(),
+  description: text("description"),
+  type: productTypeEnum("type").notNull(),
+  costingMethod: inventoryCostingMethodEnum("costing_method").notNull().default("WEIGHTED_AVERAGE"),
+  /** Default selling price, decimal string — a convenience the invoice-line UI may prefill; never itself authoritative over what's typed on a line. */
+  sellPrice: numeric("sell_price", { precision: 19, scale: 4 }),
+  revenueAccountId: uuid("revenue_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  /** Required for NON_INVENTORY/SERVICE, null and unused for TRACKED_INVENTORY — see this table's doc comment. */
+  purchaseAccountId: uuid("purchase_account_id").references(() => accounts.id),
+  /** Required for TRACKED_INVENTORY, null and unused otherwise. */
+  inventoryAssetAccountId: uuid("inventory_asset_account_id").references(() => accounts.id),
+  /** Required for TRACKED_INVENTORY, null and unused otherwise. */
+  cogsAccountId: uuid("cogs_account_id").references(() => accounts.id),
+  /** Current on-hand quantity, decimal string. Perpetually maintained; see this table's doc comment. Always "0" for a non-tracked product. */
+  quantityOnHand: numeric("quantity_on_hand", { precision: 19, scale: 4 }).notNull().default("0"),
+  /** Current weighted-average unit cost, decimal string. Always "0" for a non-tracked product. */
+  averageUnitCost: numeric("average_unit_cost", { precision: 19, scale: 4 }).notNull().default("0"),
+  /** Reorder alerting (master spec §21's one deterministic, non-forecasted piece — see `ReorderAlertService`). Null means "never alert" for this product. */
+  reorderPoint: numeric("reorder_point", { precision: 19, scale: 4 }),
+  /** Suggested quantity to reorder once below `reorderPoint` — informational only, no PO is auto-generated. */
+  reorderQuantity: numeric("reorder_quantity", { precision: 19, scale: 4 }),
+  preferredSupplierContactId: uuid("preferred_supplier_contact_id").references(() => contacts.id),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+  updatedById: uuid("updated_by_id"),
+}, (table) => ({
+  orgSkuUnique: uniqueIndex("products_org_sku_unique").on(table.organizationId, table.sku),
+  orgTypeIdx: index("products_org_type_idx").on(table.organizationId, table.type),
+  orgActiveIdx: index("products_org_active_idx").on(table.organizationId, table.isActive),
+  /** The exact predicate `ReorderAlertService` scans — tracked, active products with a reorder point set. */
+  orgReorderIdx: index("products_org_reorder_idx").on(table.organizationId, table.type, table.isActive),
+}));
+
+/**
+ * The append-only perpetual-inventory ledger for a `TRACKED_INVENTORY`
+ * product — one row per purchase/sale/adjustment, in the order applied.
+ * `balanceQuantityAfter`/`balanceAverageCostAfter` snapshot
+ * `products.quantityOnHand`/`averageUnitCost` immediately after this row
+ * was applied, purely for audit/debugging transparency (what was the
+ * balance right after this specific movement) — the authoritative current
+ * balance always lives on `products` itself, never recomputed by replaying
+ * this table. Exactly one of `invoiceLineId`/`billLineId`/`adjustmentId` is
+ * set, matching `movementType`. `journalEntryId` is the posted entry this
+ * movement's value is reflected in: the invoice's own entry for a SALE
+ * (the COGS/inventory-asset lines are added to it, not a separate entry),
+ * the bill's own entry for a PURCHASE (its existing expense/asset debit
+ * already lands on `inventoryAssetAccountId` once `BillService` resolves
+ * the line's account from the product — no extra lines needed), and the
+ * adjustment's own small entry for an ADJUSTMENT.
+ */
+export const inventoryMovements = pgTable("inventory_movements", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  productId: uuid("product_id")
+    .notNull()
+    .references(() => products.id),
+  movementType: inventoryMovementTypeEnum("movement_type").notNull(),
+  /** Signed decimal string: positive for a PURCHASE or an increasing ADJUSTMENT, negative for a SALE or a decreasing ADJUSTMENT. */
+  quantityDelta: numeric("quantity_delta", { precision: 19, scale: 4 }).notNull(),
+  /** The unit cost this movement was valued at: the purchase's own unit price for PURCHASE, the weighted-average cost at the moment of sale for SALE, and either the caller's stated cost (increasing) or the current weighted-average (decreasing) for ADJUSTMENT. */
+  unitCost: numeric("unit_cost", { precision: 19, scale: 4 }).notNull(),
+  /** quantityDelta × unitCost, signed — the monetary value this movement added to or removed from the inventory asset account. */
+  totalValue: numeric("total_value", { precision: 19, scale: 4 }).notNull(),
+  balanceQuantityAfter: numeric("balance_quantity_after", { precision: 19, scale: 4 }).notNull(),
+  balanceAverageCostAfter: numeric("balance_average_cost_after", { precision: 19, scale: 4 }).notNull(),
+  invoiceLineId: uuid("invoice_line_id").references((): AnyPgColumn => invoiceLines.id),
+  billLineId: uuid("bill_line_id").references((): AnyPgColumn => billLines.id),
+  adjustmentId: uuid("adjustment_id").references((): AnyPgColumn => inventoryAdjustments.id),
+  journalEntryId: uuid("journal_entry_id").references((): AnyPgColumn => journalEntries.id),
+  memo: text("memo"),
+  /** The source document's own date (invoice/bill issueDate, or the adjustment's occurredAt) — not necessarily `createdAt`, same convention as `journalEntries.postingDate`. */
+  occurredAt: timestamp("occurred_at", { withTimezone: true, mode: "date" }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+}, (table) => ({
+  orgProductIdx: index("inventory_movements_org_product_idx").on(table.organizationId, table.productId),
+  orgProductCreatedIdx: index("inventory_movements_org_product_created_idx").on(
+    table.organizationId,
+    table.productId,
+    table.createdAt,
+  ),
+}));
+
+/**
+ * A manual correction to a `TRACKED_INVENTORY` product's quantity —
+ * stocktake correction, damage, shrinkage (master spec §20's generic
+ * adjustment; a dedicated damaged-stock workflow is deferred, see
+ * docs/roadmap.md). Always carries a `reason` and always posts its own
+ * small balanced journal via `PostingService` (debiting/crediting
+ * `adjustmentAccountId` against the product's `inventoryAssetAccountId`),
+ * exactly like every other mutation in this codebase — never a direct
+ * quantity edit with no ledger effect.
+ */
+export const inventoryAdjustments = pgTable("inventory_adjustments", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  productId: uuid("product_id")
+    .notNull()
+    .references(() => products.id),
+  /** Signed decimal string: positive increases on-hand quantity, negative decreases it. */
+  quantityDelta: numeric("quantity_delta", { precision: 19, scale: 4 }).notNull(),
+  /** The unit cost this adjustment was valued at — see `inventory_movements.unitCost`'s comment. */
+  unitCost: numeric("unit_cost", { precision: 19, scale: 4 }).notNull(),
+  reason: text("reason").notNull(),
+  /** The expense/loss account (e.g. "Inventory Shrinkage") this adjustment's value is posted against — required, chosen by the person recording the adjustment. */
+  adjustmentAccountId: uuid("adjustment_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  journalEntryId: uuid("journal_entry_id").references((): AnyPgColumn => journalEntries.id),
+  occurredAt: timestamp("occurred_at", { withTimezone: true, mode: "date" }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+}, (table) => ({
+  orgProductIdx: index("inventory_adjustments_org_product_idx").on(table.organizationId, table.productId),
+}));
+
+export const productsRelations = relations(products, ({ one, many }) => ({
+  organization: one(organizations, {
+    fields: [products.organizationId],
+    references: [organizations.id],
+  }),
+  revenueAccount: one(accounts, {
+    fields: [products.revenueAccountId],
+    references: [accounts.id],
+  }),
+  preferredSupplier: one(contacts, {
+    fields: [products.preferredSupplierContactId],
+    references: [contacts.id],
+  }),
+  movements: many(inventoryMovements),
+}));
+
+export const inventoryMovementsRelations = relations(inventoryMovements, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [inventoryMovements.organizationId],
+    references: [organizations.id],
+  }),
+  product: one(products, {
+    fields: [inventoryMovements.productId],
+    references: [products.id],
+  }),
+}));
+
+export const inventoryAdjustmentsRelations = relations(inventoryAdjustments, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [inventoryAdjustments.organizationId],
+    references: [organizations.id],
+  }),
+  product: one(products, {
+    fields: [inventoryAdjustments.productId],
+    references: [products.id],
   }),
 }));
