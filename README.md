@@ -129,8 +129,22 @@ balance and Balance Sheet checks, suspense accounts — plus manual sign-offs th
 are always labelled as a person's attestation, never system verification.
 Closing is human-only: the AI Financial Controller gains a read-only
 `close_status` tool but no way to close, lock or reopen anything.
-Multi-entity consolidation and accountant practice management are later Phase 9
-slices — see `docs/roadmap.md`.
+
+Phase 9 Slice 4 adds multi-entity accounting and consolidation. A user who
+belongs to several organizations can build an *entity group* (up to 10
+entities) and view a consolidated Profit & Loss, Balance Sheet and cash
+position at `/app/groups`, with a column per entity, a combined column, an
+eliminations-and-adjustments column and the consolidated total; drill-down
+lands on each entity's own account page. Intercompany accounts are matched with
+a named counterparty and eliminated, and any mismatch is reported rather than
+forced to zero. Consolidation never weakens row-level security: it is computed
+in the application, one entity at a time, using the user's real role in each
+entity — an entity they cannot read is left out and reported as "N entities
+excluded — no access", including from the AI Financial Controller's new
+read-only `consolidated_report` tool. A topbar switcher lets a multi-company
+user jump between companies. Groups of mixed base currencies are refused (no
+translation yet). Accountant practice management is the remaining Phase 9
+slice — see `docs/roadmap.md`.
 See
 [`docs/roadmap.md`](docs/roadmap.md) for exactly what's built
 vs. explicitly deferred in each phase (a customer portal, AI-drafted

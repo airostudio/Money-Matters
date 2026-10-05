@@ -3,6 +3,7 @@ import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { MobileNav } from "./mobile-nav";
 import { UserMenu } from "./user-menu";
+import { EntitySwitcher, type SwitcherOrg } from "./entity-switcher";
 import type { MembershipRole } from "@/domain/permissions/roles";
 
 export function Topbar({
@@ -12,6 +13,7 @@ export function Topbar({
   userName,
   userEmail,
   showAdminLink = false,
+  switcherOrgs = [],
 }: {
   orgSlug: string;
   orgName: string;
@@ -19,11 +21,13 @@ export function Topbar({
   userName: string;
   userEmail: string;
   showAdminLink?: boolean;
+  switcherOrgs?: SwitcherOrg[];
 }) {
   return (
     <header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-background px-4">
       <div className="flex items-center gap-2">
         <MobileNav orgSlug={orgSlug} orgName={orgName} role={role} />
+        <EntitySwitcher currentSlug={orgSlug} orgs={switcherOrgs} />
       </div>
       <div className="flex items-center gap-3">
         <Button asChild size="sm" variant="outline">

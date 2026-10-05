@@ -683,7 +683,7 @@ a second row can't be inserted).
 
 Three new org-scoped tables, each RLS-enabled + FORCEd + a policy + a **scoped**
 `mm_app` grant; the tenant-isolation audit in `npm run db:migrate` now reports
-**67 of 74** tables.
+**67 of 74** tables (Slice 4 later added eight user-scoped tables — §2p — and the audit now reports both models).
 
 - **`fiscal_periods.status`** (existing column, extended): the
   `fiscal_period_status` enum gained `ADVISOR_LOCKED` and `TAX_LOCKED` (appended
@@ -714,6 +714,47 @@ Three new org-scoped tables, each RLS-enabled + FORCEd + a policy + a **scoped**
   refused by Postgres itself ("permission denied"), exactly like
   `platform_admin_audit_logs`, and a test connects as the real restricted role
   to prove it (it is also covered by the usual tenant-isolation tests).
+
+## 2p. Phase 9 Slice 4: entity groups (migrations `0038`, `0039`) — USER-scoped tables
+
+Eight new tables that are **not organization-scoped**: a consolidation group
+belongs to a user and spans organizations. They have no `organization_id` column
+(the member organization is `member_organization_id`) and an `owner_user_id`
+instead, and are protected by FORCEd RLS keyed on `app.current_user_id` (set by
+`withUserScope`, `src/db/user-scope.ts`) — see `docs/security.md` §12. The
+isolation audit in `npm run db:migrate` now reports
+"67 organization-scoped and 8 user-scoped tables (of 82)".
+
+- **`entity_groups`** — name, description, `archived_at` (groups are archived,
+  never deleted; no DELETE grant). Unique (owner, name) and (id, owner) — the
+  latter is the target of every child's composite FK that pins the owner.
+- **`entity_group_members`** — `member_organization_id`, `role`
+  (`PARENT`/`SUBSIDIARY`), `is_included`, `added_by_user_id`. Unique (group,
+  organization). **No ownership-percentage column**: partial ownership needs
+  non-controlling interests and is not supported. INSERT policy also requires the
+  owner be an active member of the organization.
+- **`entity_group_accounts`** — the group's own chart, unique (group, type, code).
+- **`entity_group_account_mappings`** — entity account → group account override.
+  `account_id` is a plain uuid (**no FK into the tenant `accounts` table**); code
+  and name are display snapshots. FK to the member row cascades on removal.
+- **`entity_group_intercompany_accounts`** — entity account + `kind`
+  (`intercompany_kind` enum) + counterparty organization (composite FK to the
+  group's members, so the counterparty must be in the group; cascades on
+  removal); CHECK it is not the entity itself.
+- **`entity_group_adjustments` / `entity_group_adjustment_lines`** — manual
+  group-level journals against group accounts: `kind`
+  (`ELIMINATION`/`ADJUSTMENT`), effective date, description, mandatory reason,
+  `reverses_adjustment_id` (unique: at most one reversal), lines with `debit` /
+  `credit` `numeric(19,4)` and a CHECK that a line is one-sided and non-negative.
+  **Append-only** (SELECT + INSERT). Balance (Σdebit = Σcredit) is validated in
+  `AdjustmentService` with decimal arithmetic, not by a trigger.
+- **`entity_group_audit_logs`** — append-only group-level audit trail.
+
+Migration `0038` is the generated schema (statements re-ordered so the unique
+indexes exist before the composite foreign keys that reference them); `0039` is
+hand-written RLS + grants, with no function, no `SECURITY DEFINER`, no
+`BYPASSRLS` and no multi-organization predicate (asserted by a test that reads
+the file). Test helpers truncate the new tables in `resetDatabase`.
 
 ## 3. Row-Level Security
 

@@ -41,6 +41,12 @@ export default async function AppLandingPage() {
           </Link>
         ))}
       </div>
+      <p className="mt-6 text-sm text-muted-foreground">
+        Several companies?{" "}
+        <Link href="/app/groups" className="text-primary hover:underline">
+          Consolidate them into one set of reports.
+        </Link>
+      </p>
     </div>
   );
 }

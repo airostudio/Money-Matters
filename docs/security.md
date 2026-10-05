@@ -424,3 +424,117 @@ for anyone else it is omitted (counted as hidden, excluded from the progress
 figure, and the actor cannot close a period they cannot fully see) — the same
 pattern as the cash forecast's payroll omission, and it carries through the AI
 tool.
+
+## 12. Multi-entity consolidation (Phase 9 Slice 4): RLS stays intact
+
+A consolidated report needs figures from several organizations; tenant isolation
+is one `app.current_org_id` per transaction. The tempting fixes — a multi-org
+session variable, a bypass policy, a privileged connection, a SECURITY DEFINER
+function — would each make one bug a cross-tenant leak. **None of them exists
+here, and a structural test (`src/tests/unit/consolidation/boundary.test.ts`)
+keeps it that way.**
+
+### 12.1 Application-layer consolidation
+
+`ConsolidationService` computes everything **in the application layer, one entity
+at a time**:
+
+1. one user-scoped transaction loads the group's own configuration;
+2. one query loads the user's active memberships (their real role in every
+   organization they belong to);
+3. for each included entity, in order, strictly **sequentially** (a plain `for`
+   loop; `Promise.all`/`allSettled`/`race`/`any` are structurally forbidden in the
+   module, matching the connection discipline from the Supabase session-pooler
+   incident — at most one pooled connection at a time), it builds an `Actor` from
+   **that entity's membership role** and calls the existing report service, which
+   runs inside that entity's own `withTenant(entityId)` transaction and itself
+   enforces `financial_report:read` (cash: `bank_account:read` + `journal:read`);
+4. the already-authorised results are aggregated in memory.
+
+An entity the user has no active membership in is **never touched** (no
+transaction is opened for it). A `PermissionDeniedError` from an entity excludes
+it. The output carries "N entities excluded — no access": a count, plus the name
+of an excluded entity **only when the user is still a member of it** (so the name
+is already known to them); an entity they are not a member of is never named,
+identified or described — not by id, slug, currency, or an unmatched intercompany
+row. A platform admin has no special access: a group is reachable only by its
+owner, and an organization only through a membership. Groups are capped at 10
+entities (enforced on add and again on read). Tests instrument the dependencies
+to prove one-at-a-time, only-reachable-entities, with the right role each time.
+
+### 12.2 The group tables: user-scoped RLS (same strength, different key)
+
+Group data spans organizations, so it cannot use the tenant policy. Rather than
+leave it protected only by application checks, the eight group tables are
+**user-scoped** with the same mechanism as tenant tables:
+
+- `ENABLE` + `FORCE ROW LEVEL SECURITY` on every table (the owner role is not
+  exempt either);
+- one predicate everywhere: `owner_user_id = nullif(current_setting('app.current_user_id', true), '')::uuid`,
+  set per transaction by `withUserScope(userId, …)` (`src/db/user-scope.ts`) — the
+  exact sibling of `withTenant`: **one user id per transaction, never a list**,
+  and it does **not** set `app.current_org_id`, so inside a user scope no tenant
+  table returns a row, and inside a tenant scope no group row does (tested both
+  ways);
+- the ownership key is denormalised onto every child table and enforced by
+  composite foreign keys `(group_id, owner_user_id) → entity_groups(id, owner_user_id)`,
+  so a child row can never carry a different owner than its group;
+- an INSERT into `entity_group_members`, `_account_mappings` or
+  `_intercompany_accounts` additionally requires, **in the policy itself**, that
+  the owner is an *active member* of the organization named — so even an
+  application bug cannot pull in an organization the user does not belong to
+  (tested by inserting through `withUserScope` directly);
+- the finer rule "adding an entity / mapping its account / designating it
+  intercompany requires `consolidation:manage` **in that entity**" depends on the
+  role→permission matrix, so it stays in the application layer
+  (`assertPermission` with the entity `Actor`) — Owner, Administrator and
+  Accountant hold it; READ_ONLY, Bookkeeper, Manager, … do not;
+- grants are minimal: `entity_groups` has no DELETE (groups are **archived**);
+  `entity_group_adjustments`, `_adjustment_lines` and `entity_group_audit_logs`
+  are **append-only** (SELECT + INSERT; UPDATE/DELETE refused by Postgres itself —
+  tested as the real `mm_app` role);
+- group tables carry **no foreign key into any tenant table** (entity account ids
+  are plain uuids resolved through the entity's own tenant transaction), and **no
+  `organization_id` column** (it is `member_organization_id`) so they cannot be
+  mistaken for tenant tables.
+
+Why a user key and not a group key: a `group_id` policy would need a session
+variable naming a group, which is a *capability* anyone who learns an id could set;
+`owner_user_id` is the authenticated identity the application already resolves per
+request, and the variable is exactly as narrow as the org one.
+
+### 12.3 The isolation audit covers the new model
+
+`npm run db:migrate` runs `src/db/isolation-audit.ts` (extracted from `migrate.ts`
+so the rules are unit-tested). It classifies every table as organization-scoped
+(`organization_id`) or user-scoped (`owner_user_id`) and requires, for each:
+FORCEd RLS, at least one policy, and every policy expression keyed on **that
+scope's variable and no other**. It also flags, on any table, a policy comparing a
+session setting with `ANY(...)`, `string_to_array`, `unnest`, etc. (a multi-valued
+scope). The user-scoped tables are therefore checked, not silently exempt; the
+build log reports "67 organization-scoped and 8 user-scoped tables (of 82)".
+
+### 12.4 Audit
+
+Every group mutation writes `entity_group_audit_logs` in the same transaction,
+including the user's real role in the entity where a permission was checked.
+Adding or removing an entity also writes an informational note to **that entity's
+own** audit log (`consolidation.entity_added_to_group` / `_removed_from_group`,
+metadata: the opaque group id only) as a separate, sequential transaction after
+the group commit, so an entity's owners can see their books are being
+consolidated and by whom, without learning the group's name, its other members,
+or any figure. (If that second write failed after the first committed, the group
+log still holds the authoritative record.)
+
+### 12.5 AI: no leak, by construction
+
+The `consolidated_report` Controller tool (`docs/ai-agents.md` §0h) is a thin,
+read-only wrapper over `ConsolidationService` with the user's real identity: same
+per-entity checks, same exclusion notice, no id/organization argument (only a
+report kind, a group **name**, and a date/period), no write counterpart, and
+outside every auto-execution list. The summary text it hands the model is built
+only from the already-authorised result, never names an excluded entity, and
+carries the notice. A mandatory test with real restricted-role actors (EMPLOYEE in
+one entity, no membership in another) captures every payload sent to the mocked
+model and asserts no figure, name, slug or id of an unauthorised entity appears,
+in the tool output or anywhere in the model's context or the answer path.

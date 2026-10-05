@@ -2730,9 +2730,133 @@ deferred to Phase 9 (Close)". Design detail is in `docs/accounting-engine.md`
   (a financial year is just a period), but defining fiscal-year semantics for
   retained earnings is a separate, invasive change.
 
-**Remaining Phase 9 items:** **multi-entity consolidation** (master spec §30) and
-**accountant practice management and workpapers** (§42/43) — separate later
-slices.
+**Remaining Phase 9 items:** **accountant practice management and workpapers**
+(§42/43) — a separate later slice. (Multi-entity consolidation, §30, was built
+in Slice 4 below.)
+
+## Phase 9 Slice 4 — Multi-entity accounting and consolidation — complete
+
+Master spec §30: switch company instantly, consolidated P&L / balance sheet /
+cash, intercompany accounts and eliminations, consolidation adjustments —
+"never allow data from unauthorised entities to leak through AI retrieval".
+Design detail: `docs/accounting-engine.md` §16 (mapping, eliminations, balance-
+sheet proof, currency), `docs/security.md` §12 (why RLS is untouched, the group
+tables' access model, the AI no-leak guarantee), `docs/database.md` §2p.
+
+**The central design decision: consolidation is computed in the application
+layer, one entity at a time.** There is no multi-organization session variable,
+no bypass policy, no privileged connection, no SECURITY DEFINER anywhere.
+`ConsolidationService` loops over the group's included entities **strictly
+sequentially** (plain `for`, never `Promise.all`; one pooled connection at a
+time), builds an `Actor` from the user's **real membership role in that entity**,
+calls the existing `ReportingService` / `loadCashPosition` inside that entity's
+own `withTenant` transaction (the service enforces `financial_report:read`
+itself), and aggregates the already-authorised results in memory with the pure
+engine in `src/domain/consolidation/`. An entity the user is not a member of is
+never touched; one where the role lacks the permission is excluded; the result
+says "N entities excluded — no access" and names nothing it should not.
+Groups are bounded at 10 entities.
+
+**What's built**
+- **Entity groups** — user-owned (`entity_groups`, `entity_group_members`,
+  `entity_group_accounts`, `entity_group_account_mappings`,
+  `entity_group_intercompany_accounts`, `entity_group_adjustments` +
+  `_lines`, `entity_group_audit_logs`; migrations `0038`, `0039`). Eight
+  **user-scoped** tables protected by FORCEd RLS keyed on
+  `owner_user_id = app.current_user_id`, set per transaction by the new narrow
+  wrapper `withUserScope` (`src/db/user-scope.ts`) — the exact sibling of
+  `withTenant`. An INSERT policy also requires the owner to be an *active
+  member* of the organization being added, so even application bugs cannot pull
+  in an organization the user is not in. Adding an entity additionally needs
+  `consolidation:manage` **in that entity** (new permission; Owner,
+  Administrator, Accountant) — a READ_ONLY member cannot add it.
+- **Isolation audit extended** (`src/db/isolation-audit.ts`, extracted from
+  `migrate.ts` so it is unit-testable): classifies tables as organization-scoped
+  (`organization_id`) or user-scoped (`owner_user_id`), requires FORCEd RLS and a
+  policy keyed on *that scope's single variable only*, forbids a policy mixing
+  the two, and flags any multi-valued predicate (`ANY(...)`, `string_to_array`,
+  …) against a session setting on any table. The group tables deliberately have
+  no `organization_id` column (`member_organization_id`) so they cannot be
+  mistaken for tenant tables.
+- **Entity switcher** — none existed beyond the post-login chooser. The
+  `[orgSlug]` layout already loaded the user's membership; one
+  `listMembershipsForUser` query now feeds a topbar dropdown
+  (`EntitySwitcher`, hidden with a single membership) plus links to "Entity
+  groups". Switching is a plain link: the target organization resolves the
+  user's role there for itself.
+- **Consolidated Profit & Loss, Balance Sheet, cash position** — `/app/groups/[id]/reports/*`.
+  Per-entity columns, a Combined column, an "Elim. & adj." column and the
+  Consolidated column; each line expands to the entity accounts it came from,
+  linking to *that entity's* account-transactions page (which re-checks
+  permission itself). The Balance Sheet check (Assets = Liabilities + Equity) is
+  evaluated for every column — each entity, combined, adjustments, consolidated.
+  Reuses `ReportingService` output; no ledger logic is re-derived.
+- **Account mapping** — a per-group chart of accounts; the first entity added
+  seeds it. An entity account reports under the group account with the **same
+  type and code**, unless the user maps it elsewhere (type must match); no match
+  → an explicit **Unmapped** bucket that is still counted.
+- **Intercompany & eliminations** — designate an entity account as
+  receivable / payable / loan receivable / loan payable / revenue / expense with
+  a named counterparty entity (also a group member). Matched amounts are
+  eliminated **in memory**; only `min(creditor, debtor)` is eliminated, so
+  sheets stay exactly balanced while a mismatch, one-sided balance or
+  unavailable counterparty is listed in the reconciliation (amount in each
+  entity's books, difference) and left in the totals — never forced to zero.
+- **Manual consolidation adjustments** — group-level, balanced, append-only
+  (`mm_app`: SELECT + INSERT), reversed only by a new mirror row, with a mandatory
+  reason; never `journal_entries` of any entity (proved: entity ledgers, trial
+  balances and audit logs byte-identical before/after).
+- **Audit** — every group mutation writes the group-level audit log in the same
+  transaction (with the user's real role in the entity where a permission was
+  checked). Adding/removing an entity also leaves an informational note in that
+  entity's *own* audit log containing only the opaque group id and the actor —
+  never the group's name, its other entities or any figure.
+- **AI** — read-only `consolidated_report` Controller tool (P&L / Balance Sheet /
+  cash for one of the user's groups) using the same per-entity checks; no write
+  tool; the autonomy/auto-execution exclusions are untouched. Test with real
+  restricted-role actors proves nothing from an unauthorised entity reaches the
+  model or the answer path.
+- **Currency** — single-base-currency groups only; mixed currencies are refused
+  with "These entities have different base currencies: AUD, NZD — currency
+  translation is not yet supported". There is no tested exchange-rate mechanism
+  in the codebase (`exchange_rates` is an unused table), and inventing rates is
+  not acceptable. The refusal considers only entities the user can access, so it
+  can never reveal an unauthorised entity's currency.
+- Tests: engine unit tests (mapping incl. unmapped bucket, matched / mismatched /
+  one-sided / unavailable eliminations, exact decimals, adjustments, balance
+  after eliminations, refusal message, cap), a structural boundary test
+  (no raw `db`/`pg`/session variables/`Promise.all` in consolidation; the
+  migration adds no bypass), isolation-audit unit + real-database tests, and
+  integration tests with a user who is OWNER in A, ACCOUNTANT in B, READ_ONLY in
+  C and not a member of D (hand-verified numbers; exclusions; add rules;
+  other-user isolation at service and database level; append-only history;
+  sequential instrumentation; platform admin has no special access; AI no-leak).
+
+**Dashboard widget — not built, on purpose.** A group headline is N entities ×
+several queries on N pooled connections; that does not belong on a home page
+that renders on every visit. Consolidated reporting is an on-demand page, and
+the existing connection discipline (one connection at a time) is preserved.
+
+**Explicitly deferred (and why)**
+- **Posting elimination journals into entity ledgers**, and **auto-mirrored
+  intercompany invoices/loans** (a bill in A creating an invoice in B): both are
+  cross-tenant *writes*, which would require a session that can write to two
+  organizations — exactly the isolation boundary this design refuses to weaken.
+  Each entity records its own side normally and consolidation reconciles them.
+- **Non-controlling interests / partial ownership**: needs NCI equity and profit
+  attribution; not tractable to do half-correctly, so the group model is 100%
+  owned subsidiaries only and has no ownership column. Investment-in-subsidiary
+  vs. subsidiary equity is not auto-eliminated (it needs acquisition-date
+  accounting); record it as a manual adjustment.
+- **Mixed-currency translation** (closing/average rates, translation reserve):
+  no verified rate mechanism exists; mixed groups are refused, not guessed.
+- **Consolidated budgets, group-level month-end close, group-level payroll,
+  scheduled consolidation snapshots** (no job queue), **group trial balance**
+  (derivable from the entity trial balances; not required by the brief),
+  **comparison periods** on consolidated reports, and **sharing a group** with a
+  second user (a group is private to its owner).
+
+**Remaining Phase 9 item:** accountant practice management and workpapers (§42/43).
 
 ## Platform admin & seat limit — complete
 

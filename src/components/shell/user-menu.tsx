@@ -3,7 +3,7 @@
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { signOut } from "next-auth/react";
 import Link from "next/link";
-import { LogOut, ShieldCheck } from "lucide-react";
+import { Layers, LogOut, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export function UserMenu({
@@ -41,6 +41,14 @@ export function UserMenu({
             <p className="truncate text-xs text-muted-foreground">{email}</p>
           </div>
           <DropdownMenu.Separator className="my-1 h-px bg-border" />
+          <DropdownMenu.Item asChild>
+            <Link
+              href="/app/groups"
+              className="flex cursor-pointer items-center gap-2 rounded-sm px-3 py-2 text-sm outline-none hover:bg-accent"
+            >
+              <Layers className="size-4" /> Entity groups
+            </Link>
+          </DropdownMenu.Item>
           {showAdminLink && (
             <DropdownMenu.Item asChild>
               <Link

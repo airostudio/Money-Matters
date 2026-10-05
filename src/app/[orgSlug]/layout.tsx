@@ -32,9 +32,16 @@ export default async function OrgLayout({
   const membership = await OrganizationService.getMembership(user.id, org.id);
   if (!membership) notFound();
 
+  // One membership query feeds the company switcher (no per-organization lookups).
+  const memberships = await OrganizationService.listMembershipsForUser(user.id);
+  const switcherOrgs = memberships
+    .map((m) => ({ slug: m.organization.slug, name: m.organization.name, role: m.role }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
   return (
     <DashboardShell
       orgSlug={org.slug}
+      switcherOrgs={switcherOrgs}
       orgName={org.name}
       role={membership.role}
       userName={user.name}

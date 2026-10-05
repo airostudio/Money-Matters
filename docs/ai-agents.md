@@ -612,6 +612,48 @@ without an `ANTHROPIC_API_KEY` or on failure. It is opt-in per page load
 (`?summary=1`). As elsewhere, the real Anthropic API is only exercised through a
 mocked SDK in tests.
 
+## 0h. Tenth integration: the read-only `consolidated_report` tool (Phase 9 Slice 4)
+
+Master spec §30: "Never allow data from unauthorised entities to leak through AI
+retrieval." This is the first tool whose answer can span organizations, so it is
+built so that the only way it can run is the existing permission-parity path,
+once per entity.
+
+**`consolidated_report` (a Financial Controller read tool).** Arguments: a report
+kind (`PROFIT_AND_LOSS`, `BALANCE_SHEET`, `CASH`), an optional group **name** (the
+user's own groups; it asks which one when several exist and none is named), and a
+period / as-of date. There is deliberately **no organization id, account id or
+group id argument** — the model cannot name an entity. It first applies the same
+`financial_report:read` gate as every other report tool in the organization being
+chatted in, then calls `ConsolidationService`, which for each group entity — in
+sequence, one connection at a time — builds an `Actor` from the user's real
+membership role **in that entity** and lets `ReportingService` (or the cash
+position) enforce its permission. An entity with no membership is never queried;
+one without the permission is excluded. The result text (`consolidatedSummary`)
+carries the exclusion notice ("N entities excluded — no access"), tells the model
+to repeat it and never guess at excluded entities, names only the included
+entities, and flags unmatched intercompany balances and unmapped accounts rather
+than presenting totals as final. Mixed base currencies return the specific refusal.
+It is offered to the general Controller (read tools are all offered there);
+citations name the group and period like every other tool's.
+
+**No write path, and the autonomy exclusions are untouched.** There is no tool to
+create or change a group, mapping, designation or adjustment; a model that asks
+for one gets "Unknown tool". The write-tool registry still contains only
+`prepare_draft_*` tools, and nothing consolidation-related is in the
+auto-execution allowlist (both asserted).
+
+**The leak test (mandatory, `src/tests/integration/consolidation/ai-tool.test.ts`).**
+With a real restricted-role actor in one entity (EMPLOYEE — no
+`financial_report:read`) and no membership in another, the tool's output for each
+of cash / balance sheet / P&L contains no figure, name, slug or id of either
+entity (the distinctive 99,999.00 and 7,000.00 balances are asserted absent); a
+user restricted everywhere except one entity sees only that entity and a
+"3 entities excluded" count; and an end-to-end run with a mocked Anthropic SDK
+captures every request payload sent to the model plus the final answer and
+asserts none of it contains unauthorised data. As elsewhere the real Anthropic
+API is only exercised through the mocked SDK.
+
 ## 1. Why this belongs in the Phase 1 docs
 
 The single most important constraint on the AI layer is: **it must never see

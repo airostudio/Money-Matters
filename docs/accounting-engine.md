@@ -792,3 +792,124 @@ items reads 100.
 — revocation is audited), `period_lock_events` (**SELECT/INSERT only**), all
 RLS-enabled + FORCEd with a tenant policy. `journal_entries` gained
 `lock_override_level`/`lock_override_reason`. See `docs/database.md` §2o.
+
+## 16. Phase 9 Slice 4 — multi-entity consolidation (master spec §30)
+
+Consolidation is **read-only, computed live, never stored, and never posts
+anything**. The per-entity statements are the existing `ReportingService`
+outputs (P&L, Balance Sheet) and `loadCashPosition`, fetched one entity at a
+time with the user's real role in each (`docs/security.md` §12); the pure engine
+in `src/domain/consolidation/` (`account-mapping.ts`, `eliminations.ts`,
+`consolidate.ts`) then aggregates them in memory with `src/domain/money`
+decimals only. It re-derives no ledger logic — a consolidated line is a sum of
+amounts an entity's own report already produced.
+
+### 16a. Account mapping (charts of accounts do not align on their own)
+
+A consolidated line is a **group account**: a row of the group's own chart
+(`entity_group_accounts`, keyed `(type, code)`). The first entity added seeds the
+chart from its accounts; the user can add more. Each entity account resolves, in
+order:
+
+1. an **explicit mapping** (entity account → group account) set by the user —
+   valid only if the group account's type equals the account's type (a stale
+   cross-type mapping resolves to *unmapped*, never to a wrong line);
+2. the **default rule**: the group account with the **same type and the same
+   code** (type is part of the key: code 1500 as an asset in A and as an expense
+   in B are different lines);
+3. otherwise **Unmapped**: an explicit "Unmapped assets / liabilities / equity /
+   revenue / expenses" bucket per section, listing each source account, **included
+   in every total** and flagged with a link to the mapping screen. Nothing is
+   dropped; nothing is silently merged.
+
+Why not "match by name": names are free text and drift ("Sales" / "Revenue —
+Sales"); code+type is the one stable, user-visible key the chart already has,
+and the explicit mapping covers everything it cannot. The two computed Balance
+Sheet earnings lines are recognised by their labels (exported constants in
+`financial-statements.ts`, covered by a drift test) and consolidated as their own
+lines.
+
+### 16b. Intercompany eliminations
+
+A user designates entity accounts as intercompany with a **named counterparty
+entity** (which must be in the group) and a kind, whose side is fixed:
+
+| kind | account type | side |
+|---|---|---|
+| RECEIVABLE / LOAN_RECEIVABLE / REVENUE | asset / asset / revenue | creditor |
+| PAYABLE / LOAN_PAYABLE / EXPENSE | liability / liability / expense | debtor |
+
+For every ordered pair (creditor entity A, debtor entity B) and category (TRADE,
+LOAN, INCOME_EXPENSE), side A is the sum of A's accounts designated as the
+creditor kind naming B, and side B is the sum of B's accounts designated as the
+debtor kind naming A — normal-signed. **Only the matched part, `min(A, B)` when
+both are positive, is eliminated, equally from both sides.** Because exactly the
+same amount leaves assets and liabilities (or revenue and expense), every
+consolidated statement still balances exactly; and because only the matched part
+leaves, a real discrepancy is never forced to net to zero. The reconciliation
+list reports, per pair: the creditor's amount, the debtor's amount, the amount
+eliminated, the difference, and a status — `MATCHED`, `MISMATCH`, `ONE_SIDED`
+(one side has no balance/designation), or `COUNTERPARTY_UNAVAILABLE` (the other
+entity is not in this report because the user has no access; it is not named).
+With several designated accounts on a side the matched amount is allocated across
+the positive balances in code order, so the elimination journal names exactly
+what it reduced.
+
+Eliminations are **computed presentation entries**: shown in the "Elim. & adj."
+column and as Dr/Cr entries on the page, stored nowhere, posted nowhere.
+Balance-sheet pairs (trade, loan) are evaluated in the Balance Sheet; revenue/
+expense pairs in the P&L (net profit is unchanged by a matched elimination).
+Posting an elimination into an entity's ledger would be a cross-tenant write and
+is explicitly out of scope; auto-mirrored intercompany invoices/loans likewise.
+Each entity records its own side normally.
+
+### 16c. Manual consolidation adjustments
+
+Group-level, **append-only** journals (`entity_group_adjustments` + `_lines`,
+`mm_app` SELECT+INSERT only) against **group accounts**, with an effective date,
+a description and a mandatory reason. Every adjustment must balance exactly
+(decimal arithmetic, ≤ 4 dp). They are undone only by a new mirror-image row
+(`reverses_adjustment_id`, at most one reversal, a reversal cannot be reversed).
+In the Balance Sheet an adjustment on an asset/liability/equity account moves
+that line from its effective date onwards; one on a revenue/expense account
+changes *earnings* — current-year earnings if dated in the report's calendar
+year, retained earnings (prior periods) before it (the same calendar-year
+convention as §8b). In the P&L only adjustments dated inside the period apply.
+They never touch any entity's `journal_entries`, trial balance or audit log
+(asserted byte-for-byte). A group-level investment-in-subsidiary vs. equity
+elimination is done as one of these; it is not automatic (it needs
+acquisition-date accounting for goodwill and pre-acquisition reserves).
+
+### 16d. The Balance Sheet proof
+
+Each column of the consolidated Balance Sheet is checked independently:
+`Assets − (Liabilities + Equity)` for **every entity**, for **Combined**, for the
+**adjustments** column and for **Consolidated**. Entity columns balance because
+each entity's own report does; Combined is their sum; an elimination removes the
+same amount from both sides of the equation; a balanced adjustment contributes
+`Σ(debit − credit) = 0` across asset, liability, equity and earnings lines
+(P&L-account lines are carried into the earnings equity lines as
+`credit − debit`). Hence Consolidated balances exactly, and the page shows the
+same ✓/✗ banner as a single entity. Mismatched intercompany balances do **not**
+break it — the unmatched remainder simply stays in the consolidated figures on
+its own side, because both sides were reduced by the same (matched) amount.
+
+### 16e. Currency — single base currency only
+
+`organizations.base_currency` is per entity and every journal line carries a
+base-currency amount, but there is **no tested translation mechanism**: the
+`exchange_rates` table is not read or written by any service. So a group whose
+reportable entities have different base currencies is **refused**:
+"These entities have different base currencies: AUD, NZD — currency translation
+is not yet supported." Translation (closing rate for the balance sheet, average
+rate for the P&L, the difference to a translation reserve line) is deferred
+rather than built on invented rates. The check looks only at entities the user
+can access, so it can never disclose an excluded entity's currency.
+
+### 16f. Cost model
+
+One user-scoped transaction for the group's configuration, one membership query,
+then per entity one tenant transaction per statement (P&L, Balance Sheet; two
+for cash), strictly sequential and capped at 10 entities — which is why there is
+no always-on dashboard widget (an N-entity headline on a home page would hold N
+connections' worth of work on every visit).
