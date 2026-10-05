@@ -253,6 +253,20 @@
       "when": 1791264538240,
       "tag": "0035_platform_admin_and_seat_limit",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1791350938240,
+      "tag": "0036_close_slice3_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1791350938241,
+      "tag": "0037_close_slice3_row_level_security",
+      "breakpoints": true
     }
   ]
 }

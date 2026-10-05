@@ -48,7 +48,7 @@ export const AGENT_MODES: Record<AgentMode, AgentModeDefinition> = {
     id: "BOOKKEEPING",
     label: "Bookkeeping",
     description: "Day-to-day ledger questions: balances, trial balance, and specific transaction lookups.",
-    readToolNames: ["trial_balance", "find_invoice", "find_bill", "find_expense_claim", "run_report"],
+    readToolNames: ["trial_balance", "find_invoice", "find_bill", "find_expense_claim", "run_report", "close_status"],
     writeToolNames: ["prepare_draft_journal_entry"],
     systemPromptAddendum:
       "You are specialized in bookkeeping: account balances, the trial balance, and finding specific transactions. " +

@@ -17,6 +17,9 @@ import { formatDateParam } from "@/domain/reporting/period-presets";
 import { Money } from "@/domain/money/money";
 import { describeUnscheduledKnown } from "@/domain/forecasting/forecast-summary";
 import { CashForecastService } from "@/domain/forecasting/cash-forecast-service";
+import { CloseChecklistService } from "@/domain/close/checklist-service";
+import { checklistFacts } from "@/domain/close/checklist-summary";
+import { monthKey, previousMonth } from "@/domain/close/period-ref";
 import { FORECAST_HORIZONS, type CashForecast, type ForecastLine, type KnownForecastLine } from "@/domain/forecasting/types";
 
 /**
@@ -281,6 +284,38 @@ export function buildControllerTools(dimensions: DimensionWithValues[]): Control
               description: "Cash Forecast",
               periodLabel: `${horizon} from ${f.asOf}`,
               drillDownHref: `/forecasting/cash-flow?horizon=${horizon}&asOf=${f.asOf}`,
+            },
+          };
+        }),
+    },
+    {
+      name: "close_status",
+      description:
+        "Read-only status of a month-end close: how complete it is, what is blocking it, what needs attention, and which items still await a person's sign-off. " +
+        "Use for 'is last month ready to close?', 'what is left before we close March?'. Defaults to the previous calendar month. " +
+        "You can only REPORT status — you can never close, lock, reopen or sign off a period; closing is always done by a human in the application. " +
+        "Items signed off by a person are not system-verified: say which is which.",
+      inputSchema: {
+        type: "object",
+        properties: { month: { type: "string", description: "YYYY-MM, defaults to the previous month." } },
+      },
+      argsSchema: z.object({ month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional() }),
+      permission: "close_checklist:read",
+      execute: (actor, rawArgs) =>
+        guarded(async () => {
+          const args = z.object({ month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional() }).parse(rawArgs);
+          const now = new Date();
+          const prev = previousMonth(now.getUTCFullYear(), now.getUTCMonth() + 1);
+          const key = args.month ?? monthKey(prev.year, prev.month);
+          const checklist = await CloseChecklistService.compute(actor, key);
+          return {
+            ok: true,
+            summary: checklistFacts(checklist).join("\n"),
+            citation: {
+              tool: "close_status",
+              description: "Month-end close status",
+              periodLabel: key,
+              drillDownHref: `/accounting/close/${key}`,
             },
           };
         }),

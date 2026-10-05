@@ -58,10 +58,31 @@ export const accountTypeEnum = pgEnum("account_type", [
   "EXPENSE",
 ]);
 
+/**
+ * The period LOCK LEVEL (master spec §41) — the one lock concept; there is
+ * deliberately no parallel "closed" flag. Severity order (see
+ * `src/domain/ledger/period-lock.ts`, whose `LOCK_RANK` is the only place the
+ * order lives — Postgres enum order is creation order, not severity):
+ * OPEN < SOFT_LOCKED < ADVISOR_LOCKED < TAX_LOCKED < HARD_LOCKED. The two
+ * middle values were added in Phase 9 Slice 3 (appended, since an enum value
+ * can't be inserted retroactively without a rewrite).
+ */
 export const fiscalPeriodStatusEnum = pgEnum("fiscal_period_status", [
   "OPEN",
   "SOFT_LOCKED",
   "HARD_LOCKED",
+  "ADVISOR_LOCKED",
+  "TAX_LOCKED",
+]);
+
+export const periodCloseStatusEnum = pgEnum("period_close_status", ["NOT_STARTED", "IN_PROGRESS", "CLOSED"]);
+
+export const periodLockEventTypeEnum = pgEnum("period_lock_event_type", [
+  "LOCKED",
+  "LEVEL_LOWERED",
+  "REOPENED",
+  "POSTING_OVERRIDE",
+  "MIGRATED",
 ]);
 
 export const contactKindEnum = pgEnum("contact_kind", ["CUSTOMER", "SUPPLIER", "BOTH"]);
@@ -609,6 +630,16 @@ export const journalEntries = pgTable("journal_entries", {
   updatedById: uuid("updated_by_id"),
   postedAt: timestamp("posted_at", { withTimezone: true }),
   postedById: uuid("posted_by_id"),
+  /**
+   * Set only when this entry was posted into a locked period under an
+   * authorised, audited override (Phase 9 Slice 3, master spec §41/§77): the
+   * lock level that was overridden and the free-text reason. SOFT_LOCKED
+   * overrides always carry a reason; an ADVISOR_LOCKED posting by an
+   * accountant-level role records the level with no reason. Null for every
+   * ordinary posting.
+   */
+  lockOverrideLevel: fiscalPeriodStatusEnum("lock_override_level"),
+  lockOverrideReason: text("lock_override_reason"),
 }, (table) => ({
   orgEntryNumberUnique: uniqueIndex("journal_entries_org_entry_number_unique").on(
     table.organizationId,
@@ -3983,4 +4014,95 @@ export const scenariosRelations = relations(scenarios, ({ one }) => ({
     fields: [scenarios.organizationId],
     references: [organizations.id],
   }),
+}));
+
+/**
+ * Month-end close cycle (Phase 9 Slice 3, master spec §40). One row per
+ * (period, cycle): the first close attempt is cycle 1; every REOPEN starts a
+ * fresh cycle (IN_PROGRESS), so the CLOSED row of an earlier cycle is never
+ * mutated again — it is the durable record of that close, including the
+ * checklist snapshot taken at the moment of closing. Manual sign-offs belong
+ * to a cycle (`close_signoffs`), so a reopened period must be re-reviewed.
+ * Automatic checks are NEVER stored here — they are recomputed live on every
+ * view (see `CloseChecklistService`).
+ */
+export const periodCloses = pgTable("period_closes", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  fiscalPeriodId: uuid("fiscal_period_id")
+    .notNull()
+    .references(() => fiscalPeriods.id, { onDelete: "cascade" }),
+  cycle: integer("cycle").notNull().default(1),
+  status: periodCloseStatusEnum("status").notNull().default("IN_PROGRESS"),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+  startedById: uuid("started_by_id"),
+  closedAt: timestamp("closed_at", { withTimezone: true }),
+  closedById: uuid("closed_by_id"),
+  /** The lock level the close applied (null until CLOSED). */
+  lockLevelApplied: fiscalPeriodStatusEnum("lock_level_applied"),
+  /** How many ATTENTION items the closer explicitly acknowledged. */
+  acknowledgedAttentionCount: integer("acknowledged_attention_count").notNull().default(0),
+  /** The full checklist result at the moment of closing. */
+  checklistSnapshot: jsonb("checklist_snapshot"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  periodCycleUnique: uniqueIndex("period_closes_period_cycle_unique").on(table.fiscalPeriodId, table.cycle),
+  orgPeriodIdx: index("period_closes_org_period_idx").on(table.organizationId, table.fiscalPeriodId),
+}));
+
+/**
+ * A human's explicit sign-off on a MANUAL checklist item (accruals,
+ * prepayments, tax review, ...) for one close cycle — identity and
+ * timestamp recorded, never presented as system verification. One per
+ * (cycle, check); revoking deletes the row and is audited in `audit_logs`.
+ */
+export const closeSignoffs = pgTable("close_signoffs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  periodCloseId: uuid("period_close_id")
+    .notNull()
+    .references(() => periodCloses.id, { onDelete: "cascade" }),
+  checkKey: text("check_key").notNull(),
+  signedById: uuid("signed_by_id").notNull(),
+  signedByName: text("signed_by_name"),
+  signedAt: timestamp("signed_at", { withTimezone: true }).notNull().defaultNow(),
+  note: text("note"),
+}, (table) => ({
+  cycleCheckUnique: uniqueIndex("close_signoffs_cycle_check_unique").on(table.periodCloseId, table.checkKey),
+}));
+
+/**
+ * APPEND-ONLY history of every lock change on a period (who, when, why,
+ * before/after level) and of every posting override. `mm_app` is granted
+ * INSERT and SELECT only — no UPDATE/DELETE/TRUNCATE — the same
+ * database-level guarantee as `platform_admin_audit_logs`
+ * (drizzle/0037_close_slice3_row_level_security.sql, verified by a test that
+ * connects as the real restricted role).
+ */
+export const periodLockEvents = pgTable("period_lock_events", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  fiscalPeriodId: uuid("fiscal_period_id")
+    .notNull()
+    .references(() => fiscalPeriods.id, { onDelete: "cascade" }),
+  periodCloseId: uuid("period_close_id").references(() => periodCloses.id, { onDelete: "set null" }),
+  eventType: periodLockEventTypeEnum("event_type").notNull(),
+  fromLevel: fiscalPeriodStatusEnum("from_level").notNull(),
+  toLevel: fiscalPeriodStatusEnum("to_level").notNull(),
+  reason: text("reason").notNull(),
+  /** Free text the actor typed to acknowledge a consequence (e.g. TAX_LOCKED: "may invalidate a lodgement"). */
+  acknowledgement: text("acknowledgement"),
+  actorUserId: uuid("actor_user_id"),
+  actorRole: text("actor_role"),
+  journalEntryId: uuid("journal_entry_id"),
+  metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  orgPeriodIdx: index("period_lock_events_org_period_idx").on(table.organizationId, table.fiscalPeriodId, table.createdAt),
 }));

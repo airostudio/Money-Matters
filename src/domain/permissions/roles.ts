@@ -80,6 +80,22 @@ export const PERMISSIONS = [
   "forecast:manage",
   "scenario:read",
   "scenario:manage",
+  // Phase 9 Slice 3 (month-end close + period locking, master spec §40/§41).
+  // `period:close` raises a period's lock level (and closes it);
+  // `period:reopen` lowers a SOFT/ADVISOR lock; `period:reopen_hard` is the
+  // most restricted — only it can lower a TAX_LOCKED/HARD_LOCKED period.
+  // `period:override_soft` lets a holder post into a SOFT_LOCKED period with
+  // an audited reason; `period:post_advisor_locked` lets the accountant keep
+  // posting adjustments into an ADVISOR_LOCKED one. None of these is
+  // reachable by any AI path (fiscal period close is a permanently
+  // human-gated critical action — docs/ai-agents.md).
+  "period:close",
+  "period:reopen",
+  "period:reopen_hard",
+  "period:override_soft",
+  "period:post_advisor_locked",
+  "close_checklist:read",
+  "close_checklist:manage",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -171,6 +187,12 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "forecast:manage",
     "scenario:read",
     "scenario:manage",
+    "period:close",
+    "period:reopen",
+    "period:override_soft",
+    "period:post_advisor_locked",
+    "close_checklist:read",
+    "close_checklist:manage",
   ]),
   BOOKKEEPER: new Set<Permission>([
     "account:read",
@@ -235,6 +257,9 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "forecast:manage",
     "scenario:read",
     "scenario:manage",
+    // Sees the close checklist (it is how a bookkeeper learns what is still
+    // outstanding) but cannot sign items off, close, or reopen.
+    "close_checklist:read",
   ]),
   ACCOUNTS_RECEIVABLE: new Set<Permission>([
     "account:read",
@@ -351,6 +376,7 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "budget:read",
     "forecast:read",
     "scenario:read",
+    "close_checklist:read",
   ]),
   EMPLOYEE: new Set<Permission>([
     "expense_claim:read",
@@ -387,6 +413,7 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "budget:read",
     "forecast:read",
     "scenario:read",
+    "close_checklist:read",
   ]),
 };
 

@@ -1,4 +1,4 @@
-import { and, eq, inArray, lte, gte } from "drizzle-orm";
+import { and, eq, inArray, lte, sql } from "drizzle-orm";
 import Decimal from "decimal.js";
 import {
   accounts,
@@ -8,6 +8,7 @@ import {
   journalLineDimensions,
   journalLines,
   organizations,
+  periodLockEvents,
 } from "@/db/schema";
 import { withTenant, type TenantDb } from "@/db/tenant";
 import { Money } from "@/domain/money/money";
@@ -21,6 +22,7 @@ import {
   PeriodLockedError,
   UnbalancedJournalError,
 } from "./errors";
+import { evaluatePosting, LOCK_RANK, type LockLevel, type PostingDecision } from "./period-lock";
 import type { JournalEntryDraft, JournalLineDraft, PostedJournalResult } from "./types";
 
 interface PreparedLine {
@@ -122,26 +124,117 @@ function assertBalanced(lines: PreparedLine[], baseCurrency: string) {
   }
 }
 
-async function findFiscalPeriod(tx: TenantDb, organizationId: string, postingDate: Date) {
-  const [period] = await tx
+type FiscalPeriodRow = typeof fiscalPeriods.$inferSelect;
+
+/**
+ * The period governing `postingDate` — ONE query. Periods may overlap (an
+ * annual FY period with monthly close periods inside it), so every covering
+ * period is read and the MOST RESTRICTIVE one governs (ties: the narrowest),
+ * which means a lock on any covering period can never be bypassed by a more
+ * permissive overlapping one.
+ *
+ * The end date is inclusive of its WHOLE UTC day: periods store their end as
+ * a date at midnight, and a posting dated later that same day (e.g. a
+ * reversal defaulting to `new Date()`) must not escape the lock.
+ */
+export async function findFiscalPeriod(tx: TenantDb, organizationId: string, postingDate: Date) {
+  const rows = await tx
     .select()
     .from(fiscalPeriods)
     .where(
       and(
         eq(fiscalPeriods.organizationId, organizationId),
         lte(fiscalPeriods.startDate, postingDate),
-        gte(fiscalPeriods.endDate, postingDate),
+        sql`(date_trunc('day', ${fiscalPeriods.endDate} AT TIME ZONE 'UTC') + interval '1 day') > (${postingDate.toISOString()}::timestamptz AT TIME ZONE 'UTC')`,
       ),
     );
-  return period ?? null;
+  return pickGoverningPeriod(rows);
 }
 
-async function assertPeriodOpenForDate(tx: TenantDb, organizationId: string, postingDate: Date) {
-  const period = await findFiscalPeriod(tx, organizationId, postingDate);
-  if (period && period.status !== "OPEN") {
-    throw new PeriodLockedError(period.label);
+export function pickGoverningPeriod(rows: FiscalPeriodRow[]): FiscalPeriodRow | null {
+  let best: FiscalPeriodRow | null = null;
+  for (const row of rows) {
+    if (!best) {
+      best = row;
+      continue;
+    }
+    const rankDiff = LOCK_RANK[row.status as LockLevel] - LOCK_RANK[best.status as LockLevel];
+    const spanRow = row.endDate.getTime() - row.startDate.getTime();
+    const spanBest = best.endDate.getTime() - best.startDate.getTime();
+    if (rankDiff > 0 || (rankDiff === 0 && spanRow < spanBest)) best = row;
   }
-  return period;
+  return best;
+}
+
+/** Options on any posting call. The only client-influenced input is the free-text reason; authorisation is by the actor's server-side role. */
+export interface PostOptions {
+  /** A reason for posting inline into a SOFT_LOCKED period (or a note for an ADVISOR_LOCKED one). */
+  lockOverrideReason?: string;
+}
+
+/**
+ * The closed-period rejection — runs INSIDE the posting transaction, one
+ * query, before anything is written, so a rejected posting leaves no rows
+ * behind. Returns the governing period and, when the posting is allowed only
+ * because of an authorised override, the decision that must be recorded.
+ */
+async function assertPeriodPostableForDate(
+  tx: TenantDb,
+  actor: Actor,
+  postingDate: Date,
+  options: PostOptions | undefined,
+): Promise<{ period: FiscalPeriodRow | null; decision: Extract<PostingDecision, { allowed: true }> | null }> {
+  const period = await findFiscalPeriod(tx, actor.organizationId, postingDate);
+  if (!period) return { period, decision: null };
+  const level = period.status as LockLevel;
+  const decision = evaluatePosting({
+    level,
+    role: actor.role,
+    actorType: actor.type,
+    overrideReason: options?.lockOverrideReason,
+  });
+  if (!decision.allowed) {
+    throw new PeriodLockedError(period.label, {
+      lockLevel: level,
+      denialCode: decision.code,
+      canOverrideWithReason: decision.canOverrideWithReason,
+    });
+  }
+  return { period, decision: decision.overrideLevel ? decision : null };
+}
+
+/** The append-only history row + audit entry for a posting made under a lock override. */
+async function recordPostingOverride(
+  tx: TenantDb,
+  actor: Actor,
+  period: FiscalPeriodRow,
+  decision: Extract<PostingDecision, { allowed: true }>,
+  entry: { id: string; entryNumber: string },
+) {
+  const level = decision.overrideLevel as LockLevel;
+  await tx.insert(periodLockEvents).values({
+    organizationId: actor.organizationId,
+    fiscalPeriodId: period.id,
+    eventType: "POSTING_OVERRIDE",
+    fromLevel: level,
+    toLevel: level,
+    reason: decision.overrideReason ?? `Posted by ${actor.role} while the period was ${level}.`,
+    actorUserId: actor.userId,
+    actorRole: actor.role,
+    journalEntryId: entry.id,
+    metadata: { entryNumber: entry.entryNumber, periodLabel: period.label },
+  });
+  await AuditService.record(tx, actor, {
+    action: "journal.posted_under_lock",
+    entityType: "JournalEntry",
+    entityId: entry.id,
+    after: {
+      entryNumber: entry.entryNumber,
+      lockLevel: level,
+      reason: decision.overrideReason,
+      periodLabel: period.label,
+    },
+  });
 }
 
 async function insertEntryWithLines(
@@ -149,7 +242,7 @@ async function insertEntryWithLines(
   actor: Actor,
   draft: JournalEntryDraft,
   status: "DRAFT" | "POSTED",
-  extra: { reversalOfId?: string } = {},
+  extra: { reversalOfId?: string; options?: PostOptions } = {},
 ): Promise<PostedJournalResult> {
   if (draft.lines.length < 2) {
     throw new UnbalancedJournalError("A journal entry needs at least two lines.");
@@ -162,10 +255,13 @@ async function insertEntryWithLines(
   const preparedLines = draft.lines.map((line, i) => prepareLine(line, i, org.baseCurrency));
   assertBalanced(preparedLines, org.baseCurrency);
 
-  const period =
-    status === "POSTED"
-      ? await assertPeriodOpenForDate(tx, actor.organizationId, draft.postingDate)
-      : await findFiscalPeriod(tx, actor.organizationId, draft.postingDate);
+  let period: FiscalPeriodRow | null;
+  let decision: Extract<PostingDecision, { allowed: true }> | null = null;
+  if (status === "POSTED") {
+    ({ period, decision } = await assertPeriodPostableForDate(tx, actor, draft.postingDate, extra.options));
+  } else {
+    period = await findFiscalPeriod(tx, actor.organizationId, draft.postingDate);
+  }
 
   const entryNumber = await nextEntryNumber(tx, actor.organizationId);
   const now = new Date();
@@ -185,11 +281,16 @@ async function insertEntryWithLines(
       updatedById: actor.userId,
       postedAt: status === "POSTED" ? now : null,
       postedById: status === "POSTED" ? actor.userId : null,
+      lockOverrideLevel: decision?.overrideLevel ?? null,
+      lockOverrideReason: decision?.overrideReason ?? null,
     })
     .returning();
 
   if (!entry) {
     throw new Error("Failed to insert journal entry.");
+  }
+  if (decision && period) {
+    await recordPostingOverride(tx, actor, period, decision, { id: entry.id, entryNumber });
   }
 
   const insertedLines = await tx
@@ -263,15 +364,19 @@ export const PostingService = {
   },
 
   /** Creates and immediately posts a balanced entry — the common case for tests/seeding/simple flows. */
-  async postJournal(actor: Actor, draft: JournalEntryDraft): Promise<PostedJournalResult> {
+  async postJournal(
+    actor: Actor,
+    draft: JournalEntryDraft,
+    options?: PostOptions,
+  ): Promise<PostedJournalResult> {
     assertPermission(actor, "journal:post");
     return withTenant(actor.organizationId, (tx) =>
-      insertEntryWithLines(tx, actor, draft, "POSTED"),
+      insertEntryWithLines(tx, actor, draft, "POSTED", { options }),
     );
   },
 
   /** Transitions an existing DRAFT entry to POSTED. */
-  async postDraft(actor: Actor, entryId: string): Promise<PostedJournalResult> {
+  async postDraft(actor: Actor, entryId: string, options?: PostOptions): Promise<PostedJournalResult> {
     assertPermission(actor, "journal:post");
     return withTenant(actor.organizationId, async (tx) => {
       const [entry] = await tx
@@ -285,7 +390,7 @@ export const PostingService = {
         throw new ImmutableEntryError(`Journal entry ${entry.entryNumber} is not a draft.`);
       }
 
-      const period = await assertPeriodOpenForDate(tx, actor.organizationId, entry.postingDate);
+      const { period, decision } = await assertPeriodPostableForDate(tx, actor, entry.postingDate, options);
       const now = new Date();
 
       await tx
@@ -297,8 +402,13 @@ export const PostingService = {
           postedById: actor.userId,
           updatedById: actor.userId,
           updatedAt: now,
+          lockOverrideLevel: decision?.overrideLevel ?? null,
+          lockOverrideReason: decision?.overrideReason ?? null,
         })
         .where(eq(journalEntries.id, entryId));
+      if (decision && period) {
+        await recordPostingOverride(tx, actor, period, decision, { id: entry.id, entryNumber: entry.entryNumber });
+      }
 
       await AuditService.record(tx, actor, {
         action: "journal.posted",
@@ -349,6 +459,7 @@ export const PostingService = {
     entryId: string,
     reason: string,
     reversalDate?: Date,
+    options?: PostOptions,
   ): Promise<PostedJournalResult> {
     assertPermission(actor, "journal:reverse");
     return withTenant(actor.organizationId, async (tx) => {
@@ -395,6 +506,7 @@ export const PostingService = {
 
       const result = await insertEntryWithLines(tx, actor, draft, "POSTED", {
         reversalOfId: entry.id,
+        options,
       });
 
       await tx

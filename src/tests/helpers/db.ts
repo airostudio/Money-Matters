@@ -8,6 +8,9 @@ import type { MembershipRole } from "@/domain/permissions/roles";
 
 const TENANT_TABLES = [
   "platform_admin_audit_logs",
+  "period_lock_events",
+  "close_signoffs",
+  "period_closes",
   "scenarios",
   "cash_forecast_settings",
   "budget_lines",
