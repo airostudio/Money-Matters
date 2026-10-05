@@ -96,6 +96,14 @@ export const PERMISSIONS = [
   "period:post_advisor_locked",
   "close_checklist:read",
   "close_checklist:manage",
+  // Phase 9 Slice 4 (multi-entity consolidation, master spec §30).
+  // `consolidation:manage` is checked IN THE ENTITY BEING ACTED ON — it is what
+  // lets a user add that organization to a consolidation group, map its
+  // accounts to the group chart, and designate intercompany accounts. Reading
+  // a consolidated report needs no new permission: each entity's own
+  // `financial_report:read` is checked per entity, with the user's real role
+  // there, and an entity without it is excluded from the result.
+  "consolidation:manage",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -193,6 +201,8 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "period:post_advisor_locked",
     "close_checklist:read",
     "close_checklist:manage",
+    // Accountants routinely consolidate several clients' or entities' books.
+    "consolidation:manage",
   ]),
   BOOKKEEPER: new Set<Permission>([
     "account:read",

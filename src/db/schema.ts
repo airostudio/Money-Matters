@@ -16,6 +16,7 @@ import {
   uniqueIndex,
   index,
   check,
+  foreignKey,
   customType,
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
@@ -2016,6 +2017,194 @@ export const auditLogs = pgTable("audit_logs", {
     table.organizationId,
     table.createdAt,
   ),
+}));
+
+// ---------------------------------------------------------------------------
+// Multi-entity consolidation (Phase 9 Slice 4, master spec §30)
+//
+// These tables are USER-scoped, not organization-scoped: a consolidation group
+// belongs to the user who built it and spans several organizations, so none of
+// them can use the `app.current_org_id` tenant policy — and none of them carries
+// an `organization_id` column (the member organization is
+// `member_organization_id`), so the tenant-isolation audit in
+// src/db/isolation-audit.ts never mistakes them for tenant tables. They are
+// protected the same way and with the same strength: FORCEd row-level security
+// whose only predicate is `owner_user_id = app.current_user_id`, a session
+// variable set per transaction by `withUserScope` (src/db/user-scope.ts). There
+// is no multi-org predicate anywhere, and no table here references a tenant
+// table's rows (account ids are plain uuids resolved through the entity's own
+// tenant transaction at read time). See docs/security.md §12 and
+// docs/database.md.
+// ---------------------------------------------------------------------------
+
+export const entityGroupRoleEnum = pgEnum("entity_group_role", ["PARENT", "SUBSIDIARY"]);
+
+export const intercompanyKindEnum = pgEnum("intercompany_kind", [
+  "RECEIVABLE",
+  "PAYABLE",
+  "LOAN_RECEIVABLE",
+  "LOAN_PAYABLE",
+  "REVENUE",
+  "EXPENSE",
+]);
+
+export const consolidationAdjustmentKindEnum = pgEnum("consolidation_adjustment_kind", [
+  "ELIMINATION",
+  "ADJUSTMENT",
+]);
+
+/** A user-owned consolidation group. Never deleted (archived), so its append-only history stays attached. */
+export const entityGroups = pgTable("entity_groups", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  ownerUserId: uuid("owner_user_id").notNull().references(() => users.id),
+  name: text("name").notNull(),
+  description: text("description"),
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  ownerNameUnique: uniqueIndex("entity_groups_owner_name_unique").on(table.ownerUserId, table.name),
+  idOwnerUnique: uniqueIndex("entity_groups_id_owner_unique").on(table.id, table.ownerUserId),
+}));
+
+/**
+ * One member organization of a group. Ownership is always 100%: partial
+ * ownership needs non-controlling-interest accounting and is deliberately not
+ * modelled (docs/accounting-engine.md §9), so there is no ownership column to
+ * misuse.
+ */
+export const entityGroupMembers = pgTable("entity_group_members", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  groupId: uuid("group_id").notNull(),
+  ownerUserId: uuid("owner_user_id").notNull(),
+  memberOrganizationId: uuid("member_organization_id").notNull().references(() => organizations.id),
+  role: entityGroupRoleEnum("role").notNull().default("SUBSIDIARY"),
+  isIncluded: boolean("is_included").notNull().default(true),
+  addedByUserId: uuid("added_by_user_id").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  groupOwnerFk: foreignKey({ columns: [table.groupId, table.ownerUserId], foreignColumns: [entityGroups.id, entityGroups.ownerUserId], name: "entity_group_members_group_owner_fk" }),
+  groupOrgUnique: uniqueIndex("entity_group_members_group_org_unique").on(table.groupId, table.memberOrganizationId),
+}));
+
+/** The group's own chart of accounts — what consolidated lines are called. Matched by (type, code). */
+export const entityGroupAccounts = pgTable("entity_group_accounts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  groupId: uuid("group_id").notNull(),
+  ownerUserId: uuid("owner_user_id").notNull(),
+  type: accountTypeEnum("type").notNull(),
+  code: text("code").notNull(),
+  name: text("name").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  groupOwnerFk: foreignKey({ columns: [table.groupId, table.ownerUserId], foreignColumns: [entityGroups.id, entityGroups.ownerUserId], name: "entity_group_accounts_group_owner_fk" }),
+  groupTypeCodeUnique: uniqueIndex("entity_group_accounts_group_type_code_unique").on(table.groupId, table.type, table.code),
+  idGroupUnique: uniqueIndex("entity_group_accounts_id_group_unique").on(table.id, table.groupId),
+}));
+
+/**
+ * Explicit mapping of one entity account to a group account, overriding the
+ * default same-(type, code) rule. `account_id` is a plain uuid with NO foreign
+ * key into the tenant `accounts` table (see the section comment); code/name are
+ * display snapshots only.
+ */
+export const entityGroupAccountMappings = pgTable("entity_group_account_mappings", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  groupId: uuid("group_id").notNull(),
+  ownerUserId: uuid("owner_user_id").notNull(),
+  memberOrganizationId: uuid("member_organization_id").notNull().references(() => organizations.id),
+  accountId: uuid("account_id").notNull(),
+  accountCode: text("account_code").notNull(),
+  accountName: text("account_name").notNull(),
+  groupAccountId: uuid("group_account_id").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  groupOwnerFk: foreignKey({ columns: [table.groupId, table.ownerUserId], foreignColumns: [entityGroups.id, entityGroups.ownerUserId], name: "entity_group_account_mappings_group_owner_fk" }),
+  groupAccountFk: foreignKey({ columns: [table.groupAccountId, table.groupId], foreignColumns: [entityGroupAccounts.id, entityGroupAccounts.groupId], name: "entity_group_account_mappings_group_account_fk" }),
+  memberFk: foreignKey({ columns: [table.groupId, table.memberOrganizationId], foreignColumns: [entityGroupMembers.groupId, entityGroupMembers.memberOrganizationId], name: "entity_group_account_mappings_member_fk" }).onDelete("cascade"),
+  accountUnique: uniqueIndex("entity_group_account_mappings_account_unique").on(table.groupId, table.memberOrganizationId, table.accountId),
+}));
+
+/** An entity account designated as intercompany, with the named counterparty entity. */
+export const entityGroupIntercompanyAccounts = pgTable("entity_group_intercompany_accounts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  groupId: uuid("group_id").notNull(),
+  ownerUserId: uuid("owner_user_id").notNull(),
+  memberOrganizationId: uuid("member_organization_id").notNull().references(() => organizations.id),
+  accountId: uuid("account_id").notNull(),
+  accountCode: text("account_code").notNull(),
+  accountName: text("account_name").notNull(),
+  kind: intercompanyKindEnum("kind").notNull(),
+  counterpartyOrganizationId: uuid("counterparty_organization_id").notNull().references(() => organizations.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  groupOwnerFk: foreignKey({ columns: [table.groupId, table.ownerUserId], foreignColumns: [entityGroups.id, entityGroups.ownerUserId], name: "entity_group_ic_accounts_group_owner_fk" }),
+  memberFk: foreignKey({ columns: [table.groupId, table.memberOrganizationId], foreignColumns: [entityGroupMembers.groupId, entityGroupMembers.memberOrganizationId], name: "entity_group_ic_accounts_member_fk" }).onDelete("cascade"),
+  counterpartyFk: foreignKey({ columns: [table.groupId, table.counterpartyOrganizationId], foreignColumns: [entityGroupMembers.groupId, entityGroupMembers.memberOrganizationId], name: "entity_group_ic_accounts_counterparty_fk" }).onDelete("cascade"),
+  accountUnique: uniqueIndex("entity_group_ic_accounts_account_unique").on(table.groupId, table.memberOrganizationId, table.accountId),
+  notSelf: check("entity_group_ic_accounts_not_self", sql`${table.memberOrganizationId} <> ${table.counterpartyOrganizationId}`),
+}));
+
+/**
+ * Manual elimination / consolidation adjustment header. APPEND-ONLY (mm_app has
+ * SELECT + INSERT only): an adjustment is undone by a new reversing row that
+ * points back at it, never edited or deleted. Group-level only — nothing here is
+ * ever a `journal_entries` row in any entity's ledger.
+ */
+export const entityGroupAdjustments = pgTable("entity_group_adjustments", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  groupId: uuid("group_id").notNull(),
+  ownerUserId: uuid("owner_user_id").notNull(),
+  kind: consolidationAdjustmentKindEnum("kind").notNull(),
+  effectiveDate: timestamp("effective_date", { withTimezone: true, mode: "date" }).notNull(),
+  description: text("description").notNull(),
+  reason: text("reason").notNull(),
+  reversesAdjustmentId: uuid("reverses_adjustment_id"),
+  createdByUserId: uuid("created_by_user_id").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  groupOwnerFk: foreignKey({ columns: [table.groupId, table.ownerUserId], foreignColumns: [entityGroups.id, entityGroups.ownerUserId], name: "entity_group_adjustments_group_owner_fk" }),
+  idGroupUnique: uniqueIndex("entity_group_adjustments_id_group_unique").on(table.id, table.groupId),
+  reversesUnique: uniqueIndex("entity_group_adjustments_reverses_unique").on(table.reversesAdjustmentId),
+  groupDateIdx: index("entity_group_adjustments_group_date_idx").on(table.groupId, table.effectiveDate),
+}));
+
+/** Adjustment lines against GROUP accounts. APPEND-ONLY, like the header. */
+export const entityGroupAdjustmentLines = pgTable("entity_group_adjustment_lines", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  adjustmentId: uuid("adjustment_id").notNull(),
+  groupId: uuid("group_id").notNull(),
+  ownerUserId: uuid("owner_user_id").notNull(),
+  groupAccountId: uuid("group_account_id").notNull(),
+  debit: numeric("debit", { precision: 19, scale: 4 }).notNull().default("0"),
+  credit: numeric("credit", { precision: 19, scale: 4 }).notNull().default("0"),
+  memo: text("memo"),
+}, (table) => ({
+  groupOwnerFk: foreignKey({ columns: [table.groupId, table.ownerUserId], foreignColumns: [entityGroups.id, entityGroups.ownerUserId], name: "entity_group_adjustment_lines_group_owner_fk" }),
+  adjustmentFk: foreignKey({ columns: [table.adjustmentId, table.groupId], foreignColumns: [entityGroupAdjustments.id, entityGroupAdjustments.groupId], name: "entity_group_adjustment_lines_adjustment_fk" }),
+  groupAccountFk: foreignKey({ columns: [table.groupAccountId, table.groupId], foreignColumns: [entityGroupAccounts.id, entityGroupAccounts.groupId], name: "entity_group_adjustment_lines_group_account_fk" }),
+  oneSided: check("entity_group_adjustment_lines_one_sided", sql`${table.debit} >= 0 AND ${table.credit} >= 0 AND (${table.debit} = 0 OR ${table.credit} = 0)`),
+  adjustmentIdx: index("entity_group_adjustment_lines_adjustment_idx").on(table.adjustmentId),
+}));
+
+/** Group-level append-only audit trail (mm_app: SELECT + INSERT only). */
+export const entityGroupAuditLogs = pgTable("entity_group_audit_logs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  groupId: uuid("group_id").notNull(),
+  ownerUserId: uuid("owner_user_id").notNull(),
+  actorUserId: uuid("actor_user_id").notNull(),
+  actorType: auditActorTypeEnum("actor_type").notNull().default("HUMAN"),
+  action: text("action").notNull(),
+  entityType: text("entity_type").notNull(),
+  entityId: text("entity_id").notNull(),
+  before: jsonb("before"),
+  after: jsonb("after"),
+  metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  groupOwnerFk: foreignKey({ columns: [table.groupId, table.ownerUserId], foreignColumns: [entityGroups.id, entityGroups.ownerUserId], name: "entity_group_audit_logs_group_owner_fk" }),
+  groupCreatedIdx: index("entity_group_audit_logs_group_created_idx").on(table.groupId, table.createdAt),
 }));
 
 // ---------------------------------------------------------------------------

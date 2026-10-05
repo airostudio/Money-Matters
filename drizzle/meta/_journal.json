@@ -267,6 +267,20 @@
       "when": 1791350938241,
       "tag": "0037_close_slice3_row_level_security",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1791437338240,
+      "tag": "0038_consolidation_slice4_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1791437338241,
+      "tag": "0039_consolidation_slice4_row_level_security",
+      "breakpoints": true
     }
   ]
 }

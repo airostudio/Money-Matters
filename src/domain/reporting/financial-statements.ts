@@ -158,6 +158,10 @@ export interface BalanceSheetLine {
   isComputed?: boolean;
 }
 
+/** The two computed equity lines' labels — consolidation recognises them by these exact names. */
+export const RETAINED_EARNINGS_PRIOR_LABEL = "Retained Earnings (prior periods)";
+export const CURRENT_YEAR_EARNINGS_LABEL = "Current Year Earnings";
+
 export interface RetainedEarningsSplit {
   /** Cumulative net profit from all posted activity strictly before the current fiscal year's start. */
   priorPeriods: string;
@@ -270,7 +274,7 @@ export function buildBalanceSheet(
     {
       accountId: null,
       code: null,
-      name: "Retained Earnings (prior periods)",
+      name: RETAINED_EARNINGS_PRIOR_LABEL,
       amount: priorPeriods.toString(),
       comparisonAmount: comparison ? Money.of(comparison.retainedEarnings.priorPeriods, currency).toString() : undefined,
       isComputed: true,
@@ -278,7 +282,7 @@ export function buildBalanceSheet(
     {
       accountId: null,
       code: null,
-      name: "Current Year Earnings",
+      name: CURRENT_YEAR_EARNINGS_LABEL,
       amount: currentYear.toString(),
       comparisonAmount: comparison ? Money.of(comparison.retainedEarnings.currentYear, currency).toString() : undefined,
       isComputed: true,
