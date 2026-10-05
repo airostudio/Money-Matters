@@ -1,7 +1,8 @@
 import "server-only";
 import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
-import { BankAccountService } from "@/domain/banking/bank-account-service";
-import { LedgerService } from "@/domain/ledger/ledger-service";
+import { roleHasPermission } from "@/domain/permissions/roles";
+import { loadCashPosition, type CashAccountPosition } from "./cash-position";
+import { CashForecastService } from "@/domain/forecasting/cash-forecast-service";
 import { AgedReceivablesService, type PrioritizedInvoiceRow } from "@/domain/sales/aged-receivables-service";
 import { AgedPayablesService, type AgedBillRow } from "@/domain/purchases/aged-payables-service";
 import { PaymentRunService } from "@/domain/purchases/payment-run-service";
@@ -42,12 +43,7 @@ import { formatDateParam } from "./period-presets";
  * ship.
  */
 
-export interface CashAccountPosition {
-  bankAccountId: string;
-  name: string;
-  institutionName: string | null;
-  balance: string;
-}
+export type { CashAccountPosition };
 
 export interface PaymentRunAwaitingApproval {
   id: string;
@@ -67,6 +63,19 @@ export interface DailyFinanceBrief {
   /** Phase 6 Slice 3 (master spec §77: surface auto-executed items wherever they appear, not just in the audit log) — count of auto-executed actions in this brief's lookback window, so an owner sees at a glance whether the AI did anything unattended. */
   recentAiAutoExecutions: number;
   callouts: string[];
+  /**
+   * Phase 9 Slice 2 (master spec §38): the 90-day cash forecast's headline,
+   * with the two projections kept separate — the lowest projected balance on
+   * the known-commitments-only series vs. on the including-statistical one.
+   * `null` for an actor without `forecast:read`, and never fatal: if the
+   * forecast can't be produced the rest of the brief is unaffected.
+   */
+  cashForecast: {
+    horizon: "90D";
+    knownOnlyLowPoint: { date: string; balance: string };
+    withStatisticalLowPoint: { date: string; balance: string };
+    warning: string | null;
+  } | null;
   /** `null` when `ANTHROPIC_API_KEY` is unset or the call failed — the brief is complete and useful without it. */
   aiSummary: string | null;
 }
@@ -111,28 +120,17 @@ export const DailyFinanceBriefService = {
     // session-mode pooler (capped at 15 clients total for the project) under
     // real traffic — see the EMAXCONNSESSION incident. This trades a little
     // latency for not needing six connections free at once.
-    const bankAccounts = await BankAccountService.list(actor);
-    const trialBalance = await LedgerService.getTrialBalance(actor, asOfDate);
+    const cash = await loadCashPosition(actor, asOfDate);
     const receivables = await AgedReceivablesService.getWithPriority(actor, asOfDate);
     const payables = await AgedPayablesService.get(actor, asOfDate);
     const awaitingApproval = await PaymentRunService.list(actor, { status: "AWAITING_APPROVAL" });
     const recentAutoExecutions = await AutoExecutionService.listRecent(actor.organizationId, 50);
 
-    const balanceByAccount = new Map(trialBalance.map((r) => [r.accountId, r.balance]));
-    // Every bank account in an organization is denominated in the same base
-    // currency in this slice (see docs/accounting-engine.md) — fall back to
-    // "AUD" only for the degenerate case of an org with no bank accounts yet.
-    let cashCurrency = bankAccounts[0]?.currency ?? "AUD";
-    const cashAccounts: CashAccountPosition[] = bankAccounts.map((ba) => {
-      cashCurrency = ba.currency;
-      return {
-        bankAccountId: ba.id,
-        name: ba.name,
-        institutionName: ba.institutionName,
-        balance: balanceByAccount.get(ba.glAccountId) ?? "0.0000",
-      };
-    });
-    const totalCash = cashAccounts.reduce((sum, a) => sum.add(Money.of(a.balance, cashCurrency)), Money.zero(cashCurrency));
+    // "Cash on hand" is `loadCashPosition` (cash-position.ts) — shared with the
+    // Phase 9 cash forecast so there is exactly one definition of it.
+    const cashCurrency = cash.currency;
+    const cashAccounts: CashAccountPosition[] = cash.accounts;
+    const totalCash = Money.of(cash.total, cashCurrency);
 
     const overdueReceivableRows = receivables.filter((r) => r.daysPastDue > 0);
     const overdueReceivablesTotal = overdueReceivableRows.reduce(
@@ -155,6 +153,28 @@ export const DailyFinanceBriefService = {
       currency: r.currency,
     }));
 
+    // Forecast headline — sequential like everything above, and handed the cash
+    // position / receivables / payables already loaded so it adds only its own
+    // template and payroll reads. Never allowed to break the brief.
+    let cashForecast: DailyFinanceBrief["cashForecast"] = null;
+    if (roleHasPermission(actor.role, "forecast:read")) {
+      try {
+        const forecast = await CashForecastService.generate(actor, {
+          asOfDate,
+          horizon: "90D",
+          preloaded: { cashPosition: cash, receivables, payables },
+        });
+        cashForecast = {
+          horizon: "90D",
+          knownOnlyLowPoint: forecast.knownOnly.lowPoint,
+          withStatisticalLowPoint: forecast.withStatistical.lowPoint,
+          warning: forecast.warning.message,
+        };
+      } catch {
+        cashForecast = null;
+      }
+    }
+
     const oneDayMs = 24 * 60 * 60 * 1000;
     const recentAiAutoExecutions = recentAutoExecutions.filter(
       (e) => !e.reversedAt && asOfDate.getTime() - e.createdAt.getTime() <= oneDayMs,
@@ -176,6 +196,7 @@ export const DailyFinanceBriefService = {
       const total = paymentRunsAwaitingApproval.reduce((sum, r) => sum.add(Money.of(r.totalAmount, r.currency)), Money.zero(cashCurrency));
       callouts.push(`${paymentRunsAwaitingApproval.length} payment run(s) totaling ${total.toString()} ${cashCurrency} are awaiting your approval.`);
     }
+    if (cashForecast?.warning) callouts.push(cashForecast.warning);
     if (expectedOut.isPositive() && expectedOut.compareTo(totalCash) > 0) {
       callouts.push(
         `Cash may be tight over the next 7 days: ${expectedOut.toString()} ${cashCurrency} expected out vs. ${totalCash.toString()} ${cashCurrency} on hand now.`,
@@ -195,6 +216,12 @@ export const DailyFinanceBriefService = {
             `Overdue receivables: ${overdueReceivableRows.length} invoice(s), ${overdueReceivablesTotal.toString()} ${cashCurrency}.`,
             `Overdue payables: ${overduePayableBills.length} bill(s), ${overduePayablesTotal.toString()} ${cashCurrency}.`,
             `Payment runs awaiting approval: ${paymentRunsAwaitingApproval.length}.`,
+            ...(cashForecast
+              ? [
+                  `90-day cash forecast, KNOWN commitments only: lowest projected balance ${cashForecast.knownOnlyLowPoint.balance} ${cashCurrency} on ${cashForecast.knownOnlyLowPoint.date}.`,
+                  `90-day cash forecast, including STATISTICAL estimates: lowest projected balance ${cashForecast.withStatisticalLowPoint.balance} ${cashCurrency} on ${cashForecast.withStatisticalLowPoint.date}.`,
+                ]
+              : []),
           ],
           apiKey,
         )
@@ -213,6 +240,7 @@ export const DailyFinanceBriefService = {
       overduePayables: { count: overduePayableBills.length, total: overduePayablesTotal.toString() },
       paymentRunsAwaitingApproval,
       recentAiAutoExecutions,
+      cashForecast,
       callouts,
       aiSummary,
     };

@@ -14,6 +14,7 @@ import {
   Settings,
   ShoppingCart,
   Sparkles,
+  TrendingUp,
   Users,
   Wallet,
 } from "lucide-react";
@@ -101,6 +102,16 @@ export const NAV_ITEMS: NavItem[] = [
     href: "/budgets",
     icon: PiggyBank,
     permission: "budget:read",
+  },
+  {
+    label: "Forecasting",
+    href: "/forecasting",
+    icon: TrendingUp,
+    permission: "forecast:read",
+    children: [
+      { label: "Cash Forecast", href: "/forecasting/cash-flow", permission: "forecast:read" },
+      { label: "Scenarios", href: "/forecasting/scenarios", permission: "scenario:read" },
+    ],
   },
   {
     label: "Payroll",

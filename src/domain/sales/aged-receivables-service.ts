@@ -49,6 +49,13 @@ export interface PrioritizedInvoiceRow extends AgedInvoiceRow {
    * see `src/domain/sales/collection-priority.ts`.
    */
   customerAvgDaysLate: number | null;
+  /**
+   * How many of this customer's own settled (PAID) invoices
+   * `customerAvgDaysLate` was averaged over — 0 means no history. The
+   * Phase 9 cash forecast shows this beside any timing shift derived from the
+   * average, because an average of one invoice is a weak estimate.
+   */
+  customerSettledInvoiceCount: number;
   /** 0–100, higher = chase sooner. See `calculateCollectionPriorityScore`. */
   priorityScore: number;
 }
@@ -61,11 +68,11 @@ export interface PrioritizedInvoiceRow extends AgedInvoiceRow {
  * Returns `null` for a customer with no PAID invoice yet, so the caller can
  * treat "no history" as neutral rather than as "always on time".
  */
-async function customerAverageDaysLate(
+export async function loadCustomerPaymentHistory(
   tx: TenantDb,
   organizationId: string,
   customerContactId: string,
-): Promise<number | null> {
+): Promise<{ averageDaysLate: number | null; settledInvoiceCount: number }> {
   const paidInvoices = await tx
     .select({ id: invoices.id, dueDate: invoices.dueDate })
     .from(invoices)
@@ -77,7 +84,7 @@ async function customerAverageDaysLate(
       ),
     );
 
-  if (paidInvoices.length === 0) return null;
+  if (paidInvoices.length === 0) return { averageDaysLate: null, settledInvoiceCount: 0 };
 
   const daysLateByInvoice: number[] = [];
   for (const invoice of paidInvoices) {
@@ -95,9 +102,12 @@ async function customerAverageDaysLate(
     daysLateByInvoice.push(daysBetween(settleDate, new Date(invoice.dueDate)));
   }
 
-  if (daysLateByInvoice.length === 0) return null;
+  if (daysLateByInvoice.length === 0) return { averageDaysLate: null, settledInvoiceCount: 0 };
   const sum = daysLateByInvoice.reduce((a, b) => a + b, 0);
-  return Math.round((sum / daysLateByInvoice.length) * 100) / 100;
+  return {
+    averageDaysLate: Math.round((sum / daysLateByInvoice.length) * 100) / 100,
+    settledInvoiceCount: daysLateByInvoice.length,
+  };
 }
 
 /**
@@ -187,22 +197,24 @@ export const AgedReceivablesService = {
     const customerRows = await AgedReceivablesService.get(actor, asOfDate);
 
     return withTenant(actor.organizationId, async (tx) => {
-      const avgDaysLateByCustomer = new Map<string, number | null>();
+      const historyByCustomer = new Map<string, { averageDaysLate: number | null; settledInvoiceCount: number }>();
       for (const customer of customerRows) {
-        avgDaysLateByCustomer.set(
+        historyByCustomer.set(
           customer.customerContactId,
-          await customerAverageDaysLate(tx, actor.organizationId, customer.customerContactId),
+          await loadCustomerPaymentHistory(tx, actor.organizationId, customer.customerContactId),
         );
       }
 
       const rows: PrioritizedInvoiceRow[] = customerRows.flatMap((customer) =>
         customer.invoices.map((invoice) => {
-          const customerAvgDaysLate = avgDaysLateByCustomer.get(customer.customerContactId) ?? null;
+          const history = historyByCustomer.get(customer.customerContactId);
+          const customerAvgDaysLate = history?.averageDaysLate ?? null;
           return {
             ...invoice,
             customerContactId: customer.customerContactId,
             customerName: customer.customerName,
             customerAvgDaysLate,
+            customerSettledInvoiceCount: history?.settledInvoiceCount ?? 0,
             priorityScore: calculateCollectionPriorityScore({
               outstandingAmount: invoice.outstanding,
               daysPastDue: invoice.daysPastDue,

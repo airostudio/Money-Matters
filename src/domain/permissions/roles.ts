@@ -76,6 +76,10 @@ export const PERMISSIONS = [
   "payrun:post",
   "budget:read",
   "budget:manage",
+  "forecast:read",
+  "forecast:manage",
+  "scenario:read",
+  "scenario:manage",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -163,6 +167,10 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "payrun:read",
     "budget:read",
     "budget:manage",
+    "forecast:read",
+    "forecast:manage",
+    "scenario:read",
+    "scenario:manage",
   ]),
   BOOKKEEPER: new Set<Permission>([
     "account:read",
@@ -223,6 +231,10 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "payrun:read",
     "budget:read",
     "budget:manage",
+    "forecast:read",
+    "forecast:manage",
+    "scenario:read",
+    "scenario:manage",
   ]),
   ACCOUNTS_RECEIVABLE: new Set<Permission>([
     "account:read",
@@ -337,6 +349,8 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "inventory:read",
     "fixed_asset:read",
     "budget:read",
+    "forecast:read",
+    "scenario:read",
   ]),
   EMPLOYEE: new Set<Permission>([
     "expense_claim:read",
@@ -371,6 +385,8 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "inventory:read",
     "fixed_asset:read",
     "budget:read",
+    "forecast:read",
+    "scenario:read",
   ]),
 };
 

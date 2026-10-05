@@ -17,7 +17,7 @@ import { BillService } from "./bill-service";
 import type { CreateRecurringBillTemplateInput, UpdateRecurringBillTemplateInput } from "./types";
 
 /** Default payment terms for a generated bill — the same default the "New bill" UI offers. */
-const DEFAULT_DUE_DAYS = 30;
+export const DEFAULT_DUE_DAYS = 30;
 
 /** Hard ceiling on occurrences generated for one template in one `generateDue` call, so a badly configured template (e.g. a start date years in the past) can't run away. */
 const MAX_OCCURRENCES_PER_RUN = 366;

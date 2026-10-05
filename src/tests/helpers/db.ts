@@ -6,6 +6,8 @@ import type { Actor } from "@/domain/permissions/permission-service";
 import type { MembershipRole } from "@/domain/permissions/roles";
 
 const TENANT_TABLES = [
+  "scenarios",
+  "cash_forecast_settings",
   "budget_lines",
   "budgets",
   "pay_run_lines",

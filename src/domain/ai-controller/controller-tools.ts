@@ -14,6 +14,10 @@ import { NLReportRequestSchema, resolveNLReportRequest } from "@/domain/reportin
 import type { DimensionWithValues } from "@/domain/dimensions/dimension-service";
 import { PeriodArgSchema, resolvePeriodArg, periodArgLabel } from "./period-arg";
 import { formatDateParam } from "@/domain/reporting/period-presets";
+import { Money } from "@/domain/money/money";
+import { describeUnscheduledKnown } from "@/domain/forecasting/forecast-summary";
+import { CashForecastService } from "@/domain/forecasting/cash-forecast-service";
+import { FORECAST_HORIZONS, type CashForecast, type ForecastLine, type KnownForecastLine } from "@/domain/forecasting/types";
 
 /**
  * Master spec §7/§49/§50's "fixed, explicit set of tools" — the ONLY surface
@@ -249,6 +253,39 @@ export function buildControllerTools(dimensions: DimensionWithValues[]): Control
         }),
     },
     {
+      name: "cash_forecast",
+      description:
+        "Forecast the organization's cash balance forward from today (7D, 30D, 60D, 90D or 12M) and warn when it may run low. " +
+        "Returns TWO separate projections that must never be blended: KNOWN commitments only (open invoices at their due dates, open bills, approved payment runs, scheduled recurring invoices/bills) and one INCLUDING statistical projections (timing shifts based on each customer's historical average lateness, a repeat of the last pay run). " +
+        "Use for 'when might we run low on cash?', 'what will our cash look like in 60 days?', cash runway/low-point questions. Always say which projection a statement refers to.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          horizon: { type: "string", enum: [...FORECAST_HORIZONS], description: "Forecast horizon, defaults to 90D." },
+          asOfDate: { type: "string", description: "YYYY-MM-DD start date, defaults to today." },
+        },
+      },
+      argsSchema: z.object({ horizon: z.enum(FORECAST_HORIZONS).optional(), asOfDate: DateArgSchema }),
+      permission: "forecast:read",
+      execute: (actor, rawArgs) =>
+        guarded(async () => {
+          const args = z.object({ horizon: z.enum(FORECAST_HORIZONS).optional(), asOfDate: DateArgSchema }).parse(rawArgs);
+          const asOfDate = parseAsOf(args.asOfDate);
+          const horizon = args.horizon ?? "90D";
+          const f = await CashForecastService.generate(actor, { asOfDate, horizon });
+          return {
+            ok: true,
+            summary: cashForecastSummary(f),
+            citation: {
+              tool: "cash_forecast",
+              description: "Cash Forecast",
+              periodLabel: `${horizon} from ${f.asOf}`,
+              drillDownHref: `/forecasting/cash-flow?horizon=${horizon}&asOf=${f.asOf}`,
+            },
+          };
+        }),
+    },
+    {
       name: "find_invoice",
       description: "Look up a specific customer invoice by its invoice number or customer name.",
       inputSchema: {
@@ -380,6 +417,41 @@ export function buildControllerTools(dimensions: DimensionWithValues[]): Control
         }),
     },
   ];
+}
+
+/**
+ * Plain-text rendering of a `CashForecast` for the model. KNOWN and
+ * STATISTICAL figures sit under separate, loudly-labelled headings — the tool
+ * can't blur the §38 distinction, so the assistant can't either. Payroll
+ * lines appear only if the forecast itself contained them (it omits them for
+ * an actor without `payrun:read`) and a notice says when they were omitted.
+ */
+function cashForecastSummary(f: CashForecast): string {
+  const top = (lines: ForecastLine[], n: number) =>
+    [...lines]
+      .sort((a, b) => Money.of(b.amount, "XXX").compareTo(Money.of(a.amount, "XXX")))
+      .slice(0, n)
+      .map(
+        (l) =>
+          `  - ${l.direction === "IN" ? "IN" : "OUT"} ${l.amount} ${l.date ?? "undated"}: ${l.label}${l.counterparty ? ` (${l.counterparty})` : ""}` +
+          (l.kind === "STATISTICAL" ? ` [expected date; based on ${l.basis.type === "CUSTOMER_AVG_DAYS_LATE" ? `customer avg ${l.basis.avgDaysLate} days late over ${l.basis.settledInvoiceCount ?? "?"} settled invoice(s)` : "repeat of last pay run"}]` : l.timing === "UNVERIFIED" ? " [amount known, due date NOT verified]" : ""),
+      );
+  const known = f.lines.filter((l): l is KnownForecastLine => l.kind === "KNOWN");
+  const statistical = f.lines.filter((l) => l.kind === "STATISTICAL");
+  const out = [
+    `Cash forecast from ${f.asOf}, ${f.horizon} horizon (${f.currency}). Opening cash (ledger balance of bank accounts): ${f.openingCash.total}.`,
+    `KNOWN COMMITMENTS ONLY (grounded in invoices, bills, approved payment runs, scheduled recurring templates): ends at ${f.knownOnly.endBalance}; lowest ${f.knownOnly.lowPoint.balance} on ${f.knownOnly.lowPoint.date}; known money in ${f.knownOnly.totalIn}, known money out ${f.knownOnly.totalOut}.`,
+    `INCLUDING STATISTICAL PROJECTIONS (ESTIMATES from simple historical averages, NOT certain): ends at ${f.withStatistical.endBalance}; lowest ${f.withStatistical.lowPoint.balance} on ${f.withStatistical.lowPoint.date}.`,
+    f.warning.message
+      ? `LOW-CASH WARNING (threshold ${f.lowCashThreshold}): ${f.warning.message}`
+      : `No low-cash warning: neither projection falls below the threshold of ${f.lowCashThreshold} within the horizon.`,
+  ];
+  const unscheduled = describeUnscheduledKnown(f);
+  if (unscheduled) out.push(unscheduled);
+  out.push(`Largest KNOWN lines:\n${top(known, 8).join("\n") || "  (none)"}`);
+  out.push(`Largest STATISTICAL lines (estimates):\n${top(statistical, 8).join("\n") || "  (none)"}`);
+  if (f.payrollOmitted) out.push("Note: payroll-derived lines are omitted because this user's role cannot read pay runs, so outflows may be understated.");
+  return out.join("\n");
 }
 
 function periodArgJsonSchema() {

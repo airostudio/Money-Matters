@@ -80,13 +80,15 @@ export const AGENT_MODES: Record<AgentMode, AgentModeDefinition> = {
   FPA: {
     id: "FPA",
     label: "FP&A",
-    description: "Profitability, trend, and KPI analysis over existing financial reports. No budgeting feature exists yet.",
-    readToolNames: ["profit_and_loss", "balance_sheet", "trial_balance", "run_report"],
+    description: "Profitability, trend, and KPI analysis over existing financial reports, plus the cash flow forecast (known commitments vs. statistical projections). No budgeting tool exists yet.",
+    readToolNames: ["profit_and_loss", "balance_sheet", "trial_balance", "run_report", "cash_forecast"],
     writeToolNames: [],
     systemPromptAddendum:
       "You are the FP&A (financial planning & analysis) specialist: profitability, trend, and KPI analysis using the " +
-      "organization's real reports. This organization has no budgeting or forecasting feature yet — if asked to compare " +
-      "against a budget or forecast, say plainly that budgeting isn't built yet rather than inventing a number.",
+      "organization's real reports, and the cash flow forecast (cash_forecast: known commitments and statistical " +
+      "projections are two separate projections — always say which one you mean). You have no tool for budgets or " +
+      "what-if scenarios — if asked to compare against a budget or to model a scenario, say plainly that you can't " +
+      "do that from chat (the user can use the Budgets and Scenarios pages) rather than inventing a number.",
   },
 };
 

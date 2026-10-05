@@ -56,8 +56,10 @@ import { DepreciationService } from "@/domain/fixed-assets/depreciation-service"
 import { createPayrollFixtures } from "../helpers/payroll";
 import { EmployeeService } from "@/domain/payroll/employee-service";
 import { PayRunService } from "@/domain/payroll/pay-run-service";
-import { budgetLines, budgets } from "@/db/schema";
+import { budgetLines, budgets, cashForecastSettings, scenarios } from "@/db/schema";
 import { BudgetService } from "@/domain/budgeting/budget-service";
+import { ScenarioService } from "@/domain/forecasting/scenario-service";
+import { ForecastSettingsService } from "@/domain/forecasting/forecast-settings-service";
 
 /**
  * Master spec §48 / §87 non-negotiable #7: "A coding mistake must not allow
@@ -200,6 +202,8 @@ describe("Tenant isolation", () => {
       "pay_run_lines",
       "budgets",
       "budget_lines",
+      "scenarios",
+      "cash_forecast_settings",
     ];
 
     const rows = await db.execute<{
@@ -619,5 +623,29 @@ describe("Tenant isolation", () => {
 
     expect(await db.select().from(budgets)).toHaveLength(0);
     expect(await db.select().from(budgetLines)).toHaveLength(0);
+  });
+
+  it("a saved scenario and a cash-forecast setting created under org A are invisible to org B, even by direct query with no filter", async () => {
+    const scenario = await ScenarioService.create(orgA.owner, {
+      name: "Org A's hire",
+      type: "HIRE_EMPLOYEE",
+      parameters: { annualSalary: "90000", onCostPercent: "12", startDate: "2026-11-01" },
+    });
+    await ForecastSettingsService.setLowCashThreshold(orgA.owner, "5000.00");
+
+    expect(await ScenarioService.get(orgB.owner, scenario.id)).toBeNull();
+    expect(await ScenarioService.list(orgB.owner)).toHaveLength(0);
+    await expect(ScenarioService.run(orgB.owner, scenario.id)).rejects.toThrow();
+    // Org B still sees the documented default, not org A's threshold.
+    expect((await ForecastSettingsService.get(orgB.owner)).lowCashThreshold).toBe("0.0000");
+
+    const scenariosAsOrgB = await withTenant(orgB.organizationId, (tx) => tx.select().from(scenarios));
+    expect(scenariosAsOrgB.some((r) => r.id === scenario.id)).toBe(false);
+    const settingsAsOrgB = await withTenant(orgB.organizationId, (tx) => tx.select().from(cashForecastSettings));
+    expect(settingsAsOrgB).toHaveLength(0);
+
+    // With no tenant context at all (the application role, no org set), RLS returns nothing either.
+    expect(await db.select().from(scenarios)).toHaveLength(0);
+    expect(await db.select().from(cashForecastSettings)).toHaveLength(0);
   });
 });

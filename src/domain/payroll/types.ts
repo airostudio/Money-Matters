@@ -83,6 +83,21 @@ export interface PayRunLineView {
   taxRuleSetLabel: string;
 }
 
+/** Totals-only view of one POSTED pay run — see `PayRunService.listPostedSummaries`. */
+export interface PostedPayRunSummary {
+  id: string;
+  payFrequency: PayFrequencyDb;
+  periodStart: Date;
+  periodEnd: Date;
+  payDate: Date;
+  netPay: string;
+  paygWithholding: string;
+  superGuarantee: string;
+  netWagesPayableAccountId: string;
+  paygWithholdingPayableAccountId: string;
+  superannuationPayableAccountId: string;
+}
+
 export interface PayRunView {
   id: string;
   payFrequency: PayFrequencyDb;

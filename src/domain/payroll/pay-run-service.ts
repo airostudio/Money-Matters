@@ -18,7 +18,7 @@ import {
   PayRunNotDraftError,
   PayRunNotFoundError,
 } from "./errors";
-import type { CreatePayRunInput, PayRunLineView, PayRunView } from "./types";
+import type { CreatePayRunInput, PayRunLineView, PayRunView, PostedPayRunSummary } from "./types";
 
 const AU_JURISDICTION = "AU";
 
@@ -120,6 +120,58 @@ export const PayRunService = {
         .where(eq(payRuns.organizationId, actor.organizationId))
         .orderBy(asc(payRuns.periodStart));
       return Promise.all(runs.map((r) => buildPayRunView(tx, actor.organizationId, r)));
+    });
+  },
+
+  /**
+   * One compact row per POSTED pay run (totals only — no per-employee
+   * lines, so nothing here exposes an individual's pay) plus the payable
+   * accounts that run credited. Added for the Phase 9 cash forecast, which
+   * needs "what has payroll posted and which payable accounts to read the
+   * outstanding balance from" without loading every payslip. Same
+   * `payrun:read` gate as `list`/`get`: the forecast checks the actor's
+   * `payrun:read` BEFORE calling this and omits payroll lines entirely
+   * (rather than erroring) for an actor who lacks it.
+   */
+  async listPostedSummaries(actor: Actor): Promise<PostedPayRunSummary[]> {
+    assertPermission(actor, "payrun:read");
+    return withTenant(actor.organizationId, async (tx) => {
+      const runs = await tx
+        .select()
+        .from(payRuns)
+        .where(and(eq(payRuns.organizationId, actor.organizationId), eq(payRuns.status, "POSTED")))
+        .orderBy(asc(payRuns.payDate));
+      if (runs.length === 0) return [];
+
+      const totals = await tx
+        .select({
+          payRunId: payRunLines.payRunId,
+          netPay: sum(payRunLines.netPay),
+          payg: sum(payRunLines.paygWithholding),
+          superGuarantee: sum(payRunLines.superGuarantee),
+        })
+        .from(payRunLines)
+        .where(eq(payRunLines.organizationId, actor.organizationId))
+        .groupBy(payRunLines.payRunId);
+      const totalsByRun = new Map(totals.map((t) => [t.payRunId, t]));
+
+      return runs.map((run) => {
+        const t = totalsByRun.get(run.id);
+        const money = (v: string | null | undefined) => Money.of(v ?? "0", "AUD").toString();
+        return {
+          id: run.id,
+          payFrequency: run.payFrequency,
+          periodStart: run.periodStart,
+          periodEnd: run.periodEnd,
+          payDate: run.payDate,
+          netPay: money(t?.netPay),
+          paygWithholding: money(t?.payg),
+          superGuarantee: money(t?.superGuarantee),
+          netWagesPayableAccountId: run.netWagesPayableAccountId,
+          paygWithholdingPayableAccountId: run.paygWithholdingPayableAccountId,
+          superannuationPayableAccountId: run.superannuationPayableAccountId,
+        };
+      });
     });
   },
 

@@ -232,6 +232,20 @@
       "when": 1791174665040,
       "tag": "0032_budgeting_slice1_row_level_security",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1791178138240,
+      "tag": "0033_forecasting_slice2_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1791178138241,
+      "tag": "0034_forecasting_slice2_row_level_security",
+      "breakpoints": true
     }
   ]
 }

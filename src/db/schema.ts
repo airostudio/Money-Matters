@@ -3859,3 +3859,72 @@ export const budgetLinesRelations = relations(budgetLines, ({ one }) => ({
     references: [dimensionValues.id],
   }),
 }));
+
+// ---------------------------------------------------------------------------
+// Phase 9 Slice 2 — Cash Flow Intelligence & Scenario Modelling (master spec §37/§38)
+// ---------------------------------------------------------------------------
+
+/**
+ * The closed set of what-if scenario types master spec §37 names. A
+ * Postgres enum (not free text) for the same reason every other closed set
+ * in this schema is one: a new scenario type is a deliberate code change
+ * (a new zod parameter schema + a new calculation), never something a row
+ * can introduce by itself.
+ */
+export const scenarioTypeEnum = pgEnum("scenario_type", ["HIRE_EMPLOYEE", "PRICE_CHANGE", "LOSE_CUSTOMER"]);
+
+/**
+ * A saved what-if scenario — a saved QUERY, never a stored result, exactly
+ * like `saved_reports` (Phase 5): `parameters` holds only the user's typed
+ * inputs and explicit assumptions (validated by the per-type zod schema in
+ * `src/domain/forecasting/scenario-parameters.ts` on every write AND every
+ * read), and `ScenarioService.run` recomputes Best/Expected/Worst against
+ * fresh ledger data each time it's opened. Nothing about a scenario ever
+ * touches the ledger: no `PostingService` call exists anywhere in the
+ * forecasting domain, and this table has no journal-entry reference.
+ */
+export const scenarios = pgTable("scenarios", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  type: scenarioTypeEnum("type").notNull(),
+  /** The per-type typed parameter set — see `scenario-parameters.ts`. Never holds computed results. */
+  parameters: jsonb("parameters").notNull(),
+  notes: text("notes"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+  updatedById: uuid("updated_by_id"),
+}, (table) => ({
+  orgTypeIdx: index("scenarios_org_type_idx").on(table.organizationId, table.type),
+}));
+
+/**
+ * One row per organization at most: the user-configurable low-cash
+ * threshold the cash forecast warns against (master spec §6's "Cash
+ * Warning"). Absent row means the documented default of zero — see
+ * `ForecastSettingsService`. Its own tiny table rather than a column on
+ * `organizations` so forecasting stays an additive domain that never
+ * widens the core org row every other query reads.
+ */
+export const cashForecastSettings = pgTable("cash_forecast_settings", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  /** Decimal string, base currency. The forecast warns when a projected balance goes BELOW this. */
+  lowCashThreshold: numeric("low_cash_threshold", { precision: 19, scale: 4 }).notNull().default("0"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedById: uuid("updated_by_id"),
+}, (table) => ({
+  orgUnique: uniqueIndex("cash_forecast_settings_org_unique").on(table.organizationId),
+}));
+
+export const scenariosRelations = relations(scenarios, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [scenarios.organizationId],
+    references: [organizations.id],
+  }),
+}));

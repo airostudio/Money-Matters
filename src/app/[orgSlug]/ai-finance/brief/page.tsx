@@ -70,6 +70,27 @@ export default async function DailyBriefPage({
         />
       </div>
 
+      {brief.cashForecast && (
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between">
+            <CardTitle className="text-base">90-day cash outlook</CardTitle>
+            <Link href={`/${orgSlug}/forecasting/cash-flow`} className="text-sm text-primary hover:underline">
+              Cash Forecast
+            </Link>
+          </CardHeader>
+          <CardContent className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
+            <p>
+              <span className="text-muted-foreground">Known commitments only — projected low point: </span>
+              <MoneyDisplay amount={brief.cashForecast.knownOnlyLowPoint.balance} currency={brief.currency} /> on {brief.cashForecast.knownOnlyLowPoint.date}
+            </p>
+            <p>
+              <span className="text-muted-foreground">Including statistical estimates — projected low point: </span>
+              <MoneyDisplay amount={brief.cashForecast.withStatisticalLowPoint.balance} currency={brief.currency} /> on {brief.cashForecast.withStatisticalLowPoint.date}
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
       {brief.callouts.length > 0 && (
         <Card>
           <CardHeader>
