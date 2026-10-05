@@ -25,6 +25,9 @@ import {
   inventoryAdjustments,
   fixedAssets,
   depreciationEntries,
+  employees,
+  payRuns,
+  payRunLines,
 } from "@/db/schema";
 import { db } from "@/db/client";
 import { withTenant } from "@/db/tenant";
@@ -50,6 +53,9 @@ import { createInventoryFixtures } from "../helpers/inventory";
 import { createFixedAssetFixtures } from "../helpers/fixed-assets";
 import { FixedAssetService } from "@/domain/fixed-assets/fixed-asset-service";
 import { DepreciationService } from "@/domain/fixed-assets/depreciation-service";
+import { createPayrollFixtures } from "../helpers/payroll";
+import { EmployeeService } from "@/domain/payroll/employee-service";
+import { PayRunService } from "@/domain/payroll/pay-run-service";
 
 /**
  * Master spec §48 / §87 non-negotiable #7: "A coding mistake must not allow
@@ -187,6 +193,9 @@ describe("Tenant isolation", () => {
       "fixed_asset_classes",
       "fixed_assets",
       "depreciation_entries",
+      "employees",
+      "pay_runs",
+      "pay_run_lines",
     ];
 
     const rows = await db.execute<{
@@ -544,5 +553,45 @@ describe("Tenant isolation", () => {
 
     expect(await db.select().from(fixedAssets)).toHaveLength(0);
     expect(await db.select().from(depreciationEntries)).toHaveLength(0);
+  });
+
+  it("an employee (and its pay run/pay run lines) created under org A is invisible to org B, even by direct query with no filter", async () => {
+    const gl = await createPayrollFixtures(orgA.owner, orgA.baseCurrency);
+    const employee = await EmployeeService.create(orgA.owner, {
+      name: "Isolated Employee",
+      employmentBasis: "SALARY",
+      annualSalary: "80000.00",
+      payFrequency: "MONTHLY",
+      startDate: new Date("2026-01-01"),
+      tfn: "999999999",
+    });
+
+    expect(await EmployeeService.get(orgB.owner, employee.id).catch(() => null)).toBeNull();
+
+    const run = await PayRunService.create(
+      orgA.owner,
+      {
+        payFrequency: "MONTHLY",
+        periodStart: new Date("2026-10-01"),
+        periodEnd: new Date("2026-10-31"),
+        payDate: new Date("2026-10-31"),
+        employeeIds: [employee.id],
+      },
+      gl,
+    );
+    await PayRunService.post(orgA.owner, run.id);
+
+    await expect(PayRunService.get(orgB.owner, run.id)).rejects.toThrow();
+
+    const employeesAsOrgB = await withTenant(orgB.organizationId, (tx) => tx.select().from(employees));
+    expect(employeesAsOrgB.some((r) => r.id === employee.id)).toBe(false);
+    const payRunsAsOrgB = await withTenant(orgB.organizationId, (tx) => tx.select().from(payRuns));
+    expect(payRunsAsOrgB.some((r) => r.id === run.id)).toBe(false);
+    const payRunLinesAsOrgB = await withTenant(orgB.organizationId, (tx) => tx.select().from(payRunLines));
+    expect(payRunLinesAsOrgB.some((r) => r.payRunId === run.id)).toBe(false);
+
+    expect(await db.select().from(employees)).toHaveLength(0);
+    expect(await db.select().from(payRuns)).toHaveLength(0);
+    expect(await db.select().from(payRunLines)).toHaveLength(0);
   });
 });

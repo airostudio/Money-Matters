@@ -69,6 +69,11 @@ export const PERMISSIONS = [
   "inventory:manage",
   "fixed_asset:read",
   "fixed_asset:manage",
+  "employee:read",
+  "employee:manage",
+  "payrun:read",
+  "payrun:manage",
+  "payrun:post",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -148,6 +153,12 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "inventory:manage",
     "fixed_asset:read",
     "fixed_asset:manage",
+    // Read-only: an accountant reconciles the payroll journal's GL impact
+    // but payroll's own management/posting (and the TFN/bank-detail
+    // sensitivity that comes with it) stays with PAYROLL_MANAGER/OWNER/
+    // ADMINISTRATOR — see docs/security.md.
+    "employee:read",
+    "payrun:read",
   ]),
   BOOKKEEPER: new Set<Permission>([
     "account:read",
@@ -204,6 +215,8 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "inventory:manage",
     "fixed_asset:read",
     "fixed_asset:manage",
+    "employee:read",
+    "payrun:read",
   ]),
   ACCOUNTS_RECEIVABLE: new Set<Permission>([
     "account:read",
@@ -275,6 +288,16 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "project:read",
     "timesheet:read",
     "timesheet:approve",
+    // Phase 8 Slice 1: the full set of real permissions this role existed
+    // as a placeholder for since Phase 1 — employee records (including
+    // the sensitive TFN/bank fields, masked per `EmployeeService`'s doc
+    // comment for anyone without employee:manage) and the on-demand pay
+    // run lifecycle (create/review DRAFT, then post).
+    "employee:read",
+    "employee:manage",
+    "payrun:read",
+    "payrun:manage",
+    "payrun:post",
   ]),
   MANAGER: new Set<Permission>([
     "account:read",

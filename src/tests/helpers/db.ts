@@ -6,6 +6,9 @@ import type { Actor } from "@/domain/permissions/permission-service";
 import type { MembershipRole } from "@/domain/permissions/roles";
 
 const TENANT_TABLES = [
+  "pay_run_lines",
+  "pay_runs",
+  "employees",
   "depreciation_entries",
   "fixed_assets",
   "fixed_asset_classes",

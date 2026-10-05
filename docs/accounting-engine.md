@@ -444,3 +444,55 @@ asset registered against the wrong pair), never a rounding footnote.
   depreciation runs (the same job-queue gap every recurring process in this
   codebase has), no revaluation/impairment. See `docs/roadmap.md`'s Phase 7
   Slice 3 entry for the full deferral list and reasoning.
+
+## 12. Phase 8 Slice 1 — payroll journal conventions
+
+- **One journal per pay run, not per employee** — the same "one combined
+  entry, not N" convention `DepreciationService.runForPeriod` uses for
+  depreciation: a payroll manager running a fortnightly pay run across a
+  whole team wants one journal to review, with `pay_run_lines` giving the
+  per-employee breakdown for display even though only one entry posts.
+- **The journal itself** (`PayRunService.post`): debit Wages Expense for
+  the sum of gross pay across every line; debit Superannuation Expense for
+  the sum of superannuation guarantee; credit PAYG Withholding Payable for
+  the sum of PAYG withheld; credit Superannuation Payable for the same
+  superannuation guarantee sum; credit Net Wages Payable for the sum of net
+  pay. All five accounts are chosen per pay run (not fixed per
+  organization) and frozen on `pay_runs` once created, the same "account
+  wiring chosen at creation, never re-derived" convention `fixedAssets`
+  uses for its own account columns.
+- **"Posted" is distinct from "paid," on purpose**: Net Wages Payable is a
+  LIABILITY account, not a bank account — a posted pay run records the
+  obligation to pay employees, not an actual bank transfer, exactly the
+  same separation `PaymentRunService` already draws between approving a
+  supplier payment run and an actual bank-file payment (neither exists as
+  a real external integration in this codebase). Settling net wages is a
+  separate, later manual payment against that payable — this slice does
+  not model it as a special payroll-specific transaction type.
+- **DRAFT then POST, not a single irreversible step**: unlike
+  `DepreciationService.runForPeriod` (which posts immediately when called,
+  since the run itself IS the deliberate action), `PayRunService.create`
+  only computes and stores `pay_run_lines` for review, posting nothing and
+  touching no employee's leave balance; `PayRunService.post` is the single
+  later step that posts the journal AND applies accrued leave together.
+  This mirrors the bill/invoice "DRAFT then approve/post" pattern instead,
+  because a pay run's inputs (timesheet hours, manual overrides) are more
+  likely to need a human review pass before the irreversible step than a
+  mechanical depreciation calculation is.
+- **Immutable once posted, like every other posted entry**: correcting a
+  posted pay run (wrong hours, wrong employee, a bad GL account) is a
+  `PostingService.reverseEntry` on the resulting journal plus a new,
+  correct pay run — never an edit to `pay_runs`/`pay_run_lines`.
+- **Superannuation quarter-to-date tracking has no separate running-total
+  table** — `SuperCalculations` reads the sum of this employee's prior
+  **POSTED** `pay_run_lines.ordinaryTimeEarnings` within the same standard
+  calendar SG quarter, rather than maintaining a second mutable total that
+  could drift out of sync with the pay run history itself (the DRAFT/POST
+  split above makes this safe: a discarded DRAFT was never summed in).
+- **Scope**: see `docs/roadmap.md`'s Phase 8 Slice 1 entry for the full,
+  explicit list of what AU payroll figures were verified vs. deliberately
+  left unresolved (Payday Super's FY2026-27 mechanics, the NAT 1004
+  per-period coefficient tables, the no-tax-free-threshold schedule) — this
+  phase is the one place in the codebase where "verified regulatory figures
+  only, never recalled from training data" is the binding constraint, not
+  just double-entry correctness.

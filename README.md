@@ -76,7 +76,25 @@ path. A Fixed Asset Register report reconciles exactly against the GL, the
 same correctness-check discipline as inventory's valuation report.
 Declining-balance and other depreciation methods, asset-transfer workflows,
 and automatic/scheduled depreciation runs are explicitly deferred — see
-`docs/roadmap.md` for the full list and why. See
+`docs/roadmap.md` for the full list and why.
+
+Phase 8 Slice 1 adds the AU payroll foundation: an effective-date-controlled
+tax/super rule engine (two seeded financial years, FY2025-26 and
+FY2026-27, with every rate/threshold verified against ato.gov.au and cited
+in the data itself), employee records with TFN/bank details handled like a
+password (redacted from the audit log, masked to last-4 for any role
+without `employee:manage`), PAYG withholding via the ATO's acknowledged
+annualized-bracket approximation method, superannuation guarantee with the
+quarterly contribution-base cap correctly tracked across pay runs, NES
+annual/personal leave accrual, on-demand DRAFT-then-POST pay runs that post
+one combined journal through `PostingService`, and an STP Phase 2-shaped
+report that is clearly labelled as never actually submitted to the ATO.
+Payday Super's FY2026-27 mechanics and the ATO's published NAT 1004
+per-period coefficient tables were explicitly left unresolved rather than
+guessed at — see `docs/roadmap.md` for the full, honest list of what was
+verified vs. deferred, and note that a registered tax agent or payroll
+provider should verify this software's output before it is used for real
+employee payroll. See
 [`docs/roadmap.md`](docs/roadmap.md) for exactly what's built
 vs. explicitly deferred in each phase (a customer portal, AI-drafted
 collection reminders, a live bank feed provider, Stripe, a background job

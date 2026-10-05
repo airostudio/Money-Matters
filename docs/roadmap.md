@@ -2000,12 +2000,201 @@ depreciation and disposal — and explicitly defers the rest (listed below).
   plus a manual correction to `accumulatedDepreciation`, not a built-in
   undo.
 
-## Phase 8 — Payroll & Australia Compliance (not started)
+## Phase 8 — Payroll & Australia Compliance
 
-Employee records, AU payroll engine (PAYG, super, STP), leave, BAS
-workspace. Tax/payroll rules versioned and effective-date controlled per
-master spec §24 — not implemented from memory; requires verified regulatory
-source before implementation begins.
+### Slice 1 — AU Payroll foundation (complete, scoped per this slice's brief)
+
+Employee records, an effective-date-controlled AU tax/super rule engine,
+PAYG withholding, superannuation guarantee (with the quarterly contribution
+base cap), NES leave accrual, on-demand pay runs posting through
+`PostingService`, and an STP Phase 2-SHAPED report. This phase is explicitly
+different from every other phase built so far: it is NOT built from
+well-known double-entry accounting principles. Every tax/super figure below
+was supplied already verified against ato.gov.au and cross-checked against
+independent accounting-firm sources, and is used EXACTLY as given — nothing
+was recalled from training data or "rounded to a nice number." Anything not
+supplied with a verified figure is flagged below as unresolved, never
+guessed at.
+
+**Verified figures used (reproduced from the rule sets seeded in
+`drizzle/0029_payroll_slice1_seed_au_rule_sets.sql`, and in
+`payroll_tax_rule_sets.source_citation`/`requires_verification_note` on each
+row itself — the data is self-documenting, not just this doc):**
+
+- **Superannuation Guarantee**: 12.00% for both FY2025-26 and FY2026-27
+  (ato.gov.au "Super guarantee" page — the final scheduled increase to 12%
+  already took effect 1 July 2025). FY2025-26 quarterly maximum contribution
+  base: $62,500/quarter (max quarterly SG = $7,500.00).
+- **Resident individual income tax brackets, FY2025-26** (1 Jul 2025 – 30
+  Jun 2026): $0-$18,200 nil; $18,201-$45,000 16%; $45,001-$135,000 30%;
+  $135,001-$190,000 37%; $190,001+ 45% — ato.gov.au, cross-confirmed.
+- **Resident individual income tax brackets, FY2026-27** (1 Jul 2026 – 30
+  Jun 2027, the current financial year): identical except the
+  $18,201-$45,000 bracket drops to 15% (ato.gov.au "Personal income tax —
+  new tax cuts" legislation page, already in effect). The cumulative "plus
+  $X" base amounts ($4,020/$31,020/$51,370) are NOT hardcoded anywhere —
+  `BracketCalculations.cumulativeBaseAt` derives them from the marginal
+  rates/thresholds at read time, and
+  `src/tests/unit/payroll/bracket-calculations.test.ts` independently
+  reproduces all three figures from nothing else, proving the brief's hand
+  arithmetic rather than trusting it.
+- **Medicare levy**: 2.0% standard rate (both years, no change identified);
+  FY2025-26 singles low-income thresholds: nil below $28,011, full 2% at/
+  above $35,013. The phase-in between the two ($$(income-lower)\times
+  10\%$$, capped at the standard amount) is implemented
+  (`annualMedicareLevy` in `payg-calculations.ts`) but is explicitly flagged
+  in code as a widely-documented general mechanism, NOT one of the
+  ATO-verified figures this slice was handed — treat it as needing
+  independent verification before real use, separately from the brackets/SG
+  rate/levy-rate/thresholds themselves, which were verified.
+- **NES leave (Fair Work Act)**: 4 weeks/year annual leave (152 hrs/year
+  full-time), 10 days/year personal/carer's leave (76 hrs/year full-time),
+  both accrued progressively per pay period and pro-rated for part-time by
+  standard hours/week. Long-standing, low-regulatory-change-risk figures,
+  still cited in `leave-calculations.ts`.
+
+**Explicitly UNRESOLVED — do not treat as settled, and don't let a future
+session paper over this:**
+
+- **FY2026-27 "Payday Super"**: the ATO's own material signals a move to
+  calculating/remitting SG per payday rather than quarterly, with a
+  $270,830 ANNUAL contribution-base figure mentioned instead of a quarterly
+  one, starting around this financial year. The exact mechanics were **not
+  resolved** during this slice's research. This slice deliberately does
+  **not** implement a per-payday SG obligation model. The FY2026-27 rule
+  set seeded in the database carries the unchanged 12% rate with the
+  FY2025-26 quarterly-cadence mechanism and cap as a documented
+  approximation — `payrollTaxRuleSets.requiresVerificationNote` is non-null
+  on that row specifically so this can never silently look "finished": a
+  registered tax agent or payroll provider MUST confirm the real FY2026-27
+  cadence/cap mechanics before this software is used for real FY2026-27
+  payroll.
+- **PAYG withholding method**: `calculatePaygWithholding`
+  (`src/domain/payroll/payg-calculations.ts`) uses the **annualized-bracket
+  method** — annualize the period's gross pay, apply the resolved rule
+  set's brackets, add the Medicare levy, divide back down — which the ATO's
+  own Schedule 1 documentation acknowledges as an acceptable withholding
+  method. **It is NOT a byte-for-byte implementation of the ATO's published
+  NAT 1004 per-period coefficient tables** — those could not be
+  independently fetched/verified during this research pass (ato.gov.au
+  blocked direct fetching). Minor rounding differences from the official
+  published per-period lookup tables are expected and accepted. This
+  disclaimer is shown prominently in the pay run and STP-report UI, not
+  only here.
+- **"No tax-free threshold" withholding**: the ATO publishes a genuinely
+  separate withholding schedule for an employee who hasn't claimed the
+  tax-free threshold, with its own coefficients this slice does not have
+  verified figures for. `withoutTaxFreeThreshold` in `payg-calculations.ts`
+  approximates this by simply dropping the 0%-rate band (so the next
+  bracket's rate applies from the first dollar) — a documented
+  simplification, not the real schedule. Flagged in code; needs
+  verification before real use for any employee who doesn't claim the
+  threshold.
+
+**What's built:**
+
+- `payroll_tax_rule_sets`/`payroll_tax_brackets` (`src/db/schema.ts`): a
+  jurisdiction + effective-date-controlled rule set (master spec §26's
+  architecture, built for AU only — scope). Deliberately NOT
+  organization-scoped (shared regulatory reference data, not per-tenant
+  data) and so correctly exempt from the tenant-isolation RLS audit, the
+  same way `organizations`/`users` are. `TaxRuleService.resolve(jurisdiction,
+  payDate)` throws rather than extrapolating for any date outside the two
+  seeded financial years.
+- `employees` (its own table, not a repurposed `contacts` row — see that
+  table's schema comment for why: different shape, different sensitivity,
+  and folding payroll fields onto `contacts` would widen the blast radius
+  of every contact-reading code path, including Phase 6's AI read-only
+  tools, to having to reason about a possible TFN). `EmployeeService`:
+  create/edit/terminate. TFN and bank account number are treated like a
+  password: redacted in `AuditService.REDACTED_FIELDS`
+  (`tfn`/`bankAccountNumber`/`bankBsb`), never placed on a read for a role
+  without `employee:manage` (only `tfnMasked`/`bankAccountNumberMasked`,
+  last-4 digits, are), and the UI only ever renders the full value to a
+  role that can manage payroll.
+- `BracketCalculations`/`PaygCalculations`/`SuperCalculations`/
+  `LeaveCalculations` (`src/domain/payroll/`): pure, independently
+  unit-tested calculation modules — no database, no side effects.
+- `PayRunService` (`src/domain/payroll/pay-run-service.ts`): the on-demand
+  "run payroll for period X" action, mirroring
+  `RecurringInvoiceService.generateDue`/`DepreciationService.runForPeriod`
+  — human-triggered, never scheduled (no job queue exists in this
+  codebase). Unlike depreciation's single-step run, this is DRAFT-then-POST
+  (like a bill/invoice): `create()` computes every `pay_run_lines` row for
+  review and touches nothing else; `post()` is the one irreversible step
+  that posts the combined payroll journal AND applies accrued leave to each
+  employee's running balance. A DRAFT can be discarded with nothing to
+  unwind; a POSTED run is immutable — a correction is a reversing journal
+  plus a new, correct run, never an edit, the same discipline every other
+  posted entry in this codebase follows.
+  - Gross pay: salary pro-rated to the period, or hourly rate × approved
+    timesheet hours pulled from `timesheet_entries` for the employee's
+    linked `userId` (Phase 7 Slice 1's `TimesheetService` data, reused
+    rather than re-entered — master spec §23's principle applied here) —
+    or a manual hours override for an HOURLY employee with no linked login.
+  - Superannuation: `SuperCalculations.calculateSuperGuarantee` tracks
+    quarter-to-date OTE by summing this employee's prior **POSTED**
+    `pay_run_lines` within the same standard calendar SG quarter (not a
+    separately-maintained running total — avoids a second place that could
+    drift out of sync with the pay run history itself), correctly applying
+    the quarterly cap even when it's reached mid-period.
+  - Leave: accrued per run per the NES formulas above, applied to
+    `employees.annualLeaveBalanceHours`/`personalLeaveBalanceHours` (a
+    perpetually-maintained running balance, same convention as
+    `fixedAssets.accumulatedDepreciation`) only at `post()` time.
+  - Journal (posted once per run, not per employee): debit Wages Expense
+    (sum of gross) + debit Superannuation Expense (sum of SG); credit PAYG
+    Withholding Payable + credit Superannuation Payable + credit Net Wages
+    Payable. Net Wages Payable is a LIABILITY, not a bank account — this
+    slice treats "posted" and "paid" as distinct for payroll, the same
+    separation `PaymentRunService` already draws for supplier payments (no
+    real bank-file payment generation exists in this codebase either); a
+    separate manual payment settles the payable later.
+- `StpReportService`: an STP Phase 2-SHAPED report (gross by income type,
+  PAYG withheld, super liability) for a POSTED pay run only — proves the
+  data model captures what real STP reporting needs without building the
+  actual ATO transmission, the same "defer the real external integration"
+  boundary as Basiq/Stripe elsewhere in this codebase. Labelled "NOT
+  SUBMITTED TO THE ATO" prominently in the UI.
+- Permissions: `employee:read`/`employee:manage`,
+  `payrun:read`/`payrun:manage`/`payrun:post` (roles.ts). `PAYROLL_MANAGER`
+  (a placeholder role since Phase 1) now holds the full set.
+  ACCOUNTANT/BOOKKEEPER get read-only access (to reconcile the payroll
+  journal's GL impact) but not manage/post — payroll management and its
+  TFN/bank-detail sensitivity stay with PAYROLL_MANAGER/OWNER/ADMINISTRATOR.
+- UI: `/payroll/employees` (list/new/detail/terminate),
+  `/payroll/pay-runs` (list/new/detail with a payslip view/post/discard),
+  and a per-pay-run STP-shaped report page. The withholding-approximation
+  disclaimer is shown directly in the pay run creation and detail pages,
+  not only in this doc.
+- AI Controller exclusion (Phase 6) reconfirmed, not touched:
+  `EXCLUDED_ACTION_TYPE_EXAMPLES` in `auto-execution-policy.ts` already
+  listed `PAYROLL_ANY` before this slice: payroll remains structurally
+  excluded from auto-execution at every autonomy level, and no payroll
+  action was added to the whitelist mechanism or to any AI-controller tool.
+- Tests: unit tests for bracket cumulative-base derivation (including the
+  independent reproduction of this slice's hand-derived figures), PAYG
+  withholding for known gross-pay amounts in both financial years, SG
+  quarterly-cap behavior at/below/above the cap, and NES leave accrual for
+  salaried and hourly employees; integration tests (real Postgres) for
+  tax-rule effective-date resolution, a full salaried pay run (gross/PAYG/
+  super/net/leave/GL all hand-verified), an hourly pay run sourcing hours
+  from approved timesheets, quarter-to-date SG cap tracking across two
+  consecutive pay runs for the same employee, duplicate-period rejection,
+  TFN/bank-detail masking by role, and tenant isolation for
+  `employees`/`pay_runs`/`pay_run_lines`.
+
+**Explicitly deferred (document why, not a silent gap):**
+
+- Real STP lodgment, HELP/study loan withholding, LITO effects on
+  withholding, foreign-resident/working-holiday-maker/no-TFN withholding
+  rate variations, Medicare Levy Surcharge, Payday Super's per-payday SG
+  mechanics (see above), long service leave, termination pay/ETPs/
+  redundancy, salary sacrifice/novated leases, workers' compensation, state
+  payroll tax, leave loading, a leave-request/approval workflow (a running
+  balance a pay run correctly accrues is this slice's deliverable; a
+  request/approval UI is a reasonable future addition), and any
+  scheduled/automatic pay run (on-demand only, no job queue exists).
 
 ## Phase 9 — Advanced Finance (not started)
 

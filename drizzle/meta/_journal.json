@@ -190,6 +190,34 @@
       "when": 1791106576457,
       "tag": "0026_fixed_assets_slice3_row_level_security",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1791168820886,
+      "tag": "0027_payroll_slice1_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1791168851938,
+      "tag": "0028_payroll_slice1_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1791168864683,
+      "tag": "0029_payroll_slice1_seed_au_rule_sets",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1791170016195,
+      "tag": "0030_payroll_slice1_payrun_accounts",
+      "breakpoints": true
     }
   ]
 }

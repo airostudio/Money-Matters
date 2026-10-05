@@ -14,6 +14,7 @@ import {
   ShoppingCart,
   Sparkles,
   Users,
+  Wallet,
 } from "lucide-react";
 
 export interface NavItem {
@@ -92,6 +93,16 @@ export const NAV_ITEMS: NavItem[] = [
       { label: "Register", href: "/fixed-assets", permission: "fixed_asset:read" },
       { label: "Asset Classes", href: "/fixed-assets/classes", permission: "fixed_asset:read" },
       { label: "Run Depreciation", href: "/fixed-assets/depreciation", permission: "fixed_asset:manage" },
+    ],
+  },
+  {
+    label: "Payroll",
+    href: "/payroll",
+    icon: Wallet,
+    permission: "employee:read",
+    children: [
+      { label: "Employees", href: "/payroll/employees", permission: "employee:read" },
+      { label: "Pay Runs", href: "/payroll/pay-runs", permission: "payrun:read" },
     ],
   },
   {

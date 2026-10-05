@@ -11,7 +11,22 @@ export interface RecordAuditParams {
   metadata?: Record<string, unknown>;
 }
 
-const REDACTED_FIELDS = new Set(["passwordHash", "password", "secret", "token"]);
+/**
+ * `tfn`, `bankAccountNumber`, and `bankBsb` were added for Phase 8 Slice 1
+ * (AU Payroll) — a TFN is treated with the same sensitivity as a password
+ * throughout this codebase (master spec §8/§44), and a bank account number
+ * is record-keeping-only data nobody but `employee:manage` should ever see
+ * in full (see `src/domain/payroll/sensitive-data.ts`'s doc comment).
+ */
+const REDACTED_FIELDS = new Set([
+  "passwordHash",
+  "password",
+  "secret",
+  "token",
+  "tfn",
+  "bankAccountNumber",
+  "bankBsb",
+]);
 const REDACTED_PLACEHOLDER = "[redacted]";
 
 function redact(value: unknown): unknown {

@@ -170,3 +170,39 @@ must follow master spec §51-52 (tokenization via external providers only,
 never storing card/bank credentials; supplier bank-detail changes trigger
 alerts and preserve previous details; segregation of duties on payment
 batches). Documented here now so it is not forgotten later.
+
+## 9. Phase 8 Slice 1 — TFN and bank-detail handling
+
+A Tax File Number (TFN), stored on `employees.tfn`, is treated with the
+same sensitivity as a password throughout this codebase:
+
+- **Never logged, never in a full-value audit snapshot**: `AuditService`'s
+  `REDACTED_FIELDS` set includes `tfn`, `bankAccountNumber`, and `bankBsb`
+  alongside `password`/`passwordHash`/`secret`/`token` — any audit-log
+  before/after snapshot that would otherwise include one of these fields
+  gets `[redacted]` instead, enforced centrally in `AuditService.record`,
+  not left to each call site to remember.
+- **Never placed on a read for a role without `employee:manage`**:
+  `EmployeeService.get`/`list` only ever put the real `tfn` value on the
+  returned view when the calling actor's role holds `employee:manage`
+  (checked structurally, the same `assertPermission` call every other
+  permission check in this codebase uses — see
+  `src/domain/payroll/employee-service.ts`'s `roleCanManage` helper). A
+  role with only `employee:read` (ACCOUNTANT, BOOKKEEPER — see
+  `src/domain/permissions/roles.ts`) always receives `tfn: null` and must
+  use `tfnMasked` (last-4 digits, via `src/domain/payroll/
+  sensitive-data.ts`'s `maskLast4`) instead. The UI never has access to an
+  unmasked value it could accidentally render to a lesser-privileged role —
+  the masking happens in the service layer, before the value ever reaches
+  a page.
+- **Bank account number** (`employees.bankAccountNumber`) gets the same
+  treatment — masked to last-4 for any read, redacted in the audit log —
+  though it is a lower-sensitivity field than a TFN; this slice applies the
+  stricter TFN-equivalent handling to both rather than drawing a finer
+  distinction.
+- **Record-keeping only**: storing a TFN and bank details does not imply
+  any real integration — there is no SuperStream remittance and no real
+  bank-file payment generation in this codebase (see
+  `docs/roadmap.md`'s Phase 8 Slice 1 entry), so these fields carry no
+  transmission risk beyond their storage in this database, which the
+  controls above address.

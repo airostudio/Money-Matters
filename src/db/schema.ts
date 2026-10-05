@@ -3373,3 +3373,331 @@ export const depreciationEntriesRelations = relations(depreciationEntries, ({ on
     references: [fixedAssets.id],
   }),
 }));
+
+// ---------------------------------------------------------------------------
+// Phase 8 Slice 1 — AU Payroll foundation (master spec §24, §8, §26)
+// ---------------------------------------------------------------------------
+
+/**
+ * A jurisdiction's tax/super rule set is NOT organization-scoped — it is
+ * shared regulatory reference data, the same way the tax code system itself
+ * (`tax_codes`, which IS org-scoped because each org edits its own GST
+ * setup) differs from a withholding rate nobody but a regulator sets. No
+ * `organization_id` column means these two tables are correctly exempt from
+ * the tenant-isolation audit in src/db/migrate.ts (it only requires RLS on
+ * tables that carry one) — every org reads the exact same AU rule sets.
+ *
+ * `jurisdiction` is a free-text code (just "AU" for now) rather than an enum
+ * so a future state/country can be added with a data row, not a migration —
+ * master spec §26's jurisdiction-plus-effective-date architecture, built
+ * here for AU only per this slice's scope.
+ *
+ * Effective-dated and non-overlapping per jurisdiction by convention (not a
+ * DB constraint — two rows for the same jurisdiction must not have
+ * overlapping [effectiveFrom, effectiveTo] ranges; `TaxRuleService.resolve`
+ * is what a bad seed would silently break, so this is exercised directly by
+ * unit tests rather than relied upon as an invariant the schema enforces).
+ *
+ * `sgQuarterlyContributionBaseCap` is nullable for a reason that must stay
+ * visible here: the FY2026-27 row's cadence/cap mechanics under the ATO's
+ * emerging "Payday Super" reform were NOT fully resolved during this
+ * slice's research (see docs/roadmap.md's Phase 8 Slice 1 section). This
+ * slice deliberately still applies the FY2025-26 quarterly-cap *mechanism*
+ * at the unchanged 12% rate for FY2026-27 too (the rate itself did not
+ * change), but `requiresVerificationNote` records, in the data itself —
+ * not just in a comment that could rot — that a registered tax agent or
+ * payroll provider must confirm the correct mechanics before this rule set
+ * is used for real FY2026-27 payroll.
+ */
+export const payrollTaxRuleSets = pgTable("payroll_tax_rule_sets", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  jurisdiction: text("jurisdiction").notNull(),
+  /** Human label, e.g. "FY2025-26" — display/debugging only, never matched on. */
+  label: text("label").notNull(),
+  effectiveFrom: timestamp("effective_from", { withTimezone: true, mode: "date" }).notNull(),
+  /** Inclusive end date. Null would mean "open-ended" but every seeded row has one — AU financial years are exactly bounded. */
+  effectiveTo: timestamp("effective_to", { withTimezone: true, mode: "date" }).notNull(),
+  /** Decimal string, e.g. "0.02" for 2%. Source: ato.gov.au — see docs/roadmap.md for the citation. */
+  medicareLevyRate: numeric("medicare_levy_rate", { precision: 6, scale: 4 }).notNull(),
+  /** Decimal string — below this ANNUAL taxable income, nil Medicare levy. Singles threshold only (no family threshold modeling in this slice). */
+  medicareLevyLowerThreshold: numeric("medicare_levy_lower_threshold", { precision: 19, scale: 4 }).notNull(),
+  /** Decimal string — at/above this ANNUAL taxable income, the full standard rate applies. Between the two thresholds, `PaygCalculations` applies the documented (non-ATO-verified) 10%-phase-in formula — see that module's doc comment. */
+  medicareLevyUpperThreshold: numeric("medicare_levy_upper_threshold", { precision: 19, scale: 4 }).notNull(),
+  /** Decimal string, e.g. "0.12" for 12%. Source: ato.gov.au "Super guarantee" page. */
+  sgRate: numeric("sg_rate", { precision: 6, scale: 4 }).notNull(),
+  /** Decimal string — quarterly OTE cap above which SG is not mandatory. Null only for a rule set whose cadence/cap mechanics are themselves unresolved (see this table's doc comment) — `SuperCalculations` must treat null as "do not fabricate a cap", never silently fall back to a default. */
+  sgQuarterlyContributionBaseCap: numeric("sg_quarterly_contribution_base_cap", { precision: 19, scale: 4 }),
+  /** Non-null flags that this specific rule set has a known-unresolved regulatory detail (the FY2026-27 Payday Super cadence) that a tax agent must confirm before real payroll relies on it — surfaced in the STP-shaped report and payslip UI, not buried in a comment only developers see. */
+  requiresVerificationNote: text("requires_verification_note"),
+  /** Free text recording where each figure on this row came from — reproduced in docs/roadmap.md too, but kept here as well so the data is self-documenting if the docs ever drift. */
+  sourceCitation: text("source_citation").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  jurisdictionRangeIdx: index("payroll_tax_rule_sets_jurisdiction_idx").on(table.jurisdiction, table.effectiveFrom),
+}));
+
+/**
+ * One marginal-rate row of a resident individual income tax schedule
+ * (master spec §24). `threshold` is the lower bound this `marginalRate`
+ * first applies to a dollar earned above (the classic "$18,201–$45,000:
+ * 16%" row has `threshold = "18200.0000"`, `marginalRate = "0.1600"`).
+ *
+ * Deliberately NOT storing a "cumulative base amount" column (the "$4,020
+ * plus 30% of the excess over $45,000" figure) — `BracketCalculations.
+ * cumulativeBaseAt` derives it from the ordered set of
+ * (threshold, marginalRate) rows below any given bracket, at read time, so
+ * the $4,020/$31,020/$51,370 figures this slice was handed are independently
+ * *reproduced*, not merely trusted — see that module's unit tests, which
+ * treat a mismatch as a bug in the verified input figures to investigate,
+ * never something to "fix" by changing the source numbers.
+ */
+export const payrollTaxBrackets = pgTable("payroll_tax_brackets", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  ruleSetId: uuid("rule_set_id")
+    .notNull()
+    .references(() => payrollTaxRuleSets.id, { onDelete: "cascade" }),
+  /** 0-based ordering within the rule set — brackets must be evaluated lowest-threshold-first for the cumulative-base derivation to be correct. */
+  sequence: integer("sequence").notNull(),
+  /** Decimal string — the lower bound of annual taxable income this marginal rate first applies above. */
+  threshold: numeric("threshold", { precision: 19, scale: 4 }).notNull(),
+  /** Decimal string, e.g. "0.3000" for 30%. */
+  marginalRate: numeric("marginal_rate", { precision: 6, scale: 4 }).notNull(),
+}, (table) => ({
+  ruleSetSequenceUnique: uniqueIndex("payroll_tax_brackets_rule_set_sequence_unique").on(table.ruleSetId, table.sequence),
+}));
+
+export const employmentBasisEnum = pgEnum("employment_basis", ["SALARY", "HOURLY"]);
+
+export const payFrequencyEnum = pgEnum("pay_frequency", ["WEEKLY", "FORTNIGHTLY", "MONTHLY"]);
+
+export const employeeStatusEnum = pgEnum("employee_status", ["ACTIVE", "TERMINATED"]);
+
+/**
+ * An org's payroll employee record — deliberately its own table, not a
+ * repurposed `contacts` row. `contacts` models an external party Money
+ * Matters sends invoices/bills to or pays through AP; an employee has a
+ * different shape entirely (TFN, super fund, a pay basis/rate, leave
+ * balances) and different sensitivity (TFN is as sensitive as a password —
+ * see this table's `tfn` column comment), so folding payroll fields onto
+ * `contacts` would mean every contact-reading code path in the app
+ * (invoices, bills, the AI Controller's read-only tools) has to reason
+ * about whether a `contacts` row might also be carrying a TFN. A separate
+ * table keeps that blast radius at exactly the payroll domain. `userId` is
+ * an OPTIONAL link to a Money Matters login — only employees who also log
+ * in to submit timesheets (the HOURLY path that sources hours from
+ * `TimesheetService`/`timesheet_entries.employee_user_id`) need one; a
+ * SALARY employee with no system access at all is still a fully valid
+ * payroll record.
+ */
+export const employees = pgTable("employees", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  /** Optional link to a `users` row — see this table's doc comment. Required (enforced in `EmployeeService`, not the schema) for an HOURLY employee whose gross pay is meant to be sourced from approved timesheets rather than manually entered hours. */
+  userId: uuid("user_id").references(() => users.id),
+  name: text("name").notNull(),
+  employmentBasis: employmentBasisEnum("employment_basis").notNull(),
+  /** Decimal string, annual gross — required and only meaningful for SALARY. Null for HOURLY. */
+  annualSalary: numeric("annual_salary", { precision: 19, scale: 4 }),
+  /** Decimal string, per hour — required and only meaningful for HOURLY. Null for SALARY. */
+  hourlyRate: numeric("hourly_rate", { precision: 19, scale: 4 }),
+  /** Decimal string, e.g. "38.00" — used to pro-rate NES leave accrual for a part-time employee against the 38-hour/152-hour(annual leave)/76-hour(personal leave) full-time NES figures. */
+  standardHoursPerWeek: numeric("standard_hours_per_week", { precision: 6, scale: 2 }).notNull().default("38.00"),
+  payFrequency: payFrequencyEnum("pay_frequency").notNull(),
+  /** Whether this employee has claimed the tax-free threshold on their (not separately modeled) TFN declaration — the one flag this slice reads; see `PaygCalculations`'s doc comment for what "not claimed" approximates and does not attempt. */
+  taxFreeThresholdClaimed: boolean("tax_free_threshold_claimed").notNull().default(true),
+  startDate: timestamp("start_date", { withTimezone: true, mode: "date" }).notNull(),
+  terminationDate: timestamp("termination_date", { withTimezone: true, mode: "date" }),
+  status: employeeStatusEnum("status").notNull().default("ACTIVE"),
+  /**
+   * Tax file number — treated with the same sensitivity as a password
+   * throughout this codebase (master spec §8/§44): `AuditService.
+   * REDACTED_FIELDS` redacts the key `tfn` the same way it redacts
+   * `password`/`secret`/`token`, so no audit-log row (before/after
+   * snapshot) ever stores the real value, and every UI surface below
+   * OWNER/ADMINISTRATOR/PAYROLL_MANAGER shows only `maskTfn()`'s
+   * last-4-digit form (`src/domain/payroll/sensitive-data.ts`) — never the
+   * full value. Nullable because capturing it is a real-world onboarding
+   * step that can lag behind creating the employee record itself.
+   */
+  tfn: text("tfn"),
+  superFundName: text("super_fund_name"),
+  superFundAbn: text("super_fund_abn"),
+  superMemberAccountNumber: text("super_member_account_number"),
+  /** Record-keeping only — no SuperStream remittance integration and no real bank-file payment generation in this slice, same deliberate boundary `PaymentRunService`'s payment step already draws for supplier payments. */
+  bankAccountName: text("bank_account_name"),
+  bankBsb: text("bank_bsb"),
+  bankAccountNumber: text("bank_account_number"),
+  /** Perpetually-maintained running balance, hours — same convention as `fixedAssets.accumulatedDepreciation`: updated only by `PayRunService.runPayRun`, with `pay_run_lines` as the append-only trail of how it got there. */
+  annualLeaveBalanceHours: numeric("annual_leave_balance_hours", { precision: 10, scale: 4 }).notNull().default("0"),
+  personalLeaveBalanceHours: numeric("personal_leave_balance_hours", { precision: 10, scale: 4 }).notNull().default("0"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+  updatedById: uuid("updated_by_id"),
+}, (table) => ({
+  orgStatusIdx: index("employees_org_status_idx").on(table.organizationId, table.status),
+  orgUserIdx: index("employees_org_user_idx").on(table.organizationId, table.userId),
+}));
+
+export const payRunStatusEnum = pgEnum("pay_run_status", ["DRAFT", "POSTED"]);
+
+/**
+ * One on-demand "run payroll for period X" action (master spec §8) — the
+ * payroll mirror of `RecurringInvoiceService.generateDue`/
+ * `DepreciationService.runForPeriod`: human-triggered, never scheduled (no
+ * job queue exists in this codebase — see docs/roadmap.md). `DRAFT` holds
+ * every computed `pay_run_lines` row for review; `POSTED` is terminal and
+ * immutable like any other posted journal — see `PayRunService.post`'s doc
+ * comment for why a mistake after posting is a reversing journal, never an
+ * edit to this row or its lines.
+ */
+export const payRuns = pgTable("pay_runs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  payFrequency: payFrequencyEnum("pay_frequency").notNull(),
+  periodStart: timestamp("period_start", { withTimezone: true, mode: "date" }).notNull(),
+  periodEnd: timestamp("period_end", { withTimezone: true, mode: "date" }).notNull(),
+  payDate: timestamp("pay_date", { withTimezone: true, mode: "date" }).notNull(),
+  status: payRunStatusEnum("status").notNull().default("DRAFT"),
+  /** GL account wiring, chosen at `create()` time and frozen for this run — same convention as `fixedAssets`' own account columns. See `PayRunService.post`'s doc comment for which side of the journal each one lands on. */
+  wagesExpenseAccountId: uuid("wages_expense_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  superannuationExpenseAccountId: uuid("superannuation_expense_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  paygWithholdingPayableAccountId: uuid("payg_withholding_payable_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  superannuationPayableAccountId: uuid("superannuation_payable_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  /** Credited for net pay (master spec §8) — this slice models a pay run's net pay as an immediately-recognized liability, the same "posted vs paid" separation `PaymentRunService` already draws for supplier payments: this account is a NET WAGES PAYABLE liability, not a bank account, so a pay run posting never claims an actual bank transfer happened (no real bank-file payment generation exists here, mirroring `PaymentRunService`'s own payment step). Settling it is a separate manual payment, exactly like paying down any other payable. */
+  netWagesPayableAccountId: uuid("net_wages_payable_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  /** The one combined payroll journal entry posted at `post()` time — see `PayRunService.post`'s doc comment for the debit/credit lines. Null while DRAFT. */
+  journalEntryId: uuid("journal_entry_id").references((): AnyPgColumn => journalEntries.id),
+  postedAt: timestamp("posted_at", { withTimezone: true }),
+  postedById: uuid("posted_by_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+}, (table) => ({
+  orgStatusIdx: index("pay_runs_org_status_idx").on(table.organizationId, table.status),
+  // A DRAFT or POSTED run for the same employee set isn't deduplicated by the
+  // schema (unlike depreciation_entries' per-asset-per-month uniqueness) —
+  // `PayRunService.create` is where accidental double-running the same
+  // period for the same employee is refused; see that method's doc comment.
+  orgPeriodIdx: index("pay_runs_org_period_idx").on(table.organizationId, table.periodStart, table.periodEnd),
+}));
+
+/**
+ * One employee's computed pay within a `pay_runs` row — the append-only
+ * detail line this slice's payslip view and STP-shaped report both read.
+ * Every monetary/hours figure here is a decimal string, computed once at
+ * `PayRunService.create` time and frozen; `PayRunService.post` only ever
+ * reads these rows to build the one combined journal, never recomputes
+ * them (so the GL and the payslip always agree by construction).
+ *
+ * `taxRuleSetId` records exactly which effective-dated rule set produced
+ * `paygWithholding`/`superGuarantee` on this row — the auditable proof that
+ * "effective-date controlled" (master spec §26) actually determined the
+ * numbers, not just documentation claiming it does.
+ */
+export const payRunLines = pgTable("pay_run_lines", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  payRunId: uuid("pay_run_id")
+    .notNull()
+    .references(() => payRuns.id, { onDelete: "cascade" }),
+  employeeId: uuid("employee_id")
+    .notNull()
+    .references(() => employees.id),
+  taxRuleSetId: uuid("tax_rule_set_id")
+    .notNull()
+    .references(() => payrollTaxRuleSets.id),
+  /** Decimal string — hours this pay run paid for. "0" for a SALARY employee not pro-rated by hours (still recorded, for display). */
+  hoursPaid: numeric("hours_paid", { precision: 10, scale: 4 }).notNull().default("0"),
+  /** Decimal string. */
+  grossPay: numeric("gross_pay", { precision: 19, scale: 4 }).notNull(),
+  /** Decimal string — this slice's one OTE simplification: all of `grossPay` is treated as ordinary time earnings for SG purposes (no overtime/bonus OTE-exclusion modeling) — see docs/roadmap.md. */
+  ordinaryTimeEarnings: numeric("ordinary_time_earnings", { precision: 19, scale: 4 }).notNull(),
+  /** Decimal string — this employee's quarter-to-date OTE INCLUDING this run, after applying the quarterly contribution base cap logic — see `SuperCalculations.quarterlyOte`'s doc comment. Recorded so the next pay run in the same quarter can read it back rather than re-deriving it by re-summing every prior run. */
+  quarterToDateOte: numeric("quarter_to_date_ote", { precision: 19, scale: 4 }).notNull(),
+  /** Decimal string. */
+  paygWithholding: numeric("payg_withholding", { precision: 19, scale: 4 }).notNull(),
+  /** Decimal string — superGuarantee = sgRate × (this run's OTE actually subject to SG after the quarterly cap, which may be less than ordinaryTimeEarnings if the cap was reached mid-run). */
+  superGuarantee: numeric("super_guarantee", { precision: 19, scale: 4 }).notNull(),
+  /** Decimal string. grossPay − paygWithholding (this slice pays no other employee-side deductions). */
+  netPay: numeric("net_pay", { precision: 19, scale: 4 }).notNull(),
+  /** Decimal string — NES annual leave accrued by this run (master spec §25). */
+  annualLeaveAccrued: numeric("annual_leave_accrued", { precision: 10, scale: 4 }).notNull(),
+  /** Decimal string — NES personal/carer's leave accrued by this run. */
+  personalLeaveAccrued: numeric("personal_leave_accrued", { precision: 10, scale: 4 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  orgPayRunIdx: index("pay_run_lines_org_pay_run_idx").on(table.organizationId, table.payRunId),
+  orgEmployeeIdx: index("pay_run_lines_org_employee_idx").on(table.organizationId, table.employeeId),
+  payRunEmployeeUnique: uniqueIndex("pay_run_lines_pay_run_employee_unique").on(table.payRunId, table.employeeId),
+}));
+
+export const employeesRelations = relations(employees, ({ one, many }) => ({
+  organization: one(organizations, {
+    fields: [employees.organizationId],
+    references: [organizations.id],
+  }),
+  user: one(users, {
+    fields: [employees.userId],
+    references: [users.id],
+  }),
+  payRunLines: many(payRunLines),
+}));
+
+export const payRunsRelations = relations(payRuns, ({ one, many }) => ({
+  organization: one(organizations, {
+    fields: [payRuns.organizationId],
+    references: [organizations.id],
+  }),
+  lines: many(payRunLines),
+  journalEntry: one(journalEntries, {
+    fields: [payRuns.journalEntryId],
+    references: [journalEntries.id],
+  }),
+}));
+
+export const payRunLinesRelations = relations(payRunLines, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [payRunLines.organizationId],
+    references: [organizations.id],
+  }),
+  payRun: one(payRuns, {
+    fields: [payRunLines.payRunId],
+    references: [payRuns.id],
+  }),
+  employee: one(employees, {
+    fields: [payRunLines.employeeId],
+    references: [employees.id],
+  }),
+  taxRuleSet: one(payrollTaxRuleSets, {
+    fields: [payRunLines.taxRuleSetId],
+    references: [payrollTaxRuleSets.id],
+  }),
+}));
+
+export const payrollTaxRuleSetsRelations = relations(payrollTaxRuleSets, ({ many }) => ({
+  brackets: many(payrollTaxBrackets),
+}));
+
+export const payrollTaxBracketsRelations = relations(payrollTaxBrackets, ({ one }) => ({
+  ruleSet: one(payrollTaxRuleSets, {
+    fields: [payrollTaxBrackets.ruleSetId],
+    references: [payrollTaxRuleSets.id],
+  }),
+}));
