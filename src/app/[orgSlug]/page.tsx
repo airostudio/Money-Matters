@@ -21,11 +21,13 @@ export default async function OrgHomePage({
 }) {
   const { org, actor } = await requireOrgAndActor(params.orgSlug);
 
-  const [trialBalance, recentEntries, accounts] = await Promise.all([
-    LedgerService.getTrialBalance(actor),
-    LedgerService.listJournalEntries(actor, { limit: 5 }),
-    AccountService.list(actor),
-  ]);
+  // Sequential, not Promise.all: each call opens its own pooled DB
+  // connection (see the same note in DailyFinanceBriefService.generate).
+  // This page also calls that service below, so keeping concurrency low
+  // here matters even more — see the EMAXCONNSESSION incident.
+  const trialBalance = await LedgerService.getTrialBalance(actor);
+  const recentEntries = await LedgerService.listJournalEntries(actor, { limit: 5 });
+  const accounts = await AccountService.list(actor);
 
   const needsOnboarding =
     roleHasPermission(actor.role, "onboarding:manage") && !accounts.some((a) => !a.isSystemAccount);

@@ -22,8 +22,15 @@ function createPool(): Pool {
     connectionString: connection.connectionString,
     ssl: connection.ssl,
     // Serverless invocations are short-lived and numerous; a small ceiling
-    // per instance keeps us well inside a pooler's connection limit.
-    max: Number(process.env.DATABASE_POOL_MAX ?? 5),
+    // per instance keeps us well inside a pooler's connection limit. Lowered
+    // from 5 to 3 after an EMAXCONNSESSION incident in production: Supabase's
+    // session-mode pooler caps the whole project at a small number of
+    // clients (commonly 15 on smaller tiers), and that cap divides across
+    // however many serverless instances are warm at once, not per request —
+    // 5 concurrent instances at max=5 can demand 25 connections, well past a
+    // 15-client pool; at max=3 the same 5 instances top out at 15. Raise this
+    // only alongside confirming the Supabase project's actual pool_size.
+    max: Number(process.env.DATABASE_POOL_MAX ?? 3),
     connectionTimeoutMillis: Number(process.env.DATABASE_CONNECT_TIMEOUT_MS ?? 10_000),
     idleTimeoutMillis: 30_000,
   });

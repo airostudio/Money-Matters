@@ -104,14 +104,19 @@ export const DailyFinanceBriefService = {
   async generate(actor: Actor, asOfDate: Date = new Date()): Promise<DailyFinanceBrief> {
     assertPermission(actor, "financial_report:read");
 
-    const [bankAccounts, trialBalance, receivables, payables, awaitingApproval, recentAutoExecutions] = await Promise.all([
-      BankAccountService.list(actor),
-      LedgerService.getTrialBalance(actor, asOfDate),
-      AgedReceivablesService.getWithPriority(actor, asOfDate),
-      AgedPayablesService.get(actor, asOfDate),
-      PaymentRunService.list(actor, { status: "AWAITING_APPROVAL" }),
-      AutoExecutionService.listRecent(actor.organizationId, 50),
-    ]);
+    // Sequential, not Promise.all: each of these opens its own pooled DB
+    // connection (every domain-service call runs inside its own
+    // withTenant() transaction — see src/db/tenant.ts). Six concurrent
+    // checkouts for one page render is what exhausted Supabase's
+    // session-mode pooler (capped at 15 clients total for the project) under
+    // real traffic — see the EMAXCONNSESSION incident. This trades a little
+    // latency for not needing six connections free at once.
+    const bankAccounts = await BankAccountService.list(actor);
+    const trialBalance = await LedgerService.getTrialBalance(actor, asOfDate);
+    const receivables = await AgedReceivablesService.getWithPriority(actor, asOfDate);
+    const payables = await AgedPayablesService.get(actor, asOfDate);
+    const awaitingApproval = await PaymentRunService.list(actor, { status: "AWAITING_APPROVAL" });
+    const recentAutoExecutions = await AutoExecutionService.listRecent(actor.organizationId, 50);
 
     const balanceByAccount = new Map(trialBalance.map((r) => [r.accountId, r.balance]));
     // Every bank account in an organization is denominated in the same base
