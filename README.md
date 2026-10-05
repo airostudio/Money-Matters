@@ -104,10 +104,20 @@ it reconciles correctly, including an account with a budget line and no
 actual activity, or actual activity with no budget line), an on-demand
 rolling-forecast action that copies a budget's lines forward from a
 chosen cutoff date, and a real Budget vs. Actual section in the
-Management Report Pack. Scenario modelling, cash flow forecasting,
-multi-entity consolidation, month-end close, and accountant practice
-management are all explicitly later Phase 9 slices — see `docs/roadmap.md`
-for why each is a distinct feature, not a shallow extension of budgeting.
+Management Report Pack.
+
+Phase 9 Slice 2 adds cash flow intelligence and scenario modelling. The
+Cash Forecast projects your cash balance 7/30/60/90 days and 12 months out
+as TWO separate series — known commitments only (open invoices and bills,
+payment runs, recurring templates) and including statistical projections
+(simple averages like a customer's own historical lateness) — and warns,
+with a date, when either dips below a threshold you set. Scenarios model
+hiring someone, changing prices, or losing a customer as Best / Expected /
+Worst built from explicit, editable assumptions (never predictions). Both
+are analysis only and never post to the ledger; the AI Financial Controller
+gains a read-only `cash_forecast` tool. Multi-entity consolidation,
+month-end close, and accountant practice management are later Phase 9
+slices — see `docs/roadmap.md`.
 See
 [`docs/roadmap.md`](docs/roadmap.md) for exactly what's built
 vs. explicitly deferred in each phase (a customer portal, AI-drafted

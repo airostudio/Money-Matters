@@ -2333,15 +2333,10 @@ below for everything else Phase 9's one-line description names.
 
 **Explicitly deferred to later Phase 9 slices (document why):**
 
-- **Scenario modelling** (master spec §37 — hire/pricing/lose-a-customer
-  what-if scenarios): needs a modeling layer on top of budgets — parameter
-  inputs, sensitivity, side-by-side scenario comparison — that doesn't
-  exist yet and is a distinct feature from entering and reporting a single
-  committed budget.
-- **Cash flow intelligence/forecasting** (master spec §38 — 7/30/60/90-day
-  cash projections): a distinct feature from Budget vs. Actual — it
-  projects forward from AR/AP aging and recurring schedules, not from a
-  budget's own monthly figures, and needs its own design.
+- **Scenario modelling** (master spec §37) and **cash flow
+  intelligence/forecasting** (master spec §38): originally deferred here as
+  distinct features from entering and reporting a single committed budget;
+  both are built in Slice 2 below.
 - **Month-end close workspace and period-lock override workflow**
   (master spec §40/41): ties into the existing but still-manual
   period-lock mechanism from Phase 1 (`fiscal_periods`/
@@ -2363,6 +2358,241 @@ below for everything else Phase 9's one-line description names.
 - Any scheduled/automatic rolling-window advance (e.g. "roll forward every
   month automatically") — `createRollingForecast` is on-demand only, see
   above; no job queue exists in this codebase for a true scheduled version.
+
+### Slice 2 — Cash Flow Intelligence & Scenario Modelling (complete, scoped per this slice's brief)
+
+Master spec §38's cash flow forecast and §37's scenario modelling. Both are
+**read-only analysis**: no `PostingService` call and no write to any
+financial table exists anywhere in `src/domain/forecasting/`. The single
+most important design requirement of §38 — "distinguish known commitments
+from statistical projections" — is expressed in the data model, not just in
+labels.
+
+**What's built:**
+
+- **KNOWN vs STATISTICAL is structural** (`src/domain/forecasting/types.ts`).
+  A forecast line is one of two different TYPES discriminated by `kind`:
+  `KnownForecastLine` (carries the `timing` that justifies its date and the
+  source document's own `statedDate`) and `StatisticalForecastLine`
+  (carries the explicit `basis` it was derived from, and optionally
+  `replacesLineId`, the known line it supersedes in the second series). The
+  forecast returns TWO series — `knownOnly` and `withStatistical` — and there
+  is no field anywhere that sums both kinds into one number. A statistical
+  twin carries the SAME cash as the known line it replaces, only on a
+  different expected date, so the two series never double count.
+- `CashForecastService.generate` (`cash-forecast-service.ts`; pure maths in
+  `forecast-calculations.ts`): a day-by-day projected balance for 7D / 30D /
+  60D / 90D / 12M from "today" (an `asOfDate` for tests). **Granularity**:
+  daily up to 90 days; weekly (end-of-week, plus day 0 and the final day) for
+  12 months — day-level resolution a year out is false precision (the
+  statistical shifts are themselves only whole-day estimates) and 365 points
+  per series is noise on a page. The series are ALWAYS computed daily
+  underneath, so the low point and the first-breach date are day-exact
+  regardless of display granularity.
+  - **Opening cash** is `loadCashPosition` (`reporting/cash-position.ts`),
+    extracted verbatim from `DailyFinanceBriefService` (a bank account IS its
+    linked GL account's balance) and now shared by the brief and the
+    forecast — one definition of "cash on hand".
+  - **KNOWN lines**: open (approved/sent/part-paid) customer invoices at their
+    stated due date (outstanding balance via the Aged Receivables service);
+    open approved supplier bills at due date; bills inside an APPROVED
+    payment run at the run's payment date (emitted ONCE — never as a bill and
+    again as a run; a run paying part of a bill splits it); active recurring
+    invoice/bill templates' upcoming occurrences, honouring `endDate`/
+    `maxOccurrences` and walking forward with the same `advanceRecurringDate`
+    the generator uses (amounts recomputed from current tax rates; cash date
+    is issue date + the platform's fixed 30-day default terms, which both
+    generators now export); posted payroll liabilities (see caveat below).
+    **Overdue** is handled prudently in each direction: an overdue
+    RECEIVABLE is a known amount whose receipt date no document states, so it
+    is undated and off the known timeline (`OVERDUE_RECEIPT_UNDATED`); an
+    overdue PAYABLE is assumed due today (`OVERDUE_ASSUMED_DUE_NOW`).
+  - **STATISTICAL lines**: (1) shift an open (or recurring-template) invoice's
+    expected receipt by that customer's historical average lateness — the
+    exact `loadCustomerPaymentHistory` Phase 3 Slice 2's collection priority
+    already computes from settled invoices (now exported, and also returning
+    the sample size so the UI can flag a thin history); an early payer shifts
+    earlier, never before today; a customer with NO settled history gets NO
+    statistical line (nothing invented). (2) Repeat the last POSTED pay run's
+    net wages at its pay frequency across the horizon (headcount/hours can
+    change, so it is never known).
+  - **What "statistical" means here, plainly**: simple, explainable averages —
+    a customer's own average days late over their own paid invoices; a repeat
+    of the last pay run. It is NOT a forecasting model: no machine learning,
+    no seasonality, no confidence intervals. That is a deliberate, honest
+    scope choice, and every statistical line shows the average and the number
+    of invoices behind it. An optional trailing-average "not-yet-invoiced
+    revenue/expense" projection was deliberately NOT built: done naively it
+    double counts open invoices, bills and recurring templates already in the
+    known series, and doing it honestly needs a cash-basis model this slice
+    does not have.
+  - **Payroll caveat (do not paper over)**: posted pay runs credit net-wages,
+    PAYG-withholding and super payables. The AMOUNT owed is known (the
+    ledger balance of those accounts), but this codebase has no verified
+    due-date rule — the PAYG remittance schedule is not modelled, FY2026-27
+    Payday Super mechanics are explicitly unresolved (see Phase 8), and a
+    net-wages payment is a separate manual action. So each is a KNOWN-amount
+    line with `timing: "UNVERIFIED"` and NO date: it is never placed on a
+    timeline at an invented due date. The result reports these as
+    `unscheduledKnown` and a prudence floor
+    (`lowPointIfUnscheduledOutflowsPaidNow` — the known-only low point if
+    every undated outflow were paid today; a bound, not a prediction).
+  - **Payroll access sensitivity**: payroll-derived lines are gated on
+    `payrun:read` (`roleHasPermission`), mirroring the Pay Runs page. An
+    actor without it (MANAGER, READ_ONLY) gets a COMPLETE forecast with
+    payroll lines omitted (`payrollOmitted: true`, plus a caveat) — never an
+    error and never a leak; this holds on the page and through the AI tool,
+    and the unscheduled-amount text is built from what the forecast actually
+    contains so it never hints at omitted payroll either (proved with a real
+    restricted-role actor in `cash-forecast.test.ts` and
+    `cash-forecast-ai.test.ts`).
+  - **Low-cash warning**: a user-configurable org-level threshold
+    (`cash_forecast_settings`, one row per org, default 0, audited via
+    `ForecastSettingsService`, needs `forecast:manage`) evaluated on EACH
+    series independently with the date it first dips below and "in N days"
+    (master spec §6's "Cash Warning" UX). The message always names which
+    series it is about; a breach only on the statistical series is shown as
+    estimate-driven.
+  - **Payment-run state, honestly**: `PaymentRunService.approve` approves AND
+    pays in one step in this codebase (no bank-file integration exists), so
+    an APPROVED-but-unpaid run is never persisted by the current services.
+    The forecast handles that state correctly anyway (it re-dates the bill)
+    so it is right the moment a real payment rail introduces it, and treats
+    AWAITING_APPROVAL runs as proposals — the bill stays at its own due date
+    and only gains a note. The `APPROVED` branch is tested by forcing that
+    status directly.
+  - **DB discipline**: calls are deliberately sequential (cash position 2
+    checkouts, receivables 2, payables 1, pay-run summaries 1, plus ONE own
+    transaction for payment runs/templates/tax rates/threshold); nothing
+    fans out in parallel. The Daily Finance Brief hands the forecast the
+    cash position/receivables/payables it already loaded, so the headline
+    adds only the forecast's own reads.
+- `ScenarioService` (`scenario-service.ts`; pure maths in
+  `scenario-calculations.ts`; zod schemas in `scenario-parameters.ts`): the
+  closed set of three master-spec §37 types, each with a typed parameter set
+  (a `scenario_type` enum — a new type is a deliberate code change, not a
+  free-form modeller). Saved scenarios are saved QUERIES (name + type +
+  validated parameters), re-run against fresh data every time (proved by a
+  freshness test) and re-validated on every read; `scenarios` stores no
+  result.
+  - **HIRE_EMPLOYEE**: salary, on-cost % (REQUIRED — no hardcoded AU on-cost;
+    the form PRE-FILLS the verified SG rate from Phase 8's rule engine,
+    `suggestedHireOnCost`, as an editable suggestion, null outside seeded
+    rule sets), start date (pro-rated in the first month), optional
+    incremental monthly revenue (default 0) with a linear ramp.
+    Best/Worst = revenue realised at 125% / 0% of the stated expectation
+    (editable). Outputs: P&L delta, run-rate cash, runway, break-even
+    (monthly and cumulative-payback month), fully loaded monthly cost.
+  - **PRICE_CHANGE**: % change over ALL revenue, selected customers,
+    products, or revenue accounts (the in-scope share of trailing-12-month
+    invoiced revenue is applied to each baseline month). **Elasticity is NOT
+    estimated**: the volume change per case is an explicit assumption
+    (default best 0 / expected 0 / worst −5%), because inferring a price
+    response from a small business's history is confounded and
+    underdetermined and a fabricated estimate is worse than a stated
+    assumption. Cost on lost volume is derived from the scope's own
+    tracked-inventory cost of sales (0 if none), overridable.
+  - **LOSE_CUSTOMER**: defaults to the largest customer by trailing-12-month
+    invoiced revenue (real data). Revenue effect from their share; margin
+    effect uses cost of sales actually attributable to that customer
+    (tracked-inventory SALE movements linked to their invoice lines) — when
+    none exists the result says it is REVENUE-ONLY, and an avoided-cost %
+    override is available. Best = 50% of the lost revenue replaced after a
+    3-month lag; Worst = their currently open receivables collected 2 months
+    late (a pure cash-timing shift) — all editable, none predictions.
+  - **Baseline** is explicit: the average of the last N (default 3) FULL
+    calendar months of posted activity held flat, or an ACTIVE baseline
+    budget (Slice 1); with no active budget it fails with
+    `ScenarioBaselineUnavailableError` rather than inventing one. Cash is a
+    RUN-RATE path (opening cash + cumulative monthly net profit) over the next
+    12 full calendar months — explicitly NOT a working-capital model; the
+    90-day cash forecast is shown alongside as near-term context.
+  - Every case lists the assumptions it applied; the UI and AI commentary
+    describe Best/Expected/Worst as assumptions, never predictions.
+- AI (strictly optional, strictly the established pattern):
+  `ForecastCommentaryService` — optional commentary over ALREADY-COMPUTED
+  figures only (same pattern as the management pack/Daily Brief; `null`
+  without an API key or on any failure; KNOWN and STATISTICAL kept under
+  separate labels; opt-in per page load via `?commentary=1` so no model call
+  runs on every render). And a read-only `cash_forecast` tool on the AI
+  Financial Controller (`controller-tools.ts`, `forecast:read`,
+  permission-checked and cited like every other tool; also offered to the FP&A
+  specialist) whose result keeps KNOWN COMMITMENTS ONLY and INCLUDING
+  STATISTICAL PROJECTIONS under separate headings with the low-cash date. No
+  scenario-creating tool exists (that would need Phase 6's
+  proposal/confirmation machinery) — a test asserts no tool name mentions
+  scenarios; scenarios are created by humans in the UI.
+- Daily Finance Brief gains a `cashForecast` headline (the 90-day low point on
+  each series) and folds the warning into its callouts — never fatal to the
+  brief.
+- Permissions: `forecast:read`/`forecast:manage`, `scenario:read`/
+  `scenario:manage`. `forecast:read` goes only to roles that already hold
+  every underlying read permission (OWNER/ADMIN, ACCOUNTANT, BOOKKEEPER,
+  MANAGER, READ_ONLY) — a unit test over `ROLE_PERMISSIONS` pins that
+  invariant so the single `forecast:read` check cannot widen access;
+  ACCOUNTANT/BOOKKEEPER also manage (mirroring budgets). Every mutation
+  (scenario create/update/delete, threshold change) is audited.
+- Schema: `scenarios` and `cash_forecast_settings` (migrations 0033/0034),
+  both org-scoped with RLS enabled + FORCEd + policy + `mm_app` grant —
+  tenant-isolation audit now **64 of 70** tables.
+- UI: `/forecasting/cash-flow` (horizon selector; two-series chart — solid
+  vs dashed, differentiated by style AND colour, with the threshold line and an
+  accessible data table; low-cash callout; known-vs-statistical line tables,
+  every line linked to its source document with its timing/basis; the
+  unscheduled-known box; threshold form; limitations list) and
+  `/forecasting/scenarios` (list, create-by-type forms stating every default,
+  edit, and a results view with Baseline | Best | Expected | Worst side by
+  side, the assumptions each case used, the derived inputs, month-by-month
+  tables, and the 90-day context). New `Forecasting` nav section.
+- Tests: unit (line classification, lateness shifting incl. early payers and
+  clamping, template occurrence generation, series balances across horizons
+  with hand-computed numbers, first-breach detection, each scenario type's
+  Best/Expected/Worst against hand-computed inputs, zod rejection of
+  malformed/missing parameters for every type, the permission-matrix
+  invariant, form<->parameter round-trips, the chart); integration against the
+  real database (a seeded mix — bank balance, an average-12-days-late
+  customer with settled history, overdue/not-yet-due invoices, bills, an
+  approved payment run, recurring templates, a posted pay run — with the
+  known-only series, the including-statistical series, the low points, the
+  first-breach date and every scenario type verified against hand
+  calculation; freshness; payroll omission for a role lacking `payrun:read`;
+  the AI tool's permission refusal with a real restricted-role actor and its
+  end-to-end tool loop with a mocked SDK; commentary; budget baselines;
+  ledger-untouched checks; audit entries; tenant isolation). 825 tests total
+  after this slice, up from 676.
+- `npm run typecheck`, `npm run lint`, `npm test`, and `npm run build` all
+  pass. The real Anthropic API is only ever exercised through a mocked SDK,
+  as with every AI feature here; the UI pages were compiled by `next build`
+  and the chart component rendered to markup in a unit test, but the pages were
+  not driven in a real browser session in this slice.
+
+**Explicitly deferred (document why):**
+
+- Month-end close workspace / period-lock override workflow, multi-entity
+  consolidation, accountant practice management/workpapers: separate Phase 9
+  slices (see Slice 1's list), unrelated to forecasting.
+- Scenario types beyond the three named in §37 and a free-form scenario
+  builder: the closed, typed set is the point — each type needs its own
+  honest, explainable maths.
+- Machine-learned or seasonally-adjusted forecasting: "statistical" is
+  deliberately simple averages (above). A real model needs far more history
+  and validation than a small-business ledger usually has, and a confident
+  but unjustified number is exactly what §38's known-vs-statistical split
+  exists to prevent.
+- A trailing-average projection of not-yet-invoiced revenue/recurring
+  expense (double-counting risk, see above) and GST/BAS liabilities (no
+  tax-filing domain; due dates unverified), unapplied supplier credits and
+  approved-but-unreimbursed expense claims in the forecast.
+- PAYG/super remittance DATES (unverified — kept as known-amount, undated
+  lines) and any projected PAYG/super outflows.
+- Multi-currency forecasting: base currency only, following the codebase's
+  convention (every amount here is assumed to be in the organization's base
+  currency).
+- Scheduled/emailed forecast alerts: no job queue exists; the warning is
+  shown on demand on the page, in the Daily Brief and via the AI tool.
+- Comparing two saved scenarios against each other: the results view compares
+  one scenario's three cases against the baseline; a cross-scenario compare
+  is a reasonable follow-up.
 
 ## Phase 10 — Platform (not started)
 

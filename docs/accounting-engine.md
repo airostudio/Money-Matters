@@ -544,3 +544,70 @@ asset registered against the wrong pair), never a rounding footnote.
   `buildProfitAndLoss` itself uses — a budget line against a different
   account type is still fully stored and queryable directly from
   `budget_lines`, just not surfaced by this particular report.
+
+## 14. Phase 9 Slice 2 — forecasts and scenarios: analysis only, with KNOWN and STATISTICAL structurally apart
+
+- **Forecasts and scenarios never touch the ledger.** Like budgets (§13),
+  nothing in `src/domain/forecasting/` imports `PostingService` or writes to
+  any financial table; tests assert the trial balance is identical before and
+  after a forecast/scenario run. The only tables this slice adds are
+  `scenarios` (saved parameters) and `cash_forecast_settings` (one threshold).
+- **The §38 distinction is a type, not a label.** A forecast line is either
+  a `KnownForecastLine` or a `StatisticalForecastLine` (discriminated by
+  `kind`; different fields). Series are built by `linesForSeries(lines,
+  mode)`: `KNOWN_ONLY` takes known lines only; `INCLUDING_STATISTICAL` takes
+  every statistical line plus every known line a statistical line does NOT
+  name in `replacesLineId`. A statistical timing shift therefore carries the
+  same cash as the known line it supersedes, so no document is ever counted
+  twice, and the result exposes two series with no blended total. Statistical
+  here means a simple, explainable average (a customer's own historical days
+  late from their own settled invoices; a repeat of the last posted pay
+  run) — never a forecasting model.
+- **Opening cash is one definition.** `loadCashPosition` (extracted from the
+  Daily Finance Brief) — a bank account IS its linked GL account's balance,
+  from the shared trial-balance aggregation (§8a); the forecast reuses the
+  same snapshot for payroll-payable balances.
+- **Dates and overdue items.** All dates are UTC-midnight, day 0 is today
+  and its end-of-day balance already includes flows dated today; a flow dated
+  before today is treated as today (it is still unpaid, which is why it's in
+  the forecast). An overdue receivable has a certain amount but no
+  determinable receipt date, so it is NOT on the known timeline (prudent for an
+  inflow); an overdue payable is assumed due today (prudent for an outflow).
+  The series is always computed daily; weekly granularity is display-only for
+  the 12-month horizon, so low points and breach dates are day-exact.
+- **A due date is never invented.** Posted payroll liabilities (net wages,
+  PAYG withholding, super) are known AMOUNTS (the payable accounts' ledger
+  balances) with `timing: "UNVERIFIED"` and no date — the remittance rules are
+  not verified in this codebase (Phase 8's roadmap notes). They are reported
+  as `unscheduledKnown` with a "paid today" prudence floor, not placed on a
+  timeline.
+- **Recurring templates** are known scheduled commitments: occurrences come
+  from the same `advanceRecurringDate` the generators use (honouring
+  `endDate`/`maxOccurrences`, including backlog), the amount is recomputed
+  from current tax rates exactly as generation does, and the cash date is
+  issue date + the generators' fixed 30-day default terms.
+- **Scenarios are a transparent monthly what-if, not a model.** Over the next
+  12 full calendar months: an unmodified baseline monthly P&L (flat trailing
+  actuals from `sumPostedActivityByAccount`, or an ACTIVE budget's lines), plus
+  explicit per-type monthly deltas (`hireDeltas`, `priceChangeDeltas`,
+  `loseCustomerDeltas` — pure, hand-verified in unit tests), pro-rated by days
+  in the first month. Cash is a RUN-RATE path (opening cash + cumulative
+  monthly net profit), explicitly not a working-capital model. Money is
+  `Money`/decimal.js throughout, percentages and amounts are decimal STRINGS
+  in the saved parameters, and rounding is the codebase's usual half-even.
+- **Best / Expected / Worst differ only by explicit, editable assumptions**
+  (hire: revenue realised 125% / 100% / 0%; price change: the volume change
+  assumed per case, expected 0 by default — the price response is NOT
+  estimated from history, because a small business's data cannot support an
+  honest elasticity; lose-customer: partial replacement after a lag in the
+  best case, collections delayed in the worst). Each case lists its
+  assumptions in its result. They are modelling assumptions, never
+  predictions.
+- **Derived inputs come from real data and are shown.** Trailing-12-month
+  revenue shares come from posted invoice lines (by customer, product,
+  revenue account) against the P&L's revenue; cost of sales is only what is
+  actually attributable (tracked-inventory SALE movements linked to the
+  invoice lines — §10) — when none exists a result says it is revenue-only.
+- **Runway** = months until run-rate cash goes below zero, interpolated
+  within the month; `null` means "not within the 12 months modelled", which
+  the UI words that way rather than as "infinite".

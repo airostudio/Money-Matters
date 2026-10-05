@@ -619,6 +619,28 @@ the same transaction — structurally never a duplicate because nothing else
 ever writes to this table. If a second write path to `budget_lines` is
 ever added, this choice should be revisited.
 
+## 2m. Phase 9 Slice 2: `scenarios`, `cash_forecast_settings`
+
+Two small org-scoped tables, both with RLS enabled + FORCEd + a policy + an
+`mm_app` grant (migration `0034`); the tenant-isolation audit in
+`npm run db:migrate` now reports **64 of 70** tables.
+
+- **`scenarios`** — a saved QUERY, not a result: `name`, a `scenario_type`
+  enum (`HIRE_EMPLOYEE`/`PRICE_CHANGE`/`LOSE_CUSTOMER` — a closed set, so a new
+  type is a deliberate code change), `parameters jsonb`, `notes`. Convention
+  worth noting: `parameters` is **validated by the per-type zod schema on every
+  write and again on every read** (`src/domain/forecasting/scenario-
+  parameters.ts`), so a malformed blob can never reach a calculation; money and
+  percentages inside it are decimal STRINGS (never JSON numbers/floats), and it
+  holds only inputs and explicit assumptions — never computed output (a test
+  asserts nothing computed is persisted). There is no `journalEntryId`: a
+  scenario never touches the ledger.
+- **`cash_forecast_settings`** — at most one row per organization (a unique
+  index on `organization_id`) holding `low_cash_threshold`. An absent row means
+  the documented default of zero, so no row is seeded for existing orgs. Kept
+  as its own table rather than a column on `organizations` so forecasting stays
+  additive and never widens the core org row every query reads.
+
 ## 3. Row-Level Security
 
 Every tenant table gets an RLS policy of the shape:

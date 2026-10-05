@@ -518,6 +518,57 @@ to undo anything actually posted, which auto-execution in this slice never
 does), and the whole mechanism is pausable via a real, reachable emergency
 stop separate from the normal settings form.
 
+## 0f. Eighth integration: the read-only `cash_forecast` tool and forecast/scenario commentary (Phase 9 Slice 2)
+
+Two small additions, both following patterns already established above — no
+new autonomy machinery.
+
+**`cash_forecast` (a Financial Controller read tool).** A thin wrapper around
+`CashForecastService.generate` (master spec §38), declared with
+`permission: "forecast:read"` and executed through the same `guarded()`
+refusal path as every other tool, so a role without the permission gets the
+structured "Access denied ... forecast:read" refusal and no citation —
+proven with real restricted-role actors against the real database in
+`src/tests/integration/forecasting/cash-forecast-ai.test.ts`. It accepts a
+`horizon` (7D/30D/60D/90D/12M) and an optional `asOfDate`, both
+re-validated by zod before running, so a user can ask "when might we run low
+on cash?" and get a real, cited answer (the citation links to the Cash
+Forecast page). What it returns is the §38 distinction **kept structural, so
+the assistant can't blur it either**: the text handed to the model has two
+separately-headed projections — `KNOWN COMMITMENTS ONLY (grounded in
+invoices, bills, approved payment runs, scheduled recurring templates)` and
+`INCLUDING STATISTICAL PROJECTIONS (ESTIMATES from simple historical
+averages, NOT certain)` — each with its own end balance and low point, the
+low-cash warning with its real date, the largest lines of each kind (a
+statistical line says what average it came from and over how many settled
+invoices), and a separate paragraph for known amounts with no determinable
+date. The tool description and the FP&A system prompt both instruct the model
+to say which projection a statement is about.
+
+**Payroll sensitivity carries through.** Payroll-derived lines are gated on
+`payrun:read` inside `CashForecastService`, not in the tool: a role that can
+read forecasts but not pay runs (MANAGER, READ_ONLY) gets a complete forecast
+with payroll lines omitted and a one-line notice saying so, and none of the
+payroll figures or even payroll wording appears in the tool result (asserted
+in the test above).
+
+**What is deliberately NOT here.** There is no scenario-creating (or any
+scenario) tool: creating a scenario is a write, and a write-capable tool
+would need the whole Phase 6 Slice 2/3 proposal-and-confirmation machinery —
+out of scope for this slice; scenarios are created by humans in the UI. A test
+asserts no registered tool name mentions scenarios.
+
+**Optional commentary (`ForecastCommentaryService`).** The same lightweight
+pattern as the Management Report Pack and Daily Brief commentary: given only
+already-computed figures (`forecastFacts`/`scenarioFacts` build them — KNOWN
+and STATISTICAL under separate labels; scenario cases described as
+assumptions), instructed never to calculate or introduce a number, 15 s
+timeout, and `null` — the page simply omits the card — when there is no
+`ANTHROPIC_API_KEY` or the call fails. It is opt-in per page load
+(`?commentary=1`) so a model call doesn't run on every render. It is never a
+source of figures. As with every AI feature in this codebase, the real
+Anthropic API is only exercised through a mocked SDK in tests.
+
 ## 1. Why this belongs in the Phase 1 docs
 
 The single most important constraint on the AI layer is: **it must never see
@@ -768,12 +819,13 @@ tool a plain `"GENERAL"` conversation couldn't already use, and it reuses
 - **AP** — `aged_payables`, `find_bill`, `run_report`, plus
   `prepare_draft_bill` at Level 2.
 - **FP&A** — `profit_and_loss`, `balance_sheet`, `trial_balance`,
-  `run_report`. Read-only by design (no write tool at any level) — this is
-  profitability/trend/KPI analysis over reports that already exist, not a
-  budgeting feature. Its system prompt explicitly instructs the model to
-  say plainly that budgeting/forecasting isn't built yet rather than
-  inventing a comparison-to-budget figure, since no budget data exists
-  anywhere in this codebase for it to cite.
+  `run_report`, and (Phase 9 Slice 2) `cash_forecast`. Read-only by design
+  (no write tool at any level) — this is profitability/trend/KPI analysis
+  over reports that already exist. Its system prompt now tells the model
+  that known and statistical projections are two separate things and to say
+  which it means, and still has it say plainly that it has no budget or
+  what-if-scenario tool (those are UI features) rather than inventing a
+  comparison figure.
 - **Payroll and Tax & Compliance are deliberately NOT built**, not even as
   a mode with zero tools. There is no payroll domain (employee records, pay
   runs, PAYG/super) and no tax-filing/BAS domain anywhere in this codebase
