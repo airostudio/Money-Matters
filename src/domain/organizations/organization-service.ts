@@ -27,7 +27,7 @@ export {
  * to one of these would be unreachable (the static route wins over `[orgSlug]`)
  * — and "admin" in particular must never be claimable by a customer.
  */
-const RESERVED_SLUGS = new Set(["admin", "app", "api", "login", "register", "_next"]);
+const RESERVED_SLUGS = new Set(["admin", "app", "api", "login", "register", "_next", "practice"]);
 
 export class SlugTakenError extends Error {
   constructor(slug: string) {

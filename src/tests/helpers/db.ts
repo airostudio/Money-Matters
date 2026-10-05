@@ -7,6 +7,27 @@ import type { Actor } from "@/domain/permissions/permission-service";
 import type { MembershipRole } from "@/domain/permissions/roles";
 
 const TENANT_TABLES = [
+  "workpaper_signoffs",
+  "workpaper_review_notes",
+  "workpaper_adjustments",
+  "workpaper_evidence",
+  "workpaper_schedule_lines",
+  "workpaper_snapshots",
+  "workpapers",
+  "practice_tasks",
+  "practice_deadline_templates",
+  "client_health_snapshots",
+  "practice_client_group_members",
+  "practice_client_groups",
+  "practice_client_links",
+  "practice_audit_logs",
+  "practice_roster",
+  "practice_members",
+  "practice_partners",
+  "practices",
+  "client_request_messages",
+  "client_requests",
+  "practice_client_consents",
   "entity_group_audit_logs",
   "entity_group_adjustment_lines",
   "entity_group_adjustments",
@@ -157,4 +178,14 @@ export async function addTestMember(ownerActor: Actor, role: MembershipRole, nam
   const user = await createTestUser(namePrefix);
   await OrganizationService.addMemberByEmail(ownerActor, user.email, role);
   return { userId: user.id, organizationId: ownerActor.organizationId, role };
+}
+
+/** The Postgres error text behind a rejected query (drizzle wraps it as "Failed query" with the driver error as `cause`). */
+export async function pgMessage(promise: Promise<unknown>): Promise<string> {
+  const error = await promise.then(
+    () => null,
+    (e: { message: string; cause?: { message?: string } }) => e,
+  );
+  if (!error) return "";
+  return error.cause?.message ?? error.message;
 }

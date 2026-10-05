@@ -10,6 +10,7 @@ import {
   text,
   timestamp,
   boolean,
+  date,
   numeric,
   integer,
   jsonb,
@@ -2205,6 +2206,510 @@ export const entityGroupAuditLogs = pgTable("entity_group_audit_logs", {
 }, (table) => ({
   groupOwnerFk: foreignKey({ columns: [table.groupId, table.ownerUserId], foreignColumns: [entityGroups.id, entityGroups.ownerUserId], name: "entity_group_audit_logs_group_owner_fk" }),
   groupCreatedIdx: index("entity_group_audit_logs_group_created_idx").on(table.groupId, table.createdAt),
+}));
+
+// ---------------------------------------------------------------------------
+// Phase 9 Slice 5 — accountant practice management & workpapers
+// (master spec §42/§43). See docs/security.md section 13 for the scoping model.
+//
+// Two kinds of table live here:
+//
+//  * PRACTICE-scoped (carry `practice_id`, never `organization_id`): the
+//    practice's own internal data — staff, client links, tasks, workpapers,
+//    review notes. Row-level security keys on the single session variable
+//    `app.current_user_id` and an EXISTS over the practice's own membership
+//    tables (drizzle/0041_*), so only an ACTIVE staff member of the practice
+//    can reach a row. They are reached through `withUserScope`.
+//
+//  * TENANT-scoped (carry `organization_id`): the consent record and the
+//    client-visible requests. They belong to the CLIENT organization, are
+//    isolated by `app.current_org_id` like every other tenant table, and are
+//    reached through `withTenant`.
+// ---------------------------------------------------------------------------
+
+export const practiceRoleEnum = pgEnum("practice_role", ["PARTNER", "MANAGER", "STAFF"]);
+export const practiceMemberStatusEnum = pgEnum("practice_member_status", ["ACTIVE", "REMOVED"]);
+/** One enum for both sides of the handshake: the tenant-side consent record and the practice-side link mirror. */
+export const practiceLinkStatusEnum = pgEnum("practice_link_status", ["PENDING", "ACTIVE", "DECLINED", "REVOKED", "WITHDRAWN"]);
+export const practiceTaskStatusEnum = pgEnum("practice_task_status", ["OPEN", "IN_PROGRESS", "DONE", "CANCELLED"]);
+export const practiceTaskPriorityEnum = pgEnum("practice_task_priority", ["LOW", "NORMAL", "HIGH"]);
+export const practiceTaskCategoryEnum = pgEnum("practice_task_category", [
+  "BAS",
+  "TAX",
+  "PAYROLL",
+  "YEAR_END",
+  "REVIEW",
+  "BOOKKEEPING",
+  "OTHER",
+]);
+export const practiceDeadlineFrequencyEnum = pgEnum("practice_deadline_frequency", ["MONTHLY", "QUARTERLY", "ANNUAL"]);
+export const workpaperKindEnum = pgEnum("workpaper_kind", ["BALANCE_SHEET_ACCOUNT_RECONCILIATION"]);
+export const workpaperStatusEnum = pgEnum("workpaper_status", ["DRAFT", "IN_REVIEW", "SIGNED_OFF"]);
+export const workpaperSignoffStepEnum = pgEnum("workpaper_signoff_step", ["PREPARER", "REVIEWER", "REOPEN"]);
+export const workpaperScheduleLineKindEnum = pgEnum("workpaper_schedule_line_kind", ["SUPPORTING_BALANCE", "RECONCILING_ITEM"]);
+export const workpaperReviewNoteStatusEnum = pgEnum("workpaper_review_note_status", ["OPEN", "RESOLVED"]);
+export const workpaperAdjustmentStatusEnum = pgEnum("workpaper_adjustment_status", ["PROPOSED", "DISMISSED", "POSTED"]);
+export const clientRequestTypeEnum = pgEnum("client_request_type", ["QUERY", "DOCUMENT_REQUEST"]);
+export const clientRequestStatusEnum = pgEnum("client_request_status", ["OPEN", "ANSWERED", "CLOSED"]);
+export const clientRequestSideEnum = pgEnum("client_request_side", ["PRACTICE", "CLIENT"]);
+
+/** The practice itself. Visible to its creator and to its ACTIVE staff. */
+export const practices = pgTable("practices", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull(),
+  createdByUserId: uuid("created_by_user_id").notNull().references(() => users.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * ANCHOR table: "the practices I am a partner of". Own-row policy only
+ * (`user_id = app.current_user_id`) — a trivial predicate with no sub-select,
+ * which is what lets `practice_members` let a partner see (and therefore
+ * update) the other staff rows without a self-referencing policy (Postgres
+ * rejects those as infinite recursion). A row is created for the founder and
+ * for a promoted partner, and deleted by the partner themselves when they step
+ * down; a partner cannot be removed by someone else (docs/security.md s.13).
+ */
+export const practicePartners = pgTable("practice_partners", {
+  practiceId: uuid("practice_id").notNull().references(() => practices.id),
+  userId: uuid("user_id").notNull().references(() => users.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  pk: uniqueIndex("practice_partners_practice_user_unique").on(table.practiceId, table.userId),
+}));
+
+/**
+ * The GATE: every other practice table's policy asks "is there an ACTIVE row
+ * here for me, in this practice?". A staff member sees their own row; a partner
+ * (via `practice_partners`) sees every row of their practice.
+ */
+export const practiceMembers = pgTable("practice_members", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  practiceId: uuid("practice_id").notNull().references(() => practices.id),
+  userId: uuid("user_id").notNull().references(() => users.id),
+  role: practiceRoleEnum("role").notNull().default("STAFF"),
+  status: practiceMemberStatusEnum("status").notNull().default("ACTIVE"),
+  invitedByUserId: uuid("invited_by_user_id").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  practiceUserUnique: uniqueIndex("practice_members_practice_user_unique").on(table.practiceId, table.userId),
+  mirrorUnique: uniqueIndex("practice_members_mirror_unique").on(table.practiceId, table.userId, table.role, table.status),
+}));
+
+/**
+ * The colleague directory: a read-only MIRROR of `practice_members` that any
+ * ACTIVE member may read (so staff can pick an assignee and the sign-off rule
+ * can count reviewers). Its role/status are not independent — a composite
+ * foreign key with ON UPDATE CASCADE makes the database keep them equal to the
+ * authoritative row.
+ */
+export const practiceRoster = pgTable("practice_roster", {
+  practiceId: uuid("practice_id").notNull(),
+  userId: uuid("user_id").notNull(),
+  role: practiceRoleEnum("role").notNull(),
+  status: practiceMemberStatusEnum("status").notNull(),
+}, (table) => ({
+  pk: uniqueIndex("practice_roster_practice_user_unique").on(table.practiceId, table.userId),
+  memberFk: foreignKey({
+    columns: [table.practiceId, table.userId, table.role, table.status],
+    foreignColumns: [practiceMembers.practiceId, practiceMembers.userId, practiceMembers.role, practiceMembers.status],
+    name: "practice_roster_member_fk",
+  }).onUpdate("cascade"),
+}));
+
+/** Append-only practice-level audit trail (INSERT/SELECT only for mm_app). */
+export const practiceAuditLogs = pgTable("practice_audit_logs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  practiceId: uuid("practice_id").notNull().references(() => practices.id),
+  actorUserId: uuid("actor_user_id").notNull(),
+  actorType: auditActorTypeEnum("actor_type").notNull().default("HUMAN"),
+  action: text("action").notNull(),
+  entityType: text("entity_type").notNull(),
+  entityId: text("entity_id").notNull(),
+  before: jsonb("before"),
+  after: jsonb("after"),
+  metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  practiceCreatedIdx: index("practice_audit_logs_practice_created_idx").on(table.practiceId, table.createdAt),
+}));
+
+/**
+ * The practice's side of a client link. The AUTHORITATIVE consent record is
+ * `practice_client_consents` in the client organization (the client controls
+ * it); this row is the practice's own working copy (name, assignee, when its
+ * status was last verified against the client's record). The practice never
+ * reads a client's data on the strength of this row — every read re-checks the
+ * client's own record inside the same transaction.
+ */
+export const practiceClientLinks = pgTable("practice_client_links", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  practiceId: uuid("practice_id").notNull().references(() => practices.id),
+  clientOrganizationId: uuid("client_organization_id").notNull().references(() => organizations.id),
+  clientName: text("client_name").notNull(),
+  clientSlug: text("client_slug").notNull(),
+  status: practiceLinkStatusEnum("status").notNull().default("PENDING"),
+  proposedByUserId: uuid("proposed_by_user_id").notNull(),
+  assignedUserId: uuid("assigned_user_id"),
+  statusVerifiedAt: timestamp("status_verified_at", { withTimezone: true }),
+  statusChangedAt: timestamp("status_changed_at", { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  practiceClientUnique: uniqueIndex("practice_client_links_practice_client_unique").on(table.practiceId, table.clientOrganizationId),
+  practiceStatusIdx: index("practice_client_links_practice_status_idx").on(table.practiceId, table.status),
+  assigneeFk: foreignKey({
+    columns: [table.practiceId, table.assignedUserId],
+    foreignColumns: [practiceMembers.practiceId, practiceMembers.userId],
+    name: "practice_client_links_assignee_fk",
+  }),
+}));
+
+export const practiceClientGroups = pgTable("practice_client_groups", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  practiceId: uuid("practice_id").notNull().references(() => practices.id),
+  name: text("name").notNull(),
+  createdByUserId: uuid("created_by_user_id").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  nameUnique: uniqueIndex("practice_client_groups_practice_name_unique").on(table.practiceId, table.name),
+  idPracticeUnique: uniqueIndex("practice_client_groups_id_practice_unique").on(table.id, table.practiceId),
+}));
+
+export const practiceClientGroupMembers = pgTable("practice_client_group_members", {
+  groupId: uuid("group_id").notNull(),
+  practiceId: uuid("practice_id").notNull(),
+  clientOrganizationId: uuid("client_organization_id").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  pk: uniqueIndex("practice_client_group_members_unique").on(table.groupId, table.clientOrganizationId),
+  groupFk: foreignKey({
+    columns: [table.groupId, table.practiceId],
+    foreignColumns: [practiceClientGroups.id, practiceClientGroups.practiceId],
+    name: "practice_client_group_members_group_fk",
+  }),
+  linkFk: foreignKey({
+    columns: [table.practiceId, table.clientOrganizationId],
+    foreignColumns: [practiceClientLinks.practiceId, practiceClientLinks.clientOrganizationId],
+    name: "practice_client_group_members_link_fk",
+  }),
+}));
+
+/**
+ * The materialised dashboard indicators: ONE row per (practice, client), the
+ * latest refresh. A NULL measurement means "not measured" (the refreshing
+ * staff member's role in that client lacked the permission) — never zero.
+ * Counts only: no amounts and no client names beyond the link row.
+ */
+export const clientHealthSnapshots = pgTable("client_health_snapshots", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  practiceId: uuid("practice_id").notNull(),
+  clientOrganizationId: uuid("client_organization_id").notNull(),
+  /** OK | NO_ACCESS (refresher was not a member) | LINK_INACTIVE | ERROR. */
+  state: text("state").notNull(),
+  detail: text("detail"),
+  computedAt: timestamp("computed_at", { withTimezone: true }).notNull().defaultNow(),
+  computedByUserId: uuid("computed_by_user_id").notNull(),
+  computedByRole: text("computed_by_role"),
+  periodLabel: text("period_label"),
+  lockLevel: text("lock_level"),
+  booksPercent: integer("books_percent"),
+  blockingCount: integer("blocking_count"),
+  attentionCount: integer("attention_count"),
+  unreconciledCount: integer("unreconciled_count"),
+  uncategorisedCount: integer("uncategorised_count"),
+  draftPayRuns: integer("draft_pay_runs"),
+  /** The end date (YYYY-MM-DD) of the latest period that is TAX_LOCKED or HARD_LOCKED, or null. */
+  taxLockedThrough: text("tax_locked_through"),
+}, (table) => ({
+  practiceClientUnique: uniqueIndex("client_health_snapshots_practice_client_unique").on(table.practiceId, table.clientOrganizationId),
+  linkFk: foreignKey({
+    columns: [table.practiceId, table.clientOrganizationId],
+    foreignColumns: [practiceClientLinks.practiceId, practiceClientLinks.clientOrganizationId],
+    name: "client_health_snapshots_link_fk",
+  }),
+}));
+
+export const practiceDeadlineTemplates = pgTable("practice_deadline_templates", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  practiceId: uuid("practice_id").notNull().references(() => practices.id),
+  clientOrganizationId: uuid("client_organization_id"),
+  name: text("name").notNull(),
+  category: practiceTaskCategoryEnum("category").notNull().default("BAS"),
+  frequency: practiceDeadlineFrequencyEnum("frequency").notNull(),
+  /** The calendar month (1-12) in which a period ends. QUARTERLY periods end every third month from it; MONTHLY ignores it. */
+  periodEndMonth: integer("period_end_month").notNull().default(12),
+  /** Whole months after the period end in which the deadline falls (0-12). */
+  dueMonthsAfter: integer("due_months_after").notNull().default(1),
+  /** Day of that month (1-31); clamped to the month's length. */
+  dueDay: integer("due_day").notNull().default(28),
+  priority: practiceTaskPriorityEnum("priority").notNull().default("NORMAL"),
+  notes: text("notes"),
+  isActive: boolean("is_active").notNull().default(true),
+  createdByUserId: uuid("created_by_user_id").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  idPracticeUnique: uniqueIndex("practice_deadline_templates_id_practice_unique").on(table.id, table.practiceId),
+  practiceIdx: index("practice_deadline_templates_practice_idx").on(table.practiceId),
+  linkFk: foreignKey({
+    columns: [table.practiceId, table.clientOrganizationId],
+    foreignColumns: [practiceClientLinks.practiceId, practiceClientLinks.clientOrganizationId],
+    name: "practice_deadline_templates_link_fk",
+  }),
+  rangesCheck: check("practice_deadline_templates_ranges", sql`${table.periodEndMonth} BETWEEN 1 AND 12 AND ${table.dueMonthsAfter} BETWEEN 0 AND 12 AND ${table.dueDay} BETWEEN 1 AND 31`),
+}));
+
+export const practiceTasks = pgTable("practice_tasks", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  practiceId: uuid("practice_id").notNull().references(() => practices.id),
+  clientOrganizationId: uuid("client_organization_id"),
+  title: text("title").notNull(),
+  description: text("description"),
+  /** YYYY-MM-DD. */
+  dueDate: date("due_date", { mode: "string" }),
+  status: practiceTaskStatusEnum("status").notNull().default("OPEN"),
+  priority: practiceTaskPriorityEnum("priority").notNull().default("NORMAL"),
+  category: practiceTaskCategoryEnum("category").notNull().default("OTHER"),
+  assignedUserId: uuid("assigned_user_id"),
+  createdByUserId: uuid("created_by_user_id").notNull(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  completedByUserId: uuid("completed_by_user_id"),
+  /** Set when generated from a deadline template: the period (YYYY-MM-DD end) it covers — unique per template, so generating twice is idempotent. */
+  templateId: uuid("template_id"),
+  periodEnd: date("period_end", { mode: "string" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  practiceDueIdx: index("practice_tasks_practice_due_idx").on(table.practiceId, table.status, table.dueDate),
+  clientIdx: index("practice_tasks_client_idx").on(table.practiceId, table.clientOrganizationId),
+  templatePeriodUnique: uniqueIndex("practice_tasks_template_period_unique").on(table.templateId, table.periodEnd),
+  linkFk: foreignKey({
+    columns: [table.practiceId, table.clientOrganizationId],
+    foreignColumns: [practiceClientLinks.practiceId, practiceClientLinks.clientOrganizationId],
+    name: "practice_tasks_link_fk",
+  }),
+  assigneeFk: foreignKey({
+    columns: [table.practiceId, table.assignedUserId],
+    foreignColumns: [practiceMembers.practiceId, practiceMembers.userId],
+    name: "practice_tasks_assignee_fk",
+  }),
+  templateFk: foreignKey({
+    columns: [table.templateId, table.practiceId],
+    foreignColumns: [practiceDeadlineTemplates.id, practiceDeadlineTemplates.practiceId],
+    name: "practice_tasks_template_fk",
+  }),
+}));
+
+/**
+ * A digital working paper (master spec s.43). Practice-owned: it records what
+ * the practice saw of a client's ledger at a stated moment, and survives the
+ * client revoking access (clearly marked as of that past date).
+ */
+export const workpapers = pgTable("workpapers", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  practiceId: uuid("practice_id").notNull().references(() => practices.id),
+  clientOrganizationId: uuid("client_organization_id").notNull(),
+  kind: workpaperKindEnum("kind").notNull().default("BALANCE_SHEET_ACCOUNT_RECONCILIATION"),
+  accountId: uuid("account_id").notNull(),
+  accountCode: text("account_code").notNull(),
+  accountName: text("account_name").notNull(),
+  accountType: text("account_type").notNull(),
+  currency: text("currency").notNull(),
+  /** The balance is "as at the end of this day". YYYY-MM-DD. */
+  periodEnd: date("period_end", { mode: "string" }).notNull(),
+  status: workpaperStatusEnum("status").notNull().default("DRAFT"),
+  /** Bumped by every reopen of a signed-off paper; sign-offs and notes carry the version they belong to. */
+  version: integer("version").notNull().default(1),
+  preparedByUserId: uuid("prepared_by_user_id").notNull(),
+  /** The ledger balance in the account's normal direction, as pulled at `snapshotTakenAt`. */
+  ledgerBalance: numeric("ledger_balance", { precision: 19, scale: 4 }).notNull(),
+  snapshotTakenAt: timestamp("snapshot_taken_at", { withTimezone: true }).notNull(),
+  snapshotTakenByUserId: uuid("snapshot_taken_by_user_id").notNull(),
+  /** Carry-forward comparative: the prior period's ledger balance, copied (never recomputed). */
+  priorWorkpaperId: uuid("prior_workpaper_id"),
+  priorPeriodEnd: date("prior_period_end", { mode: "string" }),
+  priorLedgerBalance: numeric("prior_ledger_balance", { precision: 19, scale: 4 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  uniquePaper: uniqueIndex("workpapers_account_period_unique").on(table.practiceId, table.clientOrganizationId, table.accountId, table.periodEnd),
+  idPracticeUnique: uniqueIndex("workpapers_id_practice_unique").on(table.id, table.practiceId),
+  practiceStatusIdx: index("workpapers_practice_status_idx").on(table.practiceId, table.status),
+  linkFk: foreignKey({
+    columns: [table.practiceId, table.clientOrganizationId],
+    foreignColumns: [practiceClientLinks.practiceId, practiceClientLinks.clientOrganizationId],
+    name: "workpapers_link_fk",
+  }),
+}));
+
+/** Append-only history of every pull of the ledger balance for a workpaper. */
+export const workpaperSnapshots = pgTable("workpaper_snapshots", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workpaperId: uuid("workpaper_id").notNull(),
+  practiceId: uuid("practice_id").notNull(),
+  version: integer("version").notNull(),
+  periodEnd: date("period_end", { mode: "string" }).notNull(),
+  ledgerBalance: numeric("ledger_balance", { precision: 19, scale: 4 }).notNull(),
+  takenAt: timestamp("taken_at", { withTimezone: true }).notNull().defaultNow(),
+  takenByUserId: uuid("taken_by_user_id").notNull(),
+  takenByRole: text("taken_by_role").notNull(),
+}, (table) => ({
+  workpaperFk: foreignKey({ columns: [table.workpaperId, table.practiceId], foreignColumns: [workpapers.id, workpapers.practiceId], name: "workpaper_snapshots_workpaper_fk" }),
+  workpaperIdx: index("workpaper_snapshots_workpaper_idx").on(table.workpaperId, table.takenAt),
+}));
+
+export const workpaperScheduleLines = pgTable("workpaper_schedule_lines", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workpaperId: uuid("workpaper_id").notNull(),
+  practiceId: uuid("practice_id").notNull(),
+  lineNumber: integer("line_number").notNull(),
+  kind: workpaperScheduleLineKindEnum("kind").notNull(),
+  description: text("description").notNull(),
+  reference: text("reference"),
+  /** Signed: a reconciling item that reduces the supporting balance is negative. */
+  amount: numeric("amount", { precision: 19, scale: 4 }).notNull(),
+  /** Copied forward into the next period's workpaper. */
+  isRecurring: boolean("is_recurring").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workpaperFk: foreignKey({ columns: [table.workpaperId, table.practiceId], foreignColumns: [workpapers.id, workpapers.practiceId], name: "workpaper_schedule_lines_workpaper_fk" }),
+  lineUnique: uniqueIndex("workpaper_schedule_lines_line_unique").on(table.workpaperId, table.lineNumber),
+}));
+
+export const workpaperEvidence = pgTable("workpaper_evidence", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workpaperId: uuid("workpaper_id").notNull(),
+  practiceId: uuid("practice_id").notNull(),
+  fileName: text("file_name").notNull(),
+  mimeType: text("mime_type").notNull(),
+  fileSize: integer("file_size").notNull(),
+  fileData: bytea("file_data").notNull(),
+  description: text("description"),
+  uploadedByUserId: uuid("uploaded_by_user_id").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workpaperFk: foreignKey({ columns: [table.workpaperId, table.practiceId], foreignColumns: [workpapers.id, workpapers.practiceId], name: "workpaper_evidence_workpaper_fk" }),
+  workpaperIdx: index("workpaper_evidence_workpaper_idx").on(table.workpaperId),
+}));
+
+/** A proposed correction, recorded as a note. It is NEVER posted to the client's ledger by this system. */
+export const workpaperAdjustments = pgTable("workpaper_adjustments", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workpaperId: uuid("workpaper_id").notNull(),
+  practiceId: uuid("practice_id").notNull(),
+  description: text("description").notNull(),
+  debitAccount: text("debit_account"),
+  creditAccount: text("credit_account"),
+  amount: numeric("amount", { precision: 19, scale: 4 }).notNull(),
+  status: workpaperAdjustmentStatusEnum("status").notNull().default("PROPOSED"),
+  /** Free text the practice enters when the client posts it ("JE-000123"); not verified against the ledger. */
+  postedReference: text("posted_reference"),
+  createdByUserId: uuid("created_by_user_id").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workpaperFk: foreignKey({ columns: [table.workpaperId, table.practiceId], foreignColumns: [workpapers.id, workpapers.practiceId], name: "workpaper_adjustments_workpaper_fk" }),
+  workpaperIdx: index("workpaper_adjustments_workpaper_idx").on(table.workpaperId),
+}));
+
+export const workpaperReviewNotes = pgTable("workpaper_review_notes", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workpaperId: uuid("workpaper_id").notNull(),
+  practiceId: uuid("practice_id").notNull(),
+  version: integer("version").notNull(),
+  body: text("body").notNull(),
+  status: workpaperReviewNoteStatusEnum("status").notNull().default("OPEN"),
+  authorUserId: uuid("author_user_id").notNull(),
+  resolvedByUserId: uuid("resolved_by_user_id"),
+  resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  resolutionComment: text("resolution_comment"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workpaperFk: foreignKey({ columns: [table.workpaperId, table.practiceId], foreignColumns: [workpapers.id, workpapers.practiceId], name: "workpaper_review_notes_workpaper_fk" }),
+  workpaperIdx: index("workpaper_review_notes_workpaper_idx").on(table.workpaperId, table.createdAt),
+}));
+
+/** Append-only sign-off / reopen history. */
+export const workpaperSignoffs = pgTable("workpaper_signoffs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workpaperId: uuid("workpaper_id").notNull(),
+  practiceId: uuid("practice_id").notNull(),
+  version: integer("version").notNull(),
+  step: workpaperSignoffStepEnum("step").notNull(),
+  userId: uuid("user_id").notNull(),
+  practiceRole: practiceRoleEnum("practice_role").notNull(),
+  /** Mandatory for REOPEN. */
+  reason: text("reason"),
+  /** True when the preparer also signed as reviewer because the practice had a single active staff member. */
+  singleStaffException: boolean("single_staff_exception").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workpaperFk: foreignKey({ columns: [table.workpaperId, table.practiceId], foreignColumns: [workpapers.id, workpapers.practiceId], name: "workpaper_signoffs_workpaper_fk" }),
+  workpaperIdx: index("workpaper_signoffs_workpaper_idx").on(table.workpaperId, table.createdAt),
+}));
+
+/**
+ * TENANT-scoped (client organization). The AUTHORITATIVE consent record of the
+ * handshake: a practice proposes (PENDING), the client's OWNER/ADMINISTRATOR
+ * accepts (ACTIVE) or declines, and may revoke at any time. Only an ACTIVE row
+ * lets the practice read this organization — checked inside the same tenant
+ * transaction as every read, so revocation is immediate.
+ */
+export const practiceClientConsents = pgTable("practice_client_consents", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+  practiceId: uuid("practice_id").notNull().references(() => practices.id),
+  /** What the client sees in its own settings. Set by the proposer, so it is shown with the opaque id. */
+  practiceName: text("practice_name").notNull(),
+  status: practiceLinkStatusEnum("status").notNull().default("PENDING"),
+  proposedByUserId: uuid("proposed_by_user_id").notNull(),
+  respondedByUserId: uuid("responded_by_user_id"),
+  respondedAt: timestamp("responded_at", { withTimezone: true }),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  orgPracticeUnique: uniqueIndex("practice_client_consents_org_practice_unique").on(table.organizationId, table.practiceId),
+  orgStatusIdx: index("practice_client_consents_org_status_idx").on(table.organizationId, table.status),
+}));
+
+/** TENANT-scoped. A query or document request from the client's accountant, visible to the client. */
+export const clientRequests = pgTable("client_requests", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+  practiceId: uuid("practice_id").notNull(),
+  practiceName: text("practice_name").notNull(),
+  type: clientRequestTypeEnum("type").notNull(),
+  subject: text("subject").notNull(),
+  body: text("body").notNull(),
+  status: clientRequestStatusEnum("status").notNull().default("OPEN"),
+  requestedByUserId: uuid("requested_by_user_id").notNull(),
+  dueDate: date("due_date", { mode: "string" }),
+  closedAt: timestamp("closed_at", { withTimezone: true }),
+  closedByUserId: uuid("closed_by_user_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  orgStatusIdx: index("client_requests_org_status_idx").on(table.organizationId, table.status, table.createdAt),
+  idOrgUnique: uniqueIndex("client_requests_id_org_unique").on(table.id, table.organizationId),
+}));
+
+/** TENANT-scoped, append-only: the thread under a request, optionally with an attachment stored via the receipt storage abstraction. */
+export const clientRequestMessages = pgTable("client_request_messages", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+  requestId: uuid("request_id").notNull(),
+  authorUserId: uuid("author_user_id").notNull(),
+  authorSide: clientRequestSideEnum("author_side").notNull(),
+  body: text("body").notNull(),
+  attachmentReceiptId: uuid("attachment_receipt_id").references((): AnyPgColumn => uploadedReceipts.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  requestFk: foreignKey({ columns: [table.requestId, table.organizationId], foreignColumns: [clientRequests.id, clientRequests.organizationId], name: "client_request_messages_request_fk" }),
+  requestIdx: index("client_request_messages_request_idx").on(table.requestId, table.createdAt),
 }));
 
 // ---------------------------------------------------------------------------

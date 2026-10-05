@@ -14,12 +14,32 @@ import type { Pool } from "pg";
  */
 export const RLS_EXEMPT_TABLES = new Set(["organization_memberships"]);
 
+/**
+ * The practice (accounting firm) scoping model, Phase 9 Slice 5 (docs/security.md
+ * section 13). A practice table carries `practice_id` (and no `organization_id`)
+ * and is isolated by the single variable `app.current_user_id` PLUS membership of
+ * the practice:
+ *  - the GATE tables ("practice_members", "practice_partners") are keyed on the
+ *    user variable alone (own row / own partner row); they are what every other
+ *    practice policy asks about, so they cannot ask about themselves;
+ *  - the root "practices" table has no `practice_id` (its key is `id`) and is keyed
+ *    on the user variable;
+ *  - every OTHER practice table's every policy must be keyed on the user variable
+ *    AND consult "practice_members" (an ACTIVE membership), so a table whose policy
+ *    quietly lost the membership check is named as a problem.
+ */
+export const PRACTICE_ROOT_TABLES = new Set(["practices"]);
+export const PRACTICE_GATE_TABLES = new Set(["practice_members", "practice_partners"]);
+export const PRACTICE_MEMBERSHIP_TABLE = "practice_members";
+
 export interface TableSecurityRow {
   table_name: string;
   /** Has an `organization_id` column: a tenant table, isolated by app.current_org_id. */
   tenant_scoped: boolean;
   /** Has an `owner_user_id` column (and no organization_id): a user-scoped table, isolated by app.current_user_id. */
   user_scoped: boolean;
+  /** Has a `practice_id` column (and neither organization_id nor owner_user_id): isolated by practice membership under app.current_user_id. */
+  practice_scoped?: boolean;
   rls_enabled: boolean;
   rls_forced: boolean;
   policies: number;
@@ -32,6 +52,7 @@ export interface IsolationAuditResult {
   problems: string[];
   tenantScopedCount: number;
   userScopedCount: number;
+  practiceScopedCount: number;
   tableCount: number;
 }
 
@@ -39,6 +60,46 @@ const ORG_VAR = "app.current_org_id";
 const USER_VAR = "app.current_user_id";
 /** Constructs that would turn the single-id predicate into a "many ids" one. */
 const MULTI_VALUE_PREDICATE = /\bany\s*\(|\ball\s*\(|string_to_array|\bunnest\b|regexp_split|array\s*\[/i;
+
+/** The rules for one practice-scoped (or practice-root) table. */
+function evaluatePracticeTable(row: TableSecurityRow): string[] {
+  const problems: string[] = [];
+  if (!row.rls_enabled) {
+    problems.push(
+      `${row.table_name}: is practice-scoped but row-level security is NOT enabled — every user can read every ` +
+        `practice's rows. Add ALTER TABLE ${row.table_name} ENABLE ROW LEVEL SECURITY plus a membership policy.`,
+    );
+  }
+  if (row.rls_enabled && !row.rls_forced) {
+    problems.push(
+      `${row.table_name}: row-level security is enabled but not FORCEd, so the table's owner still bypasses it. ` +
+        `Add ALTER TABLE ${row.table_name} FORCE ROW LEVEL SECURITY.`,
+    );
+  }
+  const needsMembership =
+    !PRACTICE_GATE_TABLES.has(row.table_name) && !PRACTICE_ROOT_TABLES.has(row.table_name);
+  for (const expr of row.policy_exprs) {
+    if (!expr.includes(USER_VAR)) {
+      problems.push(
+        `${row.table_name}: a policy expression (${expr}) is not keyed on ${USER_VAR}. Every policy on a ` +
+          `practice-scoped table must use that session variable.`,
+      );
+    }
+    if (expr.includes(ORG_VAR)) {
+      problems.push(
+        `${row.table_name}: a policy expression (${expr}) references ${ORG_VAR}, which belongs to the ` +
+          `tenant model — a table is isolated by exactly one scope.`,
+      );
+    }
+    if (needsMembership && !expr.includes(PRACTICE_MEMBERSHIP_TABLE)) {
+      problems.push(
+        `${row.table_name}: a policy expression (${expr}) does not consult ${PRACTICE_MEMBERSHIP_TABLE}, so it ` +
+          `would let any user through rather than only an ACTIVE member of the practice.`,
+      );
+    }
+  }
+  return problems;
+}
 
 /**
  * Pure evaluation of the per-table security facts, separated from the query so
@@ -91,6 +152,15 @@ export function evaluateIsolation(rows: TableSecurityRow[]): IsolationAuditResul
       }
     }
 
+    const practice =
+      !row.tenant_scoped &&
+      !row.user_scoped &&
+      (Boolean(row.practice_scoped) || PRACTICE_ROOT_TABLES.has(row.table_name));
+    if (practice) {
+      problems.push(...evaluatePracticeTable(row));
+      continue;
+    }
+
     const tenant = row.tenant_scoped && !RLS_EXEMPT_TABLES.has(row.table_name);
     const user = row.user_scoped && !row.tenant_scoped;
     if (!tenant && !user) continue;
@@ -132,6 +202,9 @@ export function evaluateIsolation(rows: TableSecurityRow[]): IsolationAuditResul
     problems,
     tenantScopedCount: rows.filter((r) => r.tenant_scoped && !RLS_EXEMPT_TABLES.has(r.table_name)).length,
     userScopedCount: rows.filter((r) => r.user_scoped && !r.tenant_scoped).length,
+    practiceScopedCount: rows.filter(
+      (r) => !r.tenant_scoped && !r.user_scoped && (Boolean(r.practice_scoped) || PRACTICE_ROOT_TABLES.has(r.table_name)),
+    ).length,
     tableCount: rows.length,
   };
 }
@@ -150,6 +223,18 @@ export async function loadTableSecurityRows(pool: Pick<Pool, "query">): Promise<
              WHERE a.attrelid = c.oid AND a.attname = 'owner_user_id' AND a.attnum > 0
                AND NOT a.attisdropped
            ) AS user_scoped,
+           (
+             EXISTS (
+               SELECT 1 FROM pg_catalog.pg_attribute a
+               WHERE a.attrelid = c.oid AND a.attname = 'practice_id' AND a.attnum > 0
+                 AND NOT a.attisdropped
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM pg_catalog.pg_attribute a
+               WHERE a.attrelid = c.oid AND a.attname IN ('organization_id', 'owner_user_id') AND a.attnum > 0
+                 AND NOT a.attisdropped
+             )
+           ) AS practice_scoped,
            c.relrowsecurity AS rls_enabled,
            c.relforcerowsecurity AS rls_forced,
            (SELECT count(*) FROM pg_catalog.pg_policy p WHERE p.polrelid = c.oid) AS policies,
@@ -190,8 +275,9 @@ export async function auditTableSecurity(pool: Pick<Pool, "query">): Promise<voi
   if (result.problems.length === 0) {
     console.log(
       `[db] Tenant isolation audit: ${result.tenantScopedCount} organization-scoped and ` +
-        `${result.userScopedCount} user-scoped tables (of ${result.tableCount}), and all have FORCEd ` +
-        `row-level security with a policy keyed on their own single scope variable.`,
+        `${result.userScopedCount} user-scoped and ${result.practiceScopedCount} practice-scoped tables ` +
+        `(of ${result.tableCount}), and all have FORCEd row-level security with a policy keyed on their own ` +
+        `single scope variable (practice tables: ${USER_VAR} plus an ACTIVE practice membership).`,
     );
     return;
   }

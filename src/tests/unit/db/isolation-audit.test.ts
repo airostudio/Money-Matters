@@ -73,4 +73,52 @@ describe("isolation audit rules", () => {
   it("flags a table the application role cannot read", () => {
     expect(evaluateIsolation([row({ table_name: "orphan", app_can_select: false })]).problems.join("\n")).toMatch(/no SELECT grant/);
   });
+
+  describe("practice-scoped tables (Phase 9 Slice 5)", () => {
+    const ME = "(NULLIF(current_setting('app.current_user_id'::text, true), ''::text))::uuid";
+    const MEMBER = `(EXISTS ( SELECT 1 FROM practice_members pm WHERE ((pm.practice_id = t.practice_id) AND (pm.user_id = ${ME}) AND (pm.status = 'ACTIVE'::practice_member_status))))`;
+    const goodPractice = (name = "practice_tasks") =>
+      row({ table_name: name, practice_scoped: true, rls_enabled: true, rls_forced: true, policies: 1, policy_exprs: [MEMBER, MEMBER] });
+
+    it("passes a table keyed on the user variable AND an ACTIVE practice membership, the gate tables and the root, counting them", () => {
+      const gate = row({ table_name: "practice_members", practice_scoped: true, rls_enabled: true, rls_forced: true, policies: 1, policy_exprs: [`(user_id = ${ME})`] });
+      const anchor = row({ table_name: "practice_partners", practice_scoped: true, rls_enabled: true, rls_forced: true, policies: 1, policy_exprs: [`(user_id = ${ME})`] });
+      const root = row({ table_name: "practices", rls_enabled: true, rls_forced: true, policies: 1, policy_exprs: [`(created_by_user_id = ${ME})`] });
+      const result = evaluateIsolation([goodPractice(), gate, anchor, root]);
+      expect(result.problems).toEqual([]);
+      expect(result.practiceScopedCount).toBe(4);
+    });
+
+    it("flags a practice table without RLS, or not FORCEd, or with no policy", () => {
+      expect(evaluateIsolation([row({ table_name: "workpapers", practice_scoped: true })]).problems.join("\n")).toMatch(/practice-scoped but row-level security is NOT enabled/);
+      expect(evaluateIsolation([{ ...goodPractice(), rls_forced: false }]).problems.join("\n")).toMatch(/not FORCEd/);
+      expect(evaluateIsolation([row({ table_name: "workpapers", practice_scoped: true, rls_enabled: true, rls_forced: true })]).problems.join("\n")).toMatch(/no policy exists/);
+    });
+
+    it("flags a policy that lost the membership check (a bare user-variable predicate, or 'true')", () => {
+      const bare = evaluateIsolation([{ ...goodPractice(), policy_exprs: [`(created_by_user_id = ${ME})`] }]).problems.join("\n");
+      expect(bare).toMatch(/does not consult practice_members/);
+      const open = evaluateIsolation([{ ...goodPractice(), policy_exprs: ["true"] }]).problems.join("\n");
+      expect(open).toMatch(/not keyed on app\.current_user_id/);
+    });
+
+    it("flags a practice policy that mixes in the organization variable, or compares against a list", () => {
+      const mixed = evaluateIsolation([
+        { ...goodPractice(), policy_exprs: [`(${MEMBER} OR organization_id = (NULLIF(current_setting('app.current_org_id'::text, true), ''::text))::uuid)`] },
+      ]).problems.join("\n");
+      expect(mixed).toMatch(/references app\.current_org_id/);
+      const list = evaluateIsolation([
+        { ...goodPractice(), policy_exprs: ["(practice_id = ANY ((string_to_array(current_setting('app.current_practice_ids'::text, true), ','::text))::uuid[]))"] },
+      ]).problems.join("\n");
+      expect(list).toMatch(/multi-valued setting/);
+    });
+
+    it("a table with a practice_id AND an organization_id is a tenant table (the client-side consent record), not a practice table", () => {
+      const consent = row({ table_name: "practice_client_consents", tenant_scoped: true, practice_scoped: false, rls_enabled: true, rls_forced: true, policies: 1, policy_exprs: [ORG, ORG] });
+      const result = evaluateIsolation([consent]);
+      expect(result.problems).toEqual([]);
+      expect(result.practiceScopedCount).toBe(0);
+      expect(result.tenantScopedCount).toBe(1);
+    });
+  });
 });

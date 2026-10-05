@@ -86,4 +86,30 @@ export const AuditService = {
       metadata: { ...(params.metadata ?? {}), platformAdmin: true, platformAuditId: params.platformAuditId },
     });
   },
+
+  /**
+   * An INFORMATIONAL entry in a client organization's own audit log about its
+   * accountant practice (a link was proposed/accepted/revoked, staff were
+   * assigned), so the customer can see what was done on their account. It
+   * carries the OPAQUE practice id and the acting user — never the practice's
+   * other clients, tasks, notes or any figure. Must run inside the same
+   * `withTenant(organizationId)` transaction as the change it documents.
+   */
+  async recordPracticeNote(
+    tx: TenantDb,
+    organizationId: string,
+    params: { actorUserId: string; practiceId: string; action: string; entityId: string; metadata?: Record<string, unknown> },
+  ): Promise<void> {
+    await tx.insert(auditLogs).values({
+      organizationId,
+      actorUserId: params.actorUserId,
+      actorType: "HUMAN",
+      action: params.action,
+      entityType: "AccountantPractice",
+      entityId: params.entityId,
+      before: null,
+      after: null,
+      metadata: { ...(params.metadata ?? {}), practiceId: params.practiceId, viaPractice: true },
+    });
+  },
 };

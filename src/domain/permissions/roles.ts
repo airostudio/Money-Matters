@@ -104,6 +104,16 @@ export const PERMISSIONS = [
   // `financial_report:read` is checked per entity, with the user's real role
   // there, and an entity without it is excluded from the result.
   "consolidation:manage",
+  // Phase 9 Slice 5 (accountant practice, master spec s.42). Queries and
+  // document requests from the client's accountant are visible to the client:
+  // `client_request:read` opens the inbox, `client_request:respond` replies
+  // (and attaches a document), `client_request:manage` raises and closes a
+  // request (held by the accountant-type roles a practice's staff are given in
+  // a client). Linking a practice to the organization is `organization:manage`
+  // (OWNER / ADMINISTRATOR only) — there is deliberately no weaker route.
+  "client_request:read",
+  "client_request:respond",
+  "client_request:manage",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -203,6 +213,9 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "close_checklist:manage",
     // Accountants routinely consolidate several clients' or entities' books.
     "consolidation:manage",
+    "client_request:read",
+    "client_request:respond",
+    "client_request:manage",
   ]),
   BOOKKEEPER: new Set<Permission>([
     "account:read",
@@ -270,6 +283,9 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     // Sees the close checklist (it is how a bookkeeper learns what is still
     // outstanding) but cannot sign items off, close, or reopen.
     "close_checklist:read",
+    "client_request:read",
+    "client_request:respond",
+    "client_request:manage",
   ]),
   ACCOUNTS_RECEIVABLE: new Set<Permission>([
     "account:read",
@@ -387,6 +403,7 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "forecast:read",
     "scenario:read",
     "close_checklist:read",
+    "client_request:read",
   ]),
   EMPLOYEE: new Set<Permission>([
     "expense_claim:read",
