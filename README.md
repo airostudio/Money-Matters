@@ -115,8 +115,21 @@ with a date, when either dips below a threshold you set. Scenarios model
 hiring someone, changing prices, or losing a customer as Best / Expected /
 Worst built from explicit, editable assumptions (never predictions). Both
 are analysis only and never post to the ledger; the AI Financial Controller
-gains a read-only `cash_forecast` tool. Multi-entity consolidation,
-month-end close, and accountant practice management are later Phase 9
+gains a read-only `cash_forecast` tool.
+
+Phase 9 Slice 3 adds the Month-End Close workspace and the period-lock
+override workflow. Periods carry a lock level (open, soft, advisor, tax,
+hard); a soft lock can be posted into inline by an accountant-level role with a
+recorded reason, tax and hard locks only through the audited reopen workflow
+(reason required; only an owner or administrator can reopen those), and every
+lock change is appended to a history table the application role cannot edit.
+`/accounting/close` shows a live checklist per month — bank reconciliation,
+draft documents, depreciation, inventory and fixed-asset reconciliation, trial
+balance and Balance Sheet checks, suspense accounts — plus manual sign-offs that
+are always labelled as a person's attestation, never system verification.
+Closing is human-only: the AI Financial Controller gains a read-only
+`close_status` tool but no way to close, lock or reopen anything.
+Multi-entity consolidation and accountant practice management are later Phase 9
 slices — see `docs/roadmap.md`.
 See
 [`docs/roadmap.md`](docs/roadmap.md) for exactly what's built

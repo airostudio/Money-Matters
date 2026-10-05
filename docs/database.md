@@ -42,8 +42,10 @@ every future migration must follow. See
 ### Chart of accounts & ledger
 - `Account` — chart of accounts entry (`code`, `name`, `type`, `subType`,
   `currency`, `isControlAccount`, `isSystemAccount`, `parentAccountId`).
-- `FiscalPeriod` — `startDate`, `endDate`, `status` (`OPEN`/`SOFT_LOCKED`/
-  `HARD_LOCKED`).
+- `FiscalPeriod` — `startDate`, `endDate`, `status` = the **lock level**
+  (`OPEN`/`SOFT_LOCKED`/`ADVISOR_LOCKED`/`TAX_LOCKED`/`HARD_LOCKED`, ordered by
+  severity in `LOCK_RANK`, not by enum order — see §2o and
+  `docs/accounting-engine.md` §15).
 - `JournalEntry` — header: `entryNumber`, `postingDate`, `memo`, `status`
   (`DRAFT`/`POSTED`/`REVERSED`), `sourceType` (`MANUAL`/`OPENING_BALANCE`/…,
   extensible for later phases' AR/AP/payroll-generated journals),
@@ -676,6 +678,42 @@ A "seat" is one `organization_memberships` row with `is_active = true`.
 Removing a member sets `is_active = false` (frees the seat); re-adding the same
 user re-activates that row (the `(organization_id, user_id)` unique index means
 a second row can't be inserted).
+
+## 2o. Phase 9 Slice 3: lock levels, `period_closes`, `close_signoffs`, `period_lock_events` (migrations `0036`, `0037`)
+
+Three new org-scoped tables, each RLS-enabled + FORCEd + a policy + a **scoped**
+`mm_app` grant; the tenant-isolation audit in `npm run db:migrate` now reports
+**67 of 74** tables.
+
+- **`fiscal_periods.status`** (existing column, extended): the
+  `fiscal_period_status` enum gained `ADVISOR_LOCKED` and `TAX_LOCKED` (appended
+  — Postgres cannot insert an enum value before existing ones without a
+  rewrite, which is why severity order is `LOCK_RANK` in code). Existing
+  `SOFT_LOCKED` rows were remapped to `HARD_LOCKED` so no lock is loosened (see
+  `docs/accounting-engine.md` §15b). `0037` uses only pre-existing enum values
+  because a newly added value cannot be referenced in the transaction that adds
+  it (drizzle runs pending migrations in one transaction).
+- **`journal_entries.lock_override_level` / `lock_override_reason`**: set only on
+  an entry posted under an authorised override (SOFT with a reason; ADVISOR by an
+  accountant-level role). Null for every ordinary posting.
+- **`period_closes`** — one row per (period, `cycle`); `status`
+  (`NOT_STARTED`/`IN_PROGRESS`/`CLOSED`), who/when started and closed,
+  `lock_level_applied`, `acknowledged_attention_count`, and
+  **`checklist_snapshot jsonb`** (the whole checklist at close time — the durable
+  record). Grants: SELECT/INSERT/UPDATE (a cycle moves IN_PROGRESS -> CLOSED);
+  **no DELETE**. A reopen starts the next cycle, so a CLOSED row is never mutated
+  again. Automatic check results are NEVER stored here — they are recomputed live.
+- **`close_signoffs`** — a named person's sign-off on a manual checklist item for
+  one cycle (`check_key`, `signed_by_id`, `signed_by_name`, `signed_at`, `note`);
+  unique per (cycle, check). Grants: SELECT/INSERT/DELETE, **no UPDATE** (a
+  sign-off is created or revoked, never edited; revocation is audited).
+- **`period_lock_events`** — **append-only** history of every lock change and
+  every posting override (`event_type`, `from_level`, `to_level`, `reason`,
+  `acknowledgement`, actor id/role, optional `journal_entry_id`, `metadata`).
+  `mm_app` has **SELECT and INSERT only**: an UPDATE, DELETE or TRUNCATE is
+  refused by Postgres itself ("permission denied"), exactly like
+  `platform_admin_audit_logs`, and a test connects as the real restricted role
+  to prove it (it is also covered by the usual tenant-isolation tests).
 
 ## 3. Row-Level Security
 

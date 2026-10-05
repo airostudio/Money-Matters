@@ -495,8 +495,9 @@ write nor an application-level caller can smuggle in
 nothing for even the model to pretend to automate), `JOURNAL_ENTRY_UNUSUAL`
 (`prepare_draft_journal_entry` stays confirmation-gated at every level —
 never promoted, because there is no `JOURNAL_ENTRY` entry in the
-allowlist), or `FISCAL_PERIOD_CLOSE` (not built; nothing here creates a
-path toward it). `PaymentRunService`'s own segregation-of-duties check
+allowlist), or `FISCAL_PERIOD_CLOSE` (the close/lock workflow now exists —
+Phase 9 Slice 3 — as a human-only feature; nothing here creates a path
+toward it, see §0g). `PaymentRunService`'s own segregation-of-duties check
 (§8's "large payments... always require authorisation") is untouched and
 is never routed around — `AutoExecutionService` never calls it at all,
 proven by a real-database test that a Level 4 org with everything else
@@ -568,6 +569,48 @@ timeout, and `null` — the page simply omits the card — when there is no
 (`?commentary=1`) so a model call doesn't run on every render. It is never a
 source of figures. As with every AI feature in this codebase, the real
 Anthropic API is only exercised through a mocked SDK in tests.
+
+## 0g. Ninth integration: the read-only `close_status` tool and checklist commentary (Phase 9 Slice 3)
+
+Month-end close is a **permanently human-gated critical action** (master spec
+§8/§41/§77): `FISCAL_PERIOD_CLOSE` is in the structurally-excluded list above,
+and Slice 3 builds the thing that exclusion was written for without giving the AI
+any path to it.
+
+**`close_status` (a Financial Controller read tool).** A thin wrapper around
+`CloseChecklistService.compute`, declared with `permission:
+"close_checklist:read"` and run through the same `guarded()` refusal path, so a
+role without the permission gets the structured "Access denied ...
+close_checklist:read" refusal and no citation (proven with real restricted-role
+actors). It takes an optional `month` (`YYYY-MM`, default the previous month),
+validated by zod, and returns the live checklist as text: the percentage and its
+formula, BLOCKING items, ATTENTION items, items awaiting a human sign-off, items
+**signed off by a person (explicitly "not system-verified")**, items verified by
+the system, and not-applicable items. Payroll items are omitted — and the text
+says items are hidden — for a role lacking `payrun:read`. It is offered to the
+general Controller and the Bookkeeping specialist. The citation links to
+`/accounting/close/<month>`.
+
+**No write path.** There is no tool that closes, locks, reopens or signs off, and
+a model that asks for one gets "Unknown tool" and nothing changes (an
+end-to-end test with a mocked model proves it). Tests assert across the whole
+read+write tool registry that the only name touching close/lock/period is
+`close_status`, that no tool declares a `period:*` permission, that the
+auto-execution allowlist contains nothing period-related and refuses to
+whitelist `FISCAL_PERIOD_CLOSE`/`FISCAL_PERIOD_REOPEN`/`PERIOD_LOCK_OVERRIDE` at
+Level 4, and that even an actor typed `AI`/`SYSTEM` carrying an OWNER role is
+refused by `PeriodCloseService`/`PeriodLockService`.
+
+**Optional "what remains" commentary (`CloseCommentaryService`).** The same
+lightweight pattern as the management pack, daily brief and forecast commentary:
+handed only the already-computed checklist facts (`checklistFacts`, shared with
+the tool, which keep system-verified and human-signed items under separate
+labels), told never to calculate or introduce a figure, never to describe a
+person's sign-off as system verification, and that it cannot close or change
+anything; offered no tools; 15 s timeout; `null` (the card is simply omitted)
+without an `ANTHROPIC_API_KEY` or on failure. It is opt-in per page load
+(`?summary=1`). As elsewhere, the real Anthropic API is only exercised through a
+mocked SDK in tests.
 
 ## 1. Why this belongs in the Phase 1 docs
 
@@ -716,10 +759,10 @@ otherwise, connecting autonomy levels to payment approval.
 auto-execute — there is no `JOURNAL_ENTRY` member in the allowlist, so an
 "unusual" manual adjustment stays confirmation-gated at every level,
 structurally. Payroll, tax, bank-account-detail changes, and fiscal period
-closes have no auto-execution path for the simple reason that none of
-those domains (or, for period closes, that status workflow) exist in this
-codebase at all yet — there is nothing to gate because there is nothing to
-call.
+closes have no auto-execution path: the allowlist is closed and contains none
+of them. (Payroll and the period close/lock workflow have since been built as
+human-only features — Phase 8 Slice 1 and Phase 9 Slice 3 — and remain
+unreachable from every AI path; see §0g and `docs/security.md` §11.)
 
 **Honest Level 3 vs. 4**: the task that commissioned this slice explicitly
 asked for the real distinction if one exists, or a plain admission if it

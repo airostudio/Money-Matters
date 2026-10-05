@@ -15,12 +15,17 @@ posts through this engine, so its invariants must hold unconditionally.
    - **Reversal** — `PostingService.reverseEntry()` creates a new entry with
      every debit/credit swapped, linked to the original via `reversalOfId`.
    - **Adjusting entry** — a new, independent balanced entry.
-4. **Closed periods reject new postings.** `FiscalPeriod.status` is one of
-   `OPEN`, `SOFT_LOCKED`, `HARD_LOCKED`. Posting into a locked period is
-   rejected unless the actor holds an override permission and the override
-   is itself audit-logged with a reason (§41 of the master spec; full
-   override workflow lands with Phase 9 close tooling — Phase 1 enforces the
-   reject, not yet the override UI).
+4. **Locked periods reject new postings — inside the posting transaction.**
+   `FiscalPeriod.status` is a **lock level**: `OPEN < SOFT_LOCKED <
+   ADVISOR_LOCKED < TAX_LOCKED < HARD_LOCKED` (§15 has the exact model, the
+   permission matrix, the override and reopen semantics, and how the legacy
+   `SOFT_LOCKED`/`HARD_LOCKED` rows were migrated). The check is one query
+   against `fiscal_periods` made by `PostingService` in the same database
+   transaction as the insert, before anything is written, so a rejected
+   posting leaves no rows behind. The only ways through a lock are an
+   authorised, audited inline override of a SOFT (or an accountant's posting
+   into an ADVISOR) lock, or the audited reopen workflow — never an edit of
+   posted history.
 5. **Every account has exactly one normal balance side**, derived from its
    `AccountType` (see §2), and is used only to *sign* balances for display —
    it never changes how a debit/credit is recorded.
@@ -128,8 +133,7 @@ entry with `reversalOfId` set → mark the original `reversedById` → audit.
   entries — this deferral is still open.
 - Multi-currency revaluation — `ExchangeRateService` interface exists,
   implementation is a stub returning rate `1`.
-- Period-lock override workflow UI — the reject path is enforced now; the
-  "request override / approve override" workflow is Phase 9 (Close).
+- ~~Period-lock override workflow UI~~ — built in Phase 9 Slice 3 (§15).
 - Sub-ledger reconciliation to control accounts — implemented for AR in
   Phase 3 Slice 1 (`src/domain/sales/invoice-service.ts`,
   `src/domain/sales/payment-service.ts`) and for AP in Phase 4 Slice 1
@@ -611,3 +615,180 @@ asset registered against the wrong pair), never a rounding footnote.
 - **Runway** = months until run-rate cash goes below zero, interpolated
   within the month; `null` means "not within the 12 months modelled", which
   the UI words that way rather than as "infinite".
+
+## 15. Phase 9 Slice 3 — period lock levels, month-end close, and the override/reopen workflow
+
+### 15a. The lock model (master spec §41)
+
+There is **one** period concept — `fiscal_periods` — and its `status` enum is
+the lock level. No parallel "closed" flag exists (extending the existing
+column kept `PostingService` to a single cheap query and let every existing
+caller keep working; a separate close-record table would have meant a second
+source of truth for "is this period locked"). The severity order lives in
+exactly one place, `LOCK_RANK` in `src/domain/ledger/period-lock.ts` (Postgres
+enum order is creation order, not severity), and every decision is a pure
+function there (`evaluatePosting`, `evaluateLockChange`), unit-tested over
+every level x role.
+
+| Level | Who may post into it |
+|---|---|
+| `OPEN` | anyone with `journal:post` |
+| `SOFT_LOCKED` | nobody routinely. A holder of `period:override_soft` (ACCOUNTANT/ADMINISTRATOR/OWNER) may post **inline with a reason** (>= 10 chars). The journal entry records `lock_override_level`/`lock_override_reason`; a `POSTING_OVERRIDE` row goes in the append-only history; an audit entry `journal.posted_under_lock` is written. |
+| `ADVISOR_LOCKED` | only `period:post_advisor_locked` (ACCOUNTANT/ADMINISTRATOR/OWNER) — the accountant is still finalising adjustments. No reason is needed (it is their normal work) but the entry is marked as posted under the lock and recorded in the history. Bookkeepers and everyone else are refused. |
+| `TAX_LOCKED` | **nobody, inline.** The period is covered by a lodged return/BAS; a change could invalidate the lodgement. It is a **manual** lock the user applies and labels — there is no tax-lodgement integration. |
+| `HARD_LOCKED` | **nobody, inline**, not even the owner with a reason. |
+
+The authority is always the actor's **server-side role**. The only client
+input is the free-text reason (`PostOptions.lockOverrideReason`); a reason
+never helps a role that lacks the permission. An actor of type `AI`/`SYSTEM`
+can never act under a lock or change one, whatever its role (a structural
+check on top of the role matrix).
+
+Rejected posts raise `PeriodLockedError` (still constructible with just a
+label, so existing callers and tests are unchanged). It now carries
+`lockLevel`, a `denialCode`, and `canOverrideWithReason` (the UI uses that to
+offer "Post anyway — reason required"), and its message states the
+consequence and who can reopen (master spec §79: never a dead end).
+
+**Where a human can override.** `PostingService.postJournal`, `postDraft` and
+`reverseEntry` take the `PostOptions`; `InvoiceService.approveAndPost`,
+`BillService.approveAndPost` and `SupplierCreditService.approveAndPost` pass
+it through. The UI: a manual journal "Post" into a locked period keeps what
+the user typed as a DRAFT (drafts are allowed in locked periods) and lands on
+it with the explained reason and, for an authorised user on a soft lock, a
+"Post anyway — reason required" form; the invoice, bill and supplier-credit
+detail pages do the same. Other posting paths (payments, pay runs, depreciation,
+expense claims, bank categorisation) are rejected by a lock with the explained
+message and no inline override.
+
+**Which period governs a date.** Periods may overlap (an annual period with
+monthly close periods inside it), so `findFiscalPeriod` reads every period
+covering the date in the one query and the **most restrictive governs** (ties:
+the narrowest); a permissive overlapping period can never bypass a lock. The
+period **end date is inclusive of its whole UTC day**: periods store the end
+as midnight of the last day, and before this slice a posting timestamped
+later that day (e.g. a reversal defaulting to `new Date()`) escaped the
+lock. A date that falls in no period at all still posts (periods are explicit
+rows, never required) — which is also why the close workspace works for
+months that exist only implicitly (§15c).
+
+**Corrections never edit history.** Reversing an entry that sits in a locked
+period posts the reversal on its own date (today by default — an open
+period); a reversal dated into the locked period is refused like any other
+posting. Posted lines are never touched by locking or reopening.
+
+### 15b. Migration of the old lock model
+
+Before this slice a period was `OPEN`/`SOFT_LOCKED`/`HARD_LOCKED`, and **both**
+locked values rejected every posting by every actor. The new `SOFT_LOCKED` is
+weaker (an authorised role may post with a reason), so leaving legacy
+`SOFT_LOCKED` rows as they were would have silently loosened an existing
+lock. Migration `0037` therefore maps:
+
+| Before | After | Why |
+|---|---|---|
+| `OPEN` | `OPEN` | unchanged |
+| `SOFT_LOCKED` (blocked everyone) | **`HARD_LOCKED`** | identical posting behaviour; nothing loosened. A person with `period:reopen_hard` can lower it through the audited reopen workflow. |
+| `HARD_LOCKED` | `HARD_LOCKED` | unchanged |
+
+Each carried-over locked period gets a `MIGRATED` row in the append-only
+history (preserving the legacy status, reason and timestamp in its metadata).
+The mapping SQL is executed verbatim by a test against legacy-shaped rows,
+which also proves nobody can post into a formerly soft-locked period, and it
+ran unchanged on the real dev database's legacy FY2026 lock.
+
+### 15c. Lock changes: close, raise, reopen
+
+All level changes go through one function, `changeLockLevel`
+(`src/domain/close/period-lock-service.ts`), inside the caller's transaction:
+validate (`evaluateLockChange`), update the period under a row lock
+(`SELECT ... FOR UPDATE`), append the **who / when / why / before / after**
+row to `period_lock_events` (INSERT+SELECT-only for `mm_app`), and write the
+org `audit_logs` entry.
+
+- **Raise** a lock (more restrictive): `period:close`. A reason is optional.
+- **Lower / reopen**: `period:reopen` for SOFT/ADVISOR; **`period:reopen_hard`
+  (OWNER/ADMINISTRATOR only)** to leave TAX or HARD. A reason of at least 10
+  characters is mandatory; leaving `TAX_LOCKED` also needs a typed
+  acknowledgement containing "may invalidate a lodgement". A reopen can
+  lower to an intermediate level (e.g. HARD -> ADVISOR) and records
+  `REOPENED` (to OPEN) or `LEVEL_LOWERED`.
+- The legacy `FiscalPeriodService.setStatus` is kept for compatibility but now
+  routes through the same two paths, so it can no longer sidestep them.
+
+### 15d. Month-end close (master spec §40)
+
+`period_closes` holds one row per (period, **cycle**). Cycle 1 is the first
+attempt; **every reopen starts a new cycle**, so the earlier CLOSED row (with
+its checklist snapshot) is immutable history, and manual sign-offs
+(`close_signoffs`, per cycle) must be redone after a reopen.
+
+The workspace addresses a period by calendar-month key `YYYY-MM` (works for
+months with no row) or by period id (annual/custom ranges). A month with no
+`fiscal_periods` row is an implicit OPEN period; the first mutation (a
+sign-off or a close) materialises it as a row labelled `YYYY-MM` (start = first
+day, end = midnight of the last day, the existing convention), audited as
+`fiscal_period.created`. A month inside a locked annual period shows the lock
+that covers it, and the most restrictive lock governs posting.
+
+**Closing** (`PeriodCloseService.close`, `period:close`): compute the live
+checklist; refuse with `CloseBlockedError` listing every BLOCKING item;
+require an explicit acknowledgement when outstanding (ATTENTION or unsigned
+manual) items remain; then in one transaction lock the period at the chosen
+level, complete the cycle with the **checklist snapshot**, append the lock
+event and write the audit entry `period.closed` (snapshot, acknowledged item
+ids, "closed with N outstanding items acknowledged"). The **default level is
+SOFT_LOCKED**: month-end is routinely followed by late adjustments, so the
+default stops accidental posting by routine users while letting an accountant
+post with a recorded reason; the harder levels are deliberate steps (ADVISOR
+while finalising, TAX after lodgement, HARD for year-end/final). Closing out of
+sequence is a **warning, not a block** (an ATTENTION item that needs the
+acknowledgement): businesses legitimately catch up late or out of order, so
+blocking would force workarounds, but it must be deliberate and is recorded.
+The checklist is computed immediately before the closing transaction (its own
+queries need their own sequential connections), so the snapshot is the state at
+close time within milliseconds.
+
+### 15e. How the checklist computes
+
+`CloseChecklistService.compute` recomputes **every automatic check from live
+data on every view — nothing is stored**, so a tick can never be stale. It is
+sequential and set-based by design (the DB connection rule): all of its own
+queries share ONE tenant transaction (aggregates, no row loading), which is
+closed before the three existing reporting services are called one at a time.
+
+| Check | Source | Status logic |
+|---|---|---|
+| Bank accounts reconciled (one per active account) | `bank_transactions` UNMATCHED dated on/before the period end | ATTENTION if any; N/A with no bank accounts |
+| Draft invoices / bills / supplier credit notes | DRAFT documents dated in the period | ATTENTION |
+| Expense claims approved | SUBMITTED claims dated on/before the period end | ATTENTION |
+| Pay runs posted | DRAFT pay runs paid in the period (**needs `payrun:read`; omitted and counted as hidden otherwise**) | ATTENTION |
+| Depreciation run | active assets acquired by the period end lacking a `depreciation_entries` row for the month of the period end | ATTENTION; N/A with none |
+| Fixed asset register reconciles | `FixedAssetRegisterService` | **BLOCKING** on a mismatch; N/A with no active assets |
+| Inventory valuation reconciles | `InventoryValuationService` | **BLOCKING** on a mismatch; N/A with no tracked products |
+| Trial balance debits = credits | SUM over non-draft lines to the period end | **BLOCKING** |
+| Balance Sheet balances | `ReportingService.getBalanceSheet` | **BLOCKING** |
+| Suspense/clearing accounts nil | accounts the org itself named *suspense*/*clearing*/*undeposited* | ATTENTION if non-zero; **N/A (stated honestly) when none exist — the platform creates none by default** |
+| No draft journals | DRAFT journals dated in the period | ATTENTION |
+| Earlier period closed first | the period before this one, if there is earlier posted activity | ATTENTION (warning) |
+| Manual (sign-off): accruals, prepayments, tax review, P&L review, Balance Sheet review, budget variance (N/A with no budget), foreign exchange (N/A without foreign-currency lines), intercompany (always N/A — single-entity) | `close_signoffs` | `MANUAL` until a named person signs off, then `PASSED` with `verifiedBy: HUMAN` |
+
+BLOCKING is reserved for ledger-integrity problems (the code's own comments
+call a register/GL mismatch a real bug, never rounding); the rest are
+judgement calls that need an acknowledgement. The register and inventory
+comparisons use the GL **as of today**, not the period end, because those
+registers hold current balances.
+
+**Progress** = `PASSED items ÷ applicable items`, where applicable = visible
+items minus NOT_APPLICABLE; a signed-off manual item counts as complete but is
+shown as a person's attestation, never system verification. Items hidden from
+the actor's role (e.g. payroll without `payrun:read`) are excluded from both
+counts, and a role that cannot see every item cannot close. No applicable
+items reads 100.
+
+### 15f. Tables
+
+`period_closes` (SELECT/INSERT/UPDATE), `close_signoffs` (SELECT/INSERT/DELETE
+— revocation is audited), `period_lock_events` (**SELECT/INSERT only**), all
+RLS-enabled + FORCEd with a tenant policy. `journal_entries` gained
+`lock_override_level`/`lock_override_reason`. See `docs/database.md` §2o.

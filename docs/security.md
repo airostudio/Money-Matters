@@ -362,3 +362,65 @@ settings and the admin section) under `SELECT … FOR UPDATE` on the organizatio
 row, so simultaneous adds cannot overshoot (tested with a deterministic
 lock-hold test plus a parallel-adds test). The same locked section protects the
 last OWNER from being demoted/removed by two concurrent requests.
+
+## 11. Period locks, month-end close, and the override/reopen workflow (Phase 9 Slice 3)
+
+Locking and reopening a period change what the ledger will accept, so they are
+treated as critical actions (master spec §41/§77). The model is in
+`docs/accounting-engine.md` §15; this is the security view.
+
+### 11.1 Who can do what
+
+| Action | Permission | Roles |
+|---|---|---|
+| View the close checklist / workspace | `close_checklist:read` | OWNER, ADMINISTRATOR, ACCOUNTANT, BOOKKEEPER, MANAGER, READ_ONLY |
+| Sign off (or revoke) a manual item | `close_checklist:manage` | OWNER, ADMINISTRATOR, ACCOUNTANT |
+| Close a period / raise a lock | `period:close` | OWNER, ADMINISTRATOR, ACCOUNTANT |
+| Post into a SOFT-locked period inline, with a reason | `period:override_soft` | OWNER, ADMINISTRATOR, ACCOUNTANT |
+| Post into an ADVISOR-locked period | `period:post_advisor_locked` | OWNER, ADMINISTRATOR, ACCOUNTANT |
+| Reopen / lower a SOFT or ADVISOR lock | `period:reopen` | OWNER, ADMINISTRATOR, ACCOUNTANT |
+| Reopen / lower a **TAX or HARD** lock | `period:reopen_hard` | **OWNER, ADMINISTRATOR only** |
+| Post into a TAX- or HARD-locked period | — | **nobody inline** (only the reopen workflow) |
+
+A bookkeeper can see the checklist (it is how they learn what is outstanding)
+but cannot sign off, close, override or reopen. The decision is made in the
+pure function `evaluatePosting` / `evaluateLockChange` from the actor's
+**server-side role**; the only client-supplied input is the free-text reason,
+so there is no client-side bypass flag.
+
+### 11.2 The audit trail is append-only at the database level
+
+Every lock change and every posting made under an override is recorded **twice**:
+in the org's `audit_logs` (`period.closed`, `period.locked`, `period.reopened`,
+`period.lock_lowered`, `journal.posted_under_lock`, `close.signed_off`,
+`close.signoff_revoked`) and in `period_lock_events` — who, when, why, before and
+after level, and for TAX reopens the typed acknowledgement. `mm_app` is granted
+**SELECT and INSERT only** on `period_lock_events` (no UPDATE/DELETE/TRUNCATE),
+so the history cannot be rewritten even by a bug in the application; a test
+connects as the real restricted role and shows each statement refused with
+"permission denied". The close snapshot lives in `period_closes`
+(SELECT/INSERT/UPDATE, no DELETE) and a reopen starts a new cycle rather than
+editing the old one. Reopening lowers a lock; it never alters a posted journal
+entry. All three tables are tenant-isolated (RLS enabled + FORCEd + policy),
+with an isolation test for each.
+
+### 11.3 AI has no write path
+
+`FISCAL_PERIOD_CLOSE` is a permanently human-gated critical action at every
+autonomy level: it is in the structurally-excluded list
+(`EXCLUDED_ACTION_TYPE_EXAMPLES`), the auto-execution allowlist is a closed set
+that contains nothing period-related, and no controller write tool touches a
+period. On top of the role check, `assertHumanWith` refuses an actor whose type
+is `AI` or `SYSTEM` for close, raise, reopen and sign-off **even when it carries
+an OWNER role**, and `evaluatePosting` refuses such an actor any posting under a
+lock. The only AI surface is the read-only `close_status` tool and the optional
+"what remains" commentary (`docs/ai-agents.md` §0g); tests assert no tool name
+or declared permission can close/lock/reopen/sign off.
+
+### 11.4 Payroll sensitivity
+
+The checklist's payroll item is measured only for an actor holding `payrun:read`;
+for anyone else it is omitted (counted as hidden, excluded from the progress
+figure, and the actor cannot close a period they cannot fully see) — the same
+pattern as the cash forecast's payroll omission, and it carries through the AI
+tool.

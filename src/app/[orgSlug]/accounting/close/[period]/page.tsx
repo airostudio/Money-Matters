@@ -85,7 +85,7 @@ function ItemRow({
         </div>
         <div className="flex items-center gap-3">
           <StatusPill item={item} />
-          {item.href && (
+          {item.href && item.status !== "NOT_APPLICABLE" && (
             <Link href={`/${orgSlug}${item.href}`} className="text-sm text-primary hover:underline">
               {item.kind === "MANUAL" ? "Review →" : item.status === "PASSED" ? "View →" : "Fix →"}
             </Link>

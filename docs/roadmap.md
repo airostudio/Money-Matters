@@ -33,8 +33,9 @@ phase breakdown). This file tracks what is actually built vs. planned so
 - [ ] **Set `DATABASE_CA_CERT` for the production database** — TLS is on for
       hosted connections but the server certificate is not verified without
       it (`docs/security.md` §4a). Required before real financial data.
-- [ ] Period-lock override workflow UI — reject path enforced, override
-      workflow deferred to Phase 9 (Close)
+- [x] Period-lock override workflow UI — reject path enforced in Phase 1; the
+      override and reopen workflow (lock levels, audited soft-lock override,
+      reopen with reason, append-only history) was built in Phase 9 Slice 3
 
 ## Phase 2 — Money (in progress)
 
@@ -2338,7 +2339,7 @@ below for everything else Phase 9's one-line description names.
   distinct features from entering and reporting a single committed budget;
   both are built in Slice 2 below.
 - **Month-end close workspace and period-lock override workflow**
-  (master spec §40/41): ties into the existing but still-manual
+  (master spec §40/41) — **built in Slice 3 below**: ties into the existing but still-manual
   period-lock mechanism from Phase 1 (`fiscal_periods`/
   `fiscal_period:manage`) — a close checklist, sign-off trail, and an
   override-with-reason flow are a distinct, close-specific surface, not
@@ -2568,9 +2569,9 @@ labels.
 
 **Explicitly deferred (document why):**
 
-- Month-end close workspace / period-lock override workflow, multi-entity
-  consolidation, accountant practice management/workpapers: separate Phase 9
-  slices (see Slice 1's list), unrelated to forecasting.
+- Month-end close workspace / period-lock override workflow (built in Slice 3
+  below), multi-entity consolidation, accountant practice management/workpapers:
+  separate Phase 9 slices (see Slice 1's list), unrelated to forecasting.
 - Scenario types beyond the three named in §37 and a free-form scenario
   builder: the closed, typed set is the point — each type needs its own
   honest, explainable maths.
@@ -2593,6 +2594,145 @@ labels.
 - Comparing two saved scenarios against each other: the results view compares
   one scenario's three cases against the baseline; a cross-scenario compare
   is a reasonable follow-up.
+
+## Phase 9 Slice 3 — Month-End Close workspace and period-lock override workflow — complete
+
+Master spec §40 (Month-End Close), §41 (Period Locking) and §77 (human override
+/ audit trail). This closes the item the roadmap has carried since Phase 1 —
+"period-lock override workflow UI — reject path enforced, override workflow
+deferred to Phase 9 (Close)". Design detail is in `docs/accounting-engine.md`
+§15; the security view in `docs/security.md` §11; the AI surface in
+`docs/ai-agents.md` §0g.
+
+**Built**
+
+- **Lock levels on the existing period concept.** `fiscal_periods.status`
+  now carries `OPEN < SOFT_LOCKED < ADVISOR_LOCKED < TAX_LOCKED < HARD_LOCKED`
+  (one concept, no parallel flag; severity order in `LOCK_RANK`). The pure
+  `evaluatePosting`/`evaluateLockChange` hold the whole permission matrix.
+  `PostingService` still rejects **inside the same transaction as the insert**,
+  with one query, before anything is written — a test proves a rejected post
+  leaves no journal entry, lines, audit entry or history row, for every level
+  x posting role. Overlapping periods: the most restrictive governs. The period
+  end date now covers its whole UTC day (a timestamped posting on the last day
+  could previously slip past a lock).
+- **Inline override (SOFT) and advisor posting.** `PostOptions
+  .lockOverrideReason` on `postJournal`/`postDraft`/`reverseEntry` (and passed
+  through invoice, bill and supplier-credit approve-and-post), validated against
+  the actor's server-side role. The journal records the level and reason; the
+  append-only history gets a `POSTING_OVERRIDE` row; `audit_logs` gets
+  `journal.posted_under_lock`. UI: manual journal, invoice, bill and supplier
+  credit show "Post anyway — reason required" for an authorised user and a clear
+  consequence/who-can-reopen message otherwise (a journal blocked by a lock is
+  kept as a draft, never lost).
+- **Reopen workflow.** `period:reopen` (soft/advisor) or `period:reopen_hard`
+  (OWNER/ADMINISTRATOR only, for TAX/HARD), a mandatory reason (>= 10 chars),
+  and for TAX_LOCKED a typed "may invalidate a lodgement" acknowledgement.
+  Recorded in the append-only `period_lock_events` (INSERT/SELECT-only for
+  `mm_app`, verified with the real restricted role) and in `audit_logs`; a
+  reopen starts a fresh close cycle.
+- **Month-end close workspace** (`/accounting/close`, `/accounting/close/[period]`):
+  the month list (including months that exist only implicitly) with lock
+  level, close status, live % for the focus month and the at-close % for closed
+  ones; the period page is the workspace — progress bar with the formula stated,
+  "what remains", checklist by category with live status and drill-down links,
+  manual sign-offs (named + timestamped, labelled as a person's attestation, never
+  system verification), close / raise-lock / reopen forms with reasons, close
+  history by cycle, and the lock-event timeline.
+- **Checklist engine (live, never stored).** Automatic: bank reconciliation per
+  account, draft invoices/bills/credit notes/journals, submitted expense claims,
+  draft pay runs (omitted without `payrun:read`), depreciation run, fixed-asset
+  register and inventory valuation vs the ledger (BLOCKING), trial balance and
+  Balance Sheet equation (BLOCKING), suspense/clearing accounts (N/A when the org
+  has none — the platform creates none), earlier-period sequencing (a warning).
+  Manual sign-offs: accruals, prepayments, tax review, P&L review, Balance Sheet
+  review, budget variance, foreign exchange (N/A without foreign lines),
+  intercompany (always N/A). Closing is refused with a typed error listing
+  BLOCKING items; outstanding items need an explicit acknowledgement; the
+  checklist snapshot is stored with the close and in the audit entry. Default
+  lock on close: SOFT_LOCKED (justified in the accounting-engine doc).
+- **Migration of the old model.** Legacy `SOFT_LOCKED` (which blocked everyone)
+  became `HARD_LOCKED` so no lock is loosened; legacy `HARD_LOCKED` and `OPEN`
+  are unchanged; each carried-over lock has a `MIGRATED` history row. Verified by
+  a test that runs the migration SQL on legacy-shaped rows, and it ran on the real
+  dev database's seeded FY2026 lock.
+- **AI (read-only).** A `close_status` Financial Controller tool
+  (`close_checklist:read`, citation to the workspace, payroll omitted without
+  `payrun:read`) and optional "what remains" commentary over the computed
+  checklist (omitted without an API key). **No write path exists:** tests assert
+  no tool/permission/auto-execution action can close, lock, reopen or sign off,
+  and that an `AI`/`SYSTEM` actor with an OWNER role is refused.
+- Three new tables (`period_closes`, `close_signoffs`, `period_lock_events`),
+  all RLS-enabled + FORCEd + policy + scoped grants; the tenant-isolation audit is
+  now **67 of 74** tables.
+- Tests: unit (lock ordering, the full level x role x reason posting matrix, the
+  lock-change/reopen validation incl. TAX acknowledgement, each check's status
+  logic, the progress formula incl. N/A and manual items, period references);
+  integration against the real database (every level x role posting outcome with
+  nothing persisted on rejection; soft-lock override; hard lock rejects the
+  owner; draft/reversal/overlap/end-of-day; invoice and bill approve-and-post
+  under a lock; close refused for BLOCKING items and for missing acknowledgement;
+  snapshot and audit; reopen permissions/reason/TAX acknowledgement; re-close
+  after reopen as a new cycle; each automatic check flipping when the data is
+  fixed; manual sign-offs; N/A handling; payroll omission; the history table's
+  UPDATE/DELETE/TRUNCATE denied to `mm_app`; tenant isolation for every new
+  table; the migration mapping; the AI tool's refusal with a real restricted-role
+  actor, its end-to-end loop with a mocked model, and the exclusion tests).
+- `npm run typecheck`, `npm run lint`, `npm test` (1003 tests, up from 900; the 900
+  existing tests pass unmodified) and `npm run build` all pass. A smoke test
+  against `next start` with real NextAuth logins drove the whole flow over HTTP
+  with the real server actions (see "Verified for real" below).
+
+**Verified for real vs not**
+
+- Real: a deliberately unreconciled bank transaction and a draft invoice showed
+  up in the checklist (progress 50%), a sign-off recorded the signer's name,
+  fixing the bank item and invoice in the ledger raised the figure (71%),
+  signing off the remaining items reached 100%; closing without the
+  acknowledgement was refused by the server; closing at SOFT_LOCKED worked;
+  a bookkeeper's post into the period was rejected with the explained message and
+  no override offered; the owner was offered "Post anyway", a too-short reason was
+  refused, and a valid reason posted the journal (and, separately, an invoice)
+  and showed the override on the entry; reopen with a short reason was refused, a
+  bookkeeper saw no reopen control, and the owner's reopen with a reason was
+  recorded; the database showed matching `period_lock_events`, `audit_logs` and
+  `period_closes` (cycle 1 CLOSED with a 22-item snapshot, cycle 2 IN_PROGRESS).
+- Not driven: a real browser (the pages were exercised by HTTP form submission
+  with the real server actions, and compiled by `next build`), and the real
+  Anthropic API (only ever exercised via a mocked SDK).
+
+**Deferred (document why)**
+
+- **Dashboard "Month close: N% complete" card.** Skipped: the percentage needs
+  the full live checklist (~15 queries including three reporting services), which
+  would add heavy queries to the home page, against the DB-connection rule that a
+  production incident was fixed for. The close page and the sidebar entry are
+  the surface; the list page computes live progress for the single focus month
+  only.
+- **Tax lodgement integration.** There is none: TAX_LOCKED is a manual lock the
+  user applies and labels.
+- **Inline override on other posting paths** (payments, pay runs, depreciation,
+  expense claims, bank categorisation): rejected by a lock with the explained
+  message; the override is wired into the human flows most likely to hit a locked
+  period (manual journals, invoice/bill/credit approve-and-post). Adding the
+  option to another path is one pass-through parameter.
+- **Request/approve override as a two-person workflow** and **notifications**:
+  the override is a single authorised, reasoned, audited action; there is no
+  messaging/approval-inbox infrastructure for a request flow.
+- **Per-organization role customisation** of the new permissions: the static
+  role matrix is used, like every prior slice.
+- **Unrealised FX revaluation and intercompany**: surfaced as manual items; the
+  platform does not automate either.
+- **Scheduled/automatic close or reminders**: no job queue exists.
+- **Year-end close (closing entries / retained-earnings roll-forward) and a
+  configurable fiscal-year start**: still the calendar-year assumption in
+  `docs/accounting-engine.md` §8b. The lock model works on any period range
+  (a financial year is just a period), but defining fiscal-year semantics for
+  retained earnings is a separate, invasive change.
+
+**Remaining Phase 9 items:** **multi-entity consolidation** (master spec §30) and
+**accountant practice management and workpapers** (§42/43) — separate later
+slices.
 
 ## Platform admin & seat limit — complete
 
