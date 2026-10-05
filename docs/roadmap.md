@@ -2989,6 +2989,36 @@ permission-checked: the consent record, `client_requests` and informational audi
   thresholds, and a practice-level audit-log page (the append-only log is written and tested;
   there is no browse UI yet).
 
+**Verification (what was run for real)**
+- `npm run typecheck`, `npm run lint`, `npm test` (121 files, 1257 tests: the 1088 existing plus 169
+  new), and `npm run build` (migrations 0040/0041 applied, isolation audit "18 practice-scoped
+  tables" green, `next build` compiled) all pass.
+- Integration tests against the real Postgres test database cover: the practice gate (an outsider and
+  a removed member read nothing and write nothing in any practice table, even via `withUserScope`),
+  the handshake (only a client OWNER/ADMINISTRATOR accepts; revocation refuses the very next read),
+  the dashboard (exactly the readable client A; pending B, revoked C and non-member D contribute no row
+  and open no tenant transaction; hand-checkable indicators; payroll hidden for a role without
+  `payrun:read`), sequential and bounded access by instrumenting `withTenant`/`withUserScope`
+  (at most one scoped transaction open at a time; one consent check per page row), client requests
+  (RLS isolation for the new tenant tables, append-only thread), workpapers with hand-verified numbers
+  (ledger 12,000.00 = statement 12,450.00 + outstanding -450.00 gives 0.00; a -350.00 item gives -100.00),
+  evidence validation, reviewer-not-preparer and the single-staff exception, immutability enforced by
+  the database as the real `mm_app` role, reopen with reason, carry-forward rules, a client ledger that
+  is byte-identical before and after a full workpaper lifecycle, the seat-limit message, and the AI
+  tools' no-leak tests with a mocked model.
+- A scripted real-HTTP smoke test against `next start` with real NextAuth credential logins (four
+  users; the forms were posted exactly as a no-JS browser does): practice set-up, staff added, client
+  handshake, dashboard Refresh (per client, per page and bulk), a BAS task driving the BAS/Tax light,
+  a workpaper taken through schedule, evidence, preparer sign-off, a reviewer's note, a
+  segregation refusal and a second user's reviewer sign-off, a client-visible request answered by the
+  client with an attachment that the practice downloaded, the Business/Accountant toggle, and
+  revocation dropping the client from the dashboard while the signed-off workpaper stays readable
+  as of its snapshot date. (That run found and fixed one real bug: a per-row Refresh button inside the
+  bulk form lost its client id because a server-action button's `name` is replaced by the action id.)
+- Not exercised in a browser: visual styling and mobile layout were not inspected (no browser was
+  available); only the rendered markup and behaviour above were checked. The Anthropic API itself is
+  only exercised through the mocked SDK, as in earlier slices.
+
 **Phase 9 is complete.** Remaining on the roadmap: **Phase 8's later slices** (BAS/GST,
 STP lodgement, award interpretation and the other compliance features) and **Phase 10**
 (public API, webhooks, integration marketplace, advanced automation centre).
