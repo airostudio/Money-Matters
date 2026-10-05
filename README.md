@@ -94,7 +94,21 @@ per-period coefficient tables were explicitly left unresolved rather than
 guessed at — see `docs/roadmap.md` for the full, honest list of what was
 verified vs. deferred, and note that a registered tax agent or payroll
 provider should verify this software's output before it is used for real
-employee payroll. See
+employee payroll.
+
+Phase 9 Slice 1 adds the budgeting core: baseline/revised-forecast/
+rolling-forecast budgets with monthly line items by GL account (optionally
+scoped to a dimension value), a Budget vs. Actual report built on the
+exact same GL-aggregation query every other financial statement uses (so
+it reconciles correctly, including an account with a budget line and no
+actual activity, or actual activity with no budget line), an on-demand
+rolling-forecast action that copies a budget's lines forward from a
+chosen cutoff date, and a real Budget vs. Actual section in the
+Management Report Pack. Scenario modelling, cash flow forecasting,
+multi-entity consolidation, month-end close, and accountant practice
+management are all explicitly later Phase 9 slices — see `docs/roadmap.md`
+for why each is a distinct feature, not a shallow extension of budgeting.
+See
 [`docs/roadmap.md`](docs/roadmap.md) for exactly what's built
 vs. explicitly deferred in each phase (a customer portal, AI-drafted
 collection reminders, a live bank feed provider, Stripe, a background job

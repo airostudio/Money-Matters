@@ -3701,3 +3701,161 @@ export const payrollTaxBracketsRelations = relations(payrollTaxBrackets, ({ one 
     references: [payrollTaxRuleSets.id],
   }),
 }));
+
+// ---------------------------------------------------------------------------
+// Budgeting (Phase 9 Slice 1) — master spec §36
+// ---------------------------------------------------------------------------
+
+/**
+ * The three budget-version concepts master spec §36 names. `BASELINE` is the
+ * original plan for a period; `REVISED_FORECAST` is a deliberate in-year
+ * revision of it; `ROLLING_FORECAST` is produced by
+ * `BudgetService.createRollingForecast` copying a source budget's lines
+ * forward and letting the user re-edit the future ones — see that
+ * function's doc comment. All three share one schema/one reporting path;
+ * only this tag and (for ROLLING_FORECAST) `sourceBudgetId` distinguish them.
+ */
+export const budgetTypeEnum = pgEnum("budget_type", [
+  "BASELINE",
+  "REVISED_FORECAST",
+  "ROLLING_FORECAST",
+]);
+
+/**
+ * `DRAFT` is being built/edited and never appears in Budget vs. Actual;
+ * `ACTIVE` is the one a Budget vs. Actual report or the Management Pack
+ * picks up; `ARCHIVED` is retired history, kept for audit but no longer
+ * live. A budget can move DRAFT→ACTIVE→ARCHIVED, or DRAFT→ARCHIVED directly
+ * (discarding a draft) — `BudgetService` doesn't otherwise restrict the
+ * transition order.
+ */
+export const budgetStatusEnum = pgEnum("budget_status", ["DRAFT", "ACTIVE", "ARCHIVED"]);
+
+/**
+ * One named budget/forecast, org-scoped, covering a fixed date range
+ * (`periodStart`–`periodEnd`, inclusive — a fiscal year or any custom
+ * range). This is planning data only: a budget never touches the ledger —
+ * no table here has a `journalEntryId`, and `BudgetService` never calls
+ * `PostingService`.
+ *
+ * **Only-one-active-baseline is enforced structurally, but only for
+ * `BASELINE`**: `BudgetService.activate` refuses to activate a BASELINE
+ * budget whose period overlaps another already-ACTIVE BASELINE budget in
+ * the same org — two baselines for the same months would make "the"
+ * Budget vs. Actual comparison ambiguous, the one case worth a hard
+ * database-backed rule rather than just UI guidance. `REVISED_FORECAST`/
+ * `ROLLING_FORECAST` budgets are deliberately NOT included in that check —
+ * master spec §36 expects a revised forecast and a rolling forecast to
+ * coexist alongside the baseline they were derived from (both still
+ * reportable against individually), so restricting those too would block
+ * the exact workflow this slice builds. See docs/roadmap.md for this
+ * decision written out in full.
+ */
+export const budgets = pgTable("budgets", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  type: budgetTypeEnum("type").notNull().default("BASELINE"),
+  status: budgetStatusEnum("status").notNull().default("DRAFT"),
+  periodStart: timestamp("period_start", { withTimezone: true, mode: "date" }).notNull(),
+  periodEnd: timestamp("period_end", { withTimezone: true, mode: "date" }).notNull(),
+  /** Set only for a REVISED_FORECAST/ROLLING_FORECAST created from another budget — traceability only, never re-read to post or recompute anything. Null for a standalone BASELINE. */
+  sourceBudgetId: uuid("source_budget_id").references((): AnyPgColumn => budgets.id),
+  /** The "carry forward periods after date Y" cutoff used by `createRollingForecast`, recorded for traceability. Null for anything not created that way. */
+  carryForwardAfterDate: timestamp("carry_forward_after_date", { withTimezone: true, mode: "date" }),
+  notes: text("notes"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+  updatedById: uuid("updated_by_id"),
+}, (table) => ({
+  orgStatusTypeIdx: index("budgets_org_status_type_idx").on(table.organizationId, table.status, table.type),
+  orgPeriodIdx: index("budgets_org_period_idx").on(table.organizationId, table.periodStart, table.periodEnd),
+}));
+
+/**
+ * One monthly line item: `{account, optional dimension value, periodStart,
+ * periodEnd, amount}` per master spec §36's "by GL account, department,
+ * location, project, entity, month" — one row per account/dimension-value/
+ * calendar month, the simplest granularity to report against with
+ * `sumPostedActivityByAccount`'s own month-or-coarser period ranges.
+ * `amount` is normal-balance-signed, the same convention
+ * `normalSignedBalance` produces for actual activity (e.g. positive for a
+ * REVENUE account means budgeted revenue, positive for an EXPENSE account
+ * means budgeted expense) — so a budget line and the actual figure it's
+ * compared against are always directly comparable with no sign-flipping in
+ * the reporting layer.
+ *
+ * **No DB-level uniqueness constraint** on (budget, account, dimension
+ * value, month): `dimensionValueId` is nullable, and Postgres treats every
+ * NULL as distinct in a unique index, so a naive unique index would not
+ * actually prevent two rows for "this account, no dimension, this month."
+ * `BudgetService.setAccountLines` enforces "one row per account/dimension/
+ * month" itself — on every bulk-entry save it deletes the existing rows for
+ * that exact (budgetId, accountId, dimensionValueId) combination across the
+ * whole affected period and re-inserts the new set in the same transaction,
+ * so there is structurally never a duplicate even without a DB constraint.
+ * See docs/database.md for this slice's write-up of the choice.
+ */
+export const budgetLines = pgTable("budget_lines", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  budgetId: uuid("budget_id")
+    .notNull()
+    .references(() => budgets.id, { onDelete: "cascade" }),
+  accountId: uuid("account_id")
+    .notNull()
+    .references(() => accounts.id),
+  /** Optional single dimension-value scope for this line (e.g. "Department: Sales") — master spec §36's dimension axes, reusing Phase 5 Slice 2's dimension system rather than a parallel tagging mechanism. Null means "whole-organization, no dimension scope." */
+  dimensionValueId: uuid("dimension_value_id").references(() => dimensionValues.id),
+  periodStart: timestamp("period_start", { withTimezone: true, mode: "date" }).notNull(),
+  periodEnd: timestamp("period_end", { withTimezone: true, mode: "date" }).notNull(),
+  /** Decimal string, normal-balance-signed — see this table's doc comment. */
+  amount: numeric("amount", { precision: 19, scale: 4 }).notNull().default("0"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+  updatedById: uuid("updated_by_id"),
+}, (table) => ({
+  orgBudgetIdx: index("budget_lines_org_budget_idx").on(table.organizationId, table.budgetId),
+  budgetAccountPeriodIdx: index("budget_lines_budget_account_period_idx").on(
+    table.budgetId,
+    table.accountId,
+    table.periodStart,
+  ),
+}));
+
+export const budgetsRelations = relations(budgets, ({ one, many }) => ({
+  organization: one(organizations, {
+    fields: [budgets.organizationId],
+    references: [organizations.id],
+  }),
+  sourceBudget: one(budgets, {
+    fields: [budgets.sourceBudgetId],
+    references: [budgets.id],
+  }),
+  lines: many(budgetLines),
+}));
+
+export const budgetLinesRelations = relations(budgetLines, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [budgetLines.organizationId],
+    references: [organizations.id],
+  }),
+  budget: one(budgets, {
+    fields: [budgetLines.budgetId],
+    references: [budgets.id],
+  }),
+  account: one(accounts, {
+    fields: [budgetLines.accountId],
+    references: [accounts.id],
+  }),
+  dimensionValue: one(dimensionValues, {
+    fields: [budgetLines.dimensionValueId],
+    references: [dimensionValues.id],
+  }),
+}));

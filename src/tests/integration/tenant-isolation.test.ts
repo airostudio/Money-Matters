@@ -56,6 +56,8 @@ import { DepreciationService } from "@/domain/fixed-assets/depreciation-service"
 import { createPayrollFixtures } from "../helpers/payroll";
 import { EmployeeService } from "@/domain/payroll/employee-service";
 import { PayRunService } from "@/domain/payroll/pay-run-service";
+import { budgetLines, budgets } from "@/db/schema";
+import { BudgetService } from "@/domain/budgeting/budget-service";
 
 /**
  * Master spec §48 / §87 non-negotiable #7: "A coding mistake must not allow
@@ -196,6 +198,8 @@ describe("Tenant isolation", () => {
       "employees",
       "pay_runs",
       "pay_run_lines",
+      "budgets",
+      "budget_lines",
     ];
 
     const rows = await db.execute<{
@@ -593,5 +597,27 @@ describe("Tenant isolation", () => {
     expect(await db.select().from(employees)).toHaveLength(0);
     expect(await db.select().from(payRuns)).toHaveLength(0);
     expect(await db.select().from(payRunLines)).toHaveLength(0);
+  });
+
+  it("a budget (and its lines) created under org A is invisible to org B, even by direct query with no filter", async () => {
+    const budget = await BudgetService.create(orgA.owner, {
+      name: "Org A's budget",
+      periodStart: new Date("2026-01-01"),
+      periodEnd: new Date("2026-12-31"),
+    });
+    await BudgetService.setAccountLines(orgA.owner, budget.id, {
+      accountId: orgAAccountIds[4]!,
+      months: [{ month: new Date("2026-01-01"), amount: "1000.00" }],
+    });
+
+    expect(await BudgetService.get(orgB.owner, budget.id)).toBeNull();
+
+    const budgetsAsOrgB = await withTenant(orgB.organizationId, (tx) => tx.select().from(budgets));
+    expect(budgetsAsOrgB.some((r) => r.id === budget.id)).toBe(false);
+    const linesAsOrgB = await withTenant(orgB.organizationId, (tx) => tx.select().from(budgetLines));
+    expect(linesAsOrgB.some((r) => r.budgetId === budget.id)).toBe(false);
+
+    expect(await db.select().from(budgets)).toHaveLength(0);
+    expect(await db.select().from(budgetLines)).toHaveLength(0);
   });
 });

@@ -141,6 +141,34 @@ export default async function ManagementPackPage({
           <Kpi label="Ending Cash" amount={pack.cashFlow.endingCashActual} currency={currency} />
         </CardContent>
       </Card>
+
+      {pack.budgetVsActual ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">
+              Budget vs. Actual — {pack.budgetVsActual.budgetName} —{" "}
+              <a
+                href={`/${org.slug}/accounting/reports/budget-vs-actual?budgetId=${pack.budgetVsActual.budgetId}&from=${formatDateParam(from)}&to=${formatDateParam(to)}`}
+                className="text-primary hover:underline text-sm font-normal"
+              >
+                view full report
+              </a>
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="grid grid-cols-3 gap-3">
+            <Kpi label="Total Budget" amount={pack.budgetVsActual.totalBudget} currency={pack.budgetVsActual.currency} />
+            <Kpi label="Total Actual" amount={pack.budgetVsActual.totalActual} currency={pack.budgetVsActual.currency} />
+            <Kpi label="Variance" amount={pack.budgetVsActual.totalVariance} currency={pack.budgetVsActual.currency} showSign />
+          </CardContent>
+        </Card>
+      ) : (
+        <Card>
+          <CardContent className="p-6 text-sm text-muted-foreground">
+            No ACTIVE baseline budget covers this period — Budget vs. Actual is omitted from this pack. Create and
+            activate a budget to add this section.
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

@@ -1,7 +1,11 @@
 import "server-only";
 import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
+import { roleHasPermission } from "@/domain/permissions/roles";
 import { ReportingService, type PeriodRange } from "./reporting-service";
 import type { BalanceSheetReport, CashFlowStatement, ProfitAndLossReport } from "./financial-statements";
+import { BudgetService } from "@/domain/budgeting/budget-service";
+import { BudgetVarianceService } from "@/domain/budgeting/budget-variance-service";
+import type { BudgetVarianceReport } from "@/domain/budgeting/budget-variance-calculations";
 
 /**
  * Master spec §33's "management report pack": P&L + Balance Sheet + Cash
@@ -32,6 +36,15 @@ export interface ManagementPack {
   profitAndLoss: ProfitAndLossReport;
   balanceSheet: BalanceSheetReport;
   cashFlow: CashFlowStatement;
+  /**
+   * Master spec §35's "Budget vs Actual" pack section (Phase 9 Slice 1).
+   * `null` when the org has no ACTIVE BASELINE budget covering `asOfDate`
+   * — omitted cleanly, never fabricated, never an error (see
+   * `BudgetService.findActiveBaseline`'s doc comment), and also `null` for
+   * an actor whose role lacks `budget:read` (the pack still renders the
+   * other three statements for them).
+   */
+  budgetVsActual: BudgetVarianceReport | null;
   /** `null` when `ANTHROPIC_API_KEY` is unset or the call failed — the pack is still complete and useful without it. */
   commentary: string | null;
 }
@@ -55,6 +68,10 @@ async function generateCommentary(pack: Omit<ManagementPack, "commentary">, apiK
       `Balance Sheet balanced: ${pack.balanceSheet.isBalanced}`,
       `Net Cash from Operating: ${pack.cashFlow.netCashFromOperating} ${pack.cashFlow.currency}`,
       `Net Change in Cash: ${pack.cashFlow.netChangeInCash} ${pack.cashFlow.currency}`,
+      pack.budgetVsActual
+        ? `Budget vs. Actual (${pack.budgetVsActual.budgetName}): total budget ${pack.budgetVsActual.totalBudget}, ` +
+          `total actual ${pack.budgetVsActual.totalActual}, variance ${pack.budgetVsActual.totalVariance} ${pack.budgetVsActual.currency}`
+        : undefined,
     ]
       .filter(Boolean)
       .join("\n");
@@ -66,7 +83,8 @@ async function generateCommentary(pack: Omit<ManagementPack, "commentary">, apiK
         "You write a short (3-5 sentence) plain-English commentary on a small business's financial summary for a " +
         "management report pack. Use ONLY the figures given to you — never calculate, restate with a different " +
         "value, or introduce any number that isn't explicitly listed. Focus on what the figures mean in plain " +
-        "terms (profitability, financial position, cash movement), not on restating every number verbatim.",
+        "terms (profitability, financial position, cash movement, and — when given — how actual results compare " +
+        "to budget), not on restating every number verbatim.",
       messages: [{ role: "user", content: `Here are this period's figures:\n\n${facts}` }],
     });
 
@@ -93,9 +111,19 @@ export const ManagementPackService = {
     const balanceSheet = await ReportingService.getBalanceSheet(actor, asOfDate);
     const cashFlow = await ReportingService.getCashFlowStatement(actor, period);
 
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    const commentary = apiKey ? await generateCommentary({ profitAndLoss, balanceSheet, cashFlow }, apiKey) : null;
+    let budgetVsActual: BudgetVarianceReport | null = null;
+    if (roleHasPermission(actor.role, "budget:read")) {
+      const activeBaseline = await BudgetService.findActiveBaseline(actor, asOfDate);
+      if (activeBaseline) {
+        budgetVsActual = await BudgetVarianceService.getBudgetVsActual(actor, activeBaseline.id, period);
+      }
+    }
 
-    return { profitAndLoss, balanceSheet, cashFlow, commentary };
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    const commentary = apiKey
+      ? await generateCommentary({ profitAndLoss, balanceSheet, cashFlow, budgetVsActual }, apiKey)
+      : null;
+
+    return { profitAndLoss, balanceSheet, cashFlow, budgetVsActual, commentary };
   },
 };

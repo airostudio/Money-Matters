@@ -2196,11 +2196,173 @@ session paper over this:**
   request/approval UI is a reasonable future addition), and any
   scheduled/automatic pay run (on-demand only, no job queue exists).
 
-## Phase 9 — Advanced Finance (not started)
+## Phase 9 — Advanced Finance
 
-Budgets, forecasting, scenario modelling, multi-entity consolidation,
-accountant practice management, workpapers, month-end close workspace,
-period-lock override workflow.
+### Slice 1 — Budgeting & Budget vs. Actual (complete, scoped per this slice's brief)
+
+Master spec §36's budgeting core: baseline/revised-forecast/rolling-forecast
+budgets, monthly line items by GL account (optionally scoped to a
+dimension value), Budget vs. Actual reporting built on the exact same
+`sumPostedActivityByAccount` aggregation every other financial statement
+uses, an on-demand rolling-forecast "copy forward from date Y" action, and
+a real Budget vs. Actual section in the Management Report Pack. This slice
+deliberately stays inside the budgeting core — see "Explicitly deferred"
+below for everything else Phase 9's one-line description names.
+
+**What's built:**
+
+- `budgets`/`budget_lines` (`src/db/schema.ts`): `budgets` is org-scoped —
+  name, `type` (`BASELINE`/`REVISED_FORECAST`/`ROLLING_FORECAST`, master
+  spec §36's three version concepts), `status`
+  (`DRAFT`/`ACTIVE`/`ARCHIVED`), and a fixed `periodStart`–`periodEnd`
+  range (a fiscal year or any custom range). `budget_lines` is one row per
+  (account, optional dimension value, calendar month) — monthly
+  granularity, the simplest shape to report against and the norm master
+  spec §36 implies ("by GL account, department, location, project, entity,
+  month, quarter, year"). A dimension-scoped line reuses Phase 5 Slice 2's
+  `dimension_values` table directly rather than a parallel tagging
+  mechanism. Neither table has a `journalEntryId` anywhere, and
+  `BudgetService` never calls `PostingService` — a budget is planning
+  data, never a ledger posting.
+  - **No DB-level uniqueness constraint** on (budget, account, dimension
+    value, month): `dimensionValueId` is nullable, and Postgres treats
+    every NULL as distinct in a unique index, so a naive unique index
+    would not actually stop two rows for "this account, no dimension, this
+    month." `BudgetService.setAccountLines` enforces "one row per account/
+    dimension/month" itself: every bulk-entry save deletes the existing
+    rows for that exact (budget, account, dimension) combination across
+    the submitted months and re-inserts the new set in the same
+    transaction — structurally never a duplicate even without a DB
+    constraint. See docs/database.md.
+  - **Only-one-ACTIVE-baseline is enforced structurally, but only for
+    `BASELINE`**: `BudgetService.activate` refuses to activate a BASELINE
+    budget whose period overlaps another org's already-ACTIVE BASELINE
+    budget — ambiguity about "the" baseline is the one case worth a real
+    database-backed rule. `REVISED_FORECAST`/`ROLLING_FORECAST` budgets are
+    deliberately exempt — master spec §36 expects a revised/rolling
+    forecast to coexist alongside (and be reportable against individually
+    from) the baseline it was derived from, so restricting those too would
+    block the exact workflow this slice builds.
+- `BudgetService` (`src/domain/budgeting/budget-service.ts`): create/
+  list/get a budget; `setAccountLines` is the bulk-entry upsert — one
+  account's (optionally dimension-scoped) whole year of monthly figures in
+  one call, not one API call per cell, per this slice's brief; `activate`/
+  `archive` for the DRAFT→ACTIVE→ARCHIVED lifecycle (lines are only
+  editable while DRAFT — an ACTIVE budget a report or the Management Pack
+  is already reading from can never change under a reader without a
+  deliberate new revision); `createRollingForecast`.
+- **Rolling forecast** (`BudgetService.createRollingForecast` +
+  `src/domain/budgeting/rolling-forecast.ts`'s
+  `partitionLinesForRollingForecast`): on-demand and user-triggered only —
+  "create a rolling forecast from budget X, carrying forward periods after
+  date Y" — never a scheduled/automatic rolling window, the same job-queue
+  gap every other recurring process in this codebase documents (no job
+  queue exists here at all). Copies a source budget's lines into a new
+  DRAFT `ROLLING_FORECAST` budget: every line on/before the cutoff is
+  copied through exactly unchanged (history preserved), every line after
+  it is carried forward as a starting point the user then edits via the
+  same `setAccountLines` bulk-entry form — the source budget itself is
+  never modified.
+- **Budget vs. Actual** (`src/domain/budgeting/budget-variance-
+  calculations.ts` + `budget-variance-service.ts`'s `BudgetVarianceService`):
+  built alongside `ReportingService`, not inside it, but reusing its exact
+  building blocks — the actual side is `sumPostedActivityByAccount`, the
+  identical shared aggregation every financial statement uses (no parallel
+  GL query path), and both sides are normal-balance-signed via the same
+  `normalSignedBalance` helper `financial-statements.ts` already exports.
+  Scoped to REVENUE/EXPENSE accounts, the same P&L shape
+  `buildProfitAndLoss` itself is scoped to. **Reconciles correctly** per
+  this slice's non-negotiable: the report is the UNION of every account
+  that appears on either side — a budget line with zero actual activity
+  still gets a full row (not a missing one), and actual activity with no
+  budget line still gets a row, flagged via `unbudgetedActivity` rather
+  than silently dropped. Variance is `actual − budget` in both $ and %,
+  with `variancePercent` explicitly `null` (never a divide-by-zero or a
+  misleadingly large number) when the budget side is exactly zero.
+- **Management Report Pack** (`src/domain/reporting/management-pack-
+  service.ts`): a new `budgetVsActual` section, master spec §35's "Budget
+  vs Actual" as a standard pack section, now that budgets exist. Uses the
+  org's current ACTIVE BASELINE budget covering the pack's as-of date,
+  found via `BudgetService.findActiveBaseline`; `null` (never an error,
+  never fabricated) when no such budget exists, and the page below renders
+  that as a clean "no budget yet" card rather than hiding the gap. The AI
+  commentary step is handed the same already-computed Budget vs. Actual
+  totals as every other section — never raw ledger data, never asked to
+  calculate anything itself.
+- Permissions: `budget:read`/`budget:manage` (`roles.ts`).
+  ACCOUNTANT/BOOKKEEPER get full manage access (budgeting sits with the
+  same roles that already own financial reporting and the chart of
+  accounts); MANAGER/READ_ONLY get read-only; ACCOUNTS_RECEIVABLE/
+  ACCOUNTS_PAYABLE/PAYROLL_MANAGER/EMPLOYEE get neither, consistent with
+  their existing narrower scopes.
+- UI: `/budgets` (list with status pills), `/budgets/new`, `/budgets/
+  [budgetId]` (detail — monthly-lines table grouped by account/dimension,
+  the bulk "enter a whole account's year" form, activate/archive, link to
+  create a rolling forecast), `/budgets/[budgetId]/rolling-forecast`
+  (create form), and `/accounting/reports/budget-vs-actual` (budget +
+  period picker, the Budget/Actual/Variance $/% table, an "unbudgeted"
+  flag per line). The Management Pack page gained a fourth section
+  rendering `budgetVsActual` or a clean "no budget yet" card. A new
+  top-level `Budgets` nav section was added, gated on `budget:read`.
+- Tests: unit (`calculateLineVariance`'s $ and % variance including the
+  zero-budget/zero-actual/both-zero edge cases;
+  `partitionLinesForRollingForecast`'s past/future split, including a
+  cutoff exactly on a line's `periodEnd` and the straddling-line rejection);
+  integration against the real test database (bulk-entry line creation and
+  activation; refusing a second overlapping ACTIVE baseline while allowing
+  a REVISED_FORECAST to coexist; Budget vs. Actual reconciling real posted
+  invoices/bills against real budget lines including the zero-budget and
+  zero-actual cases; a rolling forecast correctly carrying forward
+  unedited future periods while preserving past-period figures and never
+  touching the source budget; the Management Pack including a correct
+  section when an ACTIVE baseline exists and omitting it cleanly when none
+  does; a tenant-isolation case for `budgets`/`budget_lines`). The full
+  existing suite passes alongside these — 676 tests total after this
+  slice, up from 653.
+- `npm run typecheck`, `npm run lint`, `npm test`, and `npm run build` all
+  pass. Smoke-tested for real against a local Postgres (a script
+  exercising the real services, not just the test suite): created a
+  budget, entered a revenue line ($10,000) and an expense line ($3,000)
+  for January 2026, activated it, posted a real $12,000 revenue journal
+  and a real $2,500 expense journal, and confirmed Budget vs. Actual by
+  hand: revenue variance exactly $2,000/20.00% and expense variance
+  exactly −$500/−16.67% (both independently recomputed by hand from the
+  posted figures). Created a rolling forecast with a carry-forward cutoff
+  after the only month of data and confirmed it copied that month through
+  as "past," unchanged.
+
+**Explicitly deferred to later Phase 9 slices (document why):**
+
+- **Scenario modelling** (master spec §37 — hire/pricing/lose-a-customer
+  what-if scenarios): needs a modeling layer on top of budgets — parameter
+  inputs, sensitivity, side-by-side scenario comparison — that doesn't
+  exist yet and is a distinct feature from entering and reporting a single
+  committed budget.
+- **Cash flow intelligence/forecasting** (master spec §38 — 7/30/60/90-day
+  cash projections): a distinct feature from Budget vs. Actual — it
+  projects forward from AR/AP aging and recurring schedules, not from a
+  budget's own monthly figures, and needs its own design.
+- **Month-end close workspace and period-lock override workflow**
+  (master spec §40/41): ties into the existing but still-manual
+  period-lock mechanism from Phase 1 (`fiscal_periods`/
+  `fiscal_period:manage`) — a close checklist, sign-off trail, and an
+  override-with-reason flow are a distinct, close-specific surface, not
+  something to bolt onto budgeting.
+- **Multi-entity consolidation** (master spec §30): needs multiple real
+  linked organizations and elimination-entry logic — a big feature with
+  no dependency on budgets existing first.
+- **Accountant practice management and workpapers** (master spec §42/43):
+  a distinct, practice-facing surface (client lists, engagement tracking,
+  workpaper templates) orthogonal to any single organization's budgeting.
+- A budget against non-REVENUE/EXPENSE accounts (e.g. a capex budget
+  against a fixed-asset account) is still fully storable and queryable via
+  `budget_lines` directly — the schema has no type restriction — but the
+  Budget vs. Actual *report* only surfaces REVENUE/EXPENSE rows, matching
+  the P&L shape this slice's brief asks for explicitly. A balance-sheet-
+  shaped variant is a reasonable future addition, not attempted here.
+- Any scheduled/automatic rolling-window advance (e.g. "roll forward every
+  month automatically") — `createRollingForecast` is on-demand only, see
+  above; no job queue exists in this codebase for a true scheduled version.
 
 ## Phase 10 — Platform (not started)
 

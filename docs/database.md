@@ -573,6 +573,52 @@ back to its acquiring bill line is a single FK the other direction
 registered from a given bill line, never the reverse fan-out `projectId`/
 `productId` needed.
 
+## 2l. Phase 9 Slice 1: `budgets`, `budget_lines`
+
+Two new tables for budgeting (master spec §36, scoped down — see
+`docs/roadmap.md`'s Phase 9 Slice 1 entry). Both are pure planning data:
+neither has a `journalEntryId`, and nothing in `src/domain/budgeting/`
+calls `PostingService`.
+
+- `budgets` — `organizationId`, `name`, `type`
+  (`BASELINE`/`REVISED_FORECAST`/`ROLLING_FORECAST`), `status`
+  (`DRAFT`/`ACTIVE`/`ARCHIVED`), a fixed `periodStart`–`periodEnd` range,
+  an optional self-referencing `sourceBudgetId` (set only for a budget
+  created via `BudgetService.createRollingForecast`, traceability only),
+  and `carryForwardAfterDate` (the cutoff used to create it, also
+  traceability only — never re-read to recompute anything).
+- `budget_lines` — `organizationId`, `budgetId`, `accountId`, an optional
+  `dimensionValueId` (reusing Phase 5 Slice 2's `dimension_values` rather
+  than a parallel tagging mechanism), `periodStart`/`periodEnd` (one
+  calendar month per row), and `amount` (normal-balance-signed, same
+  convention `normalSignedBalance` produces for actual activity, so a
+  budget line and the actual figure it's compared against need no
+  sign-flipping anywhere in the reporting layer).
+
+**Design decision: no DB-level uniqueness constraint on (budget, account,
+dimension value, month).** Every other append-only or per-period table in
+this schema (e.g. `depreciation_entries`' `UNIQUE (organizationId,
+assetId, periodStart)`) enforces its own "at most one row" rule with a
+unique index. `budget_lines` can't use that same pattern directly:
+`dimensionValueId` is nullable, and Postgres treats every `NULL` as
+distinct from every other `NULL` in a unique index, so `UNIQUE
+(budgetId, accountId, dimensionValueId, periodStart)` would silently allow
+two rows for "this account, no dimension, this month" — the exact
+duplicate it's meant to prevent. Two structural alternatives were
+considered and rejected: a generated/sentinel non-null column standing in
+for "no dimension" (works, but introduces a magic value every reader of
+this table has to know about forever, for a problem the application layer
+already has to solve for the *values* within one call anyway), and a
+partial unique index (`WHERE dimension_value_id IS NULL` plus a second
+index for the non-null case) — workable, but two indexes to express one
+rule, against a table whose only writer is one service method. Instead,
+`BudgetService.setAccountLines` enforces it directly: every bulk-entry
+save deletes the existing rows for that exact (budget, account, dimension)
+combination across the submitted months and re-inserts the new set, in
+the same transaction — structurally never a duplicate because nothing else
+ever writes to this table. If a second write path to `budget_lines` is
+ever added, this choice should be revisited.
+
 ## 3. Row-Level Security
 
 Every tenant table gets an RLS policy of the shape:

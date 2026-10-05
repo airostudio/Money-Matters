@@ -74,6 +74,8 @@ export const PERMISSIONS = [
   "payrun:read",
   "payrun:manage",
   "payrun:post",
+  "budget:read",
+  "budget:manage",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -159,6 +161,8 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     // ADMINISTRATOR — see docs/security.md.
     "employee:read",
     "payrun:read",
+    "budget:read",
+    "budget:manage",
   ]),
   BOOKKEEPER: new Set<Permission>([
     "account:read",
@@ -217,6 +221,8 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "fixed_asset:manage",
     "employee:read",
     "payrun:read",
+    "budget:read",
+    "budget:manage",
   ]),
   ACCOUNTS_RECEIVABLE: new Set<Permission>([
     "account:read",
@@ -330,6 +336,7 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "product:read",
     "inventory:read",
     "fixed_asset:read",
+    "budget:read",
   ]),
   EMPLOYEE: new Set<Permission>([
     "expense_claim:read",
@@ -363,6 +370,7 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "product:read",
     "inventory:read",
     "fixed_asset:read",
+    "budget:read",
   ]),
 };
 

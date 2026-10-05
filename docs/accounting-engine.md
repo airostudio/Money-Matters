@@ -496,3 +496,51 @@ asset registered against the wrong pair), never a rounding footnote.
   phase is the one place in the codebase where "verified regulatory figures
   only, never recalled from training data" is the binding constraint, not
   just double-entry correctness.
+
+## 13. Phase 9 Slice 1 — budgets never touch the ledger; Budget vs. Actual reuses the P&L's own aggregation
+
+- **A budget is planning data, full stop.** No table in `src/domain/
+  budgeting/` has a `journalEntryId`, and `BudgetService` never imports
+  `PostingService`. This is the one domain area in this codebase whose
+  entire reason for existing is to be compared against the ledger, never
+  to post to it — unlike every prior phase, where "does this call
+  `PostingService`" is the first question to ask of a new mutation, here
+  the answer is structurally always no.
+- **Budget vs. Actual is a P&L with a second column, not a new report
+  shape.** `BudgetVarianceService.getBudgetVsActual` calls the exact same
+  `sumPostedActivityByAccount` (`src/domain/ledger/gl-aggregation.ts`)
+  every other financial statement calls for its actual side — see §8a.
+  There is no second, parallel query path for "the actual figures a
+  budget gets compared against." The budget side is a plain sum of
+  `budget_lines.amount` for the requested period; both sides are
+  normal-balance-signed via `normalSignedBalance`, the same helper
+  `buildProfitAndLoss`/`buildBalanceSheet` already use, so a budget figure
+  and an actual figure for the same account are always directly
+  comparable with no sign-flipping anywhere in the reporting layer.
+- **Reconciliation is a union, not an intersection.** An account with a
+  budget line and zero actual activity still gets a full row (budget
+  amount, $0 actual, a full negative variance) rather than being treated
+  as "no report data." An account with actual activity and no budget line
+  still gets a row too, with `unbudgetedActivity: true` — flagged, never
+  silently dropped. This mirrors the same union-of-both-sides approach
+  `buildSection` in `financial-statements.ts` already uses for a P&L's
+  comparison-period columns, just applied to (budget, actual) instead of
+  (current period, comparison period).
+- **Variance percent is `null`, never a computed artifact, when the
+  budget side is exactly zero.** Dividing by zero isn't rounded away or
+  defaulted to some sentinel number — a `null` forces every caller
+  (the report page, the Management Pack) to render "—" rather than a
+  misleading "0%" or "∞%".
+- **Rolling forecast is a copy, not a window.** `createRollingForecast`
+  reads a source budget's lines once, partitions them at a user-supplied
+  cutoff date (`partitionLinesForRollingForecast`), and writes the result
+  as a new, independent DRAFT budget. Nothing about the source budget is
+  referenced again afterward — there is no "live" link that would need
+  updating if the source budget later changed, the same one-shot-copy
+  discipline `FixedAssetClassService`'s class-to-asset defaulting already
+  uses (see §11): a class's defaults are copied once at registration and
+  never re-consulted.
+- **Budget vs. Actual is scoped to REVENUE/EXPENSE**, the same scope
+  `buildProfitAndLoss` itself uses — a budget line against a different
+  account type is still fully stored and queryable directly from
+  `budget_lines`, just not surfaced by this particular report.

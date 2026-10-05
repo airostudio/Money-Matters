@@ -218,6 +218,20 @@
       "when": 1791170016195,
       "tag": "0030_payroll_slice1_payrun_accounts",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1791174665039,
+      "tag": "0031_budgeting_slice1_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1791174665040,
+      "tag": "0032_budgeting_slice1_row_level_security",
+      "breakpoints": true
     }
   ]
 }

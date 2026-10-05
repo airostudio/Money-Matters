@@ -9,6 +9,7 @@ import {
   Landmark,
   LineChart,
   Package,
+  PiggyBank,
   Scale,
   Settings,
   ShoppingCart,
@@ -96,6 +97,12 @@ export const NAV_ITEMS: NavItem[] = [
     ],
   },
   {
+    label: "Budgets",
+    href: "/budgets",
+    icon: PiggyBank,
+    permission: "budget:read",
+  },
+  {
     label: "Payroll",
     href: "/payroll",
     icon: Wallet,
@@ -122,6 +129,7 @@ export const NAV_ITEMS: NavItem[] = [
       { label: "Balance Sheet", href: "/accounting/reports/balance-sheet", permission: "financial_report:read" },
       { label: "Cash Flow Statement", href: "/accounting/reports/cash-flow", permission: "financial_report:read" },
       { label: "Management Pack", href: "/accounting/reports/management-pack", permission: "financial_report:read" },
+      { label: "Budget vs. Actual", href: "/accounting/reports/budget-vs-actual", permission: "budget:read" },
       { label: "Report Builder", href: "/accounting/reports/builder", permission: "financial_report:read" },
       { label: "Ask a question", href: "/accounting/reports/ask", permission: "financial_report:read" },
       { label: "Dimensions", href: "/accounting/dimensions", permission: "dimension:read" },
