@@ -2,7 +2,7 @@ import Link from "next/link";
 import { requireOrgAndActor } from "@/lib/session";
 import { OrganizationService } from "@/domain/organizations/organization-service";
 import { roleHasPermission } from "@/domain/permissions/roles";
-import { membershipRoleEnum } from "@/db/schema";
+import { DEFAULT_INVITE_ROLE, roleOptions } from "@/domain/permissions/role-info";
 import { AUTONOMY_LEVELS, AUTONOMY_LEVEL_LABELS, AUTONOMY_LEVEL_DESCRIPTIONS } from "@/domain/ai-controller/autonomy";
 import {
   AUTO_APPROVABLE_ACTION_TYPES,
@@ -23,6 +23,7 @@ import {
   updateMemberRoleAction,
 } from "./actions";
 import { MemberRoleSelect } from "@/components/shell/member-role-select";
+import { InviteMemberForm } from "@/components/shell/invite-member-form";
 
 export default async function SettingsPage({
   params,
@@ -44,6 +45,7 @@ export default async function SettingsPage({
   const enabledActionTypes = new Set(autoApprovedActions.map((a) => a.actionType));
   const autonomyLevel = org.aiAutonomyLevel as 0 | 1 | 2 | 3 | 4;
 
+  const roles = roleOptions();
   const boundInvite = inviteMemberAction.bind(null, org.slug);
   const boundUpdateRole = updateMemberRoleAction.bind(null, org.slug);
   const boundRemove = removeMemberAction.bind(null, org.slug);
@@ -228,6 +230,7 @@ export default async function SettingsPage({
                         currentRole={member.role}
                         disabled={member.userId === actor.userId}
                         action={boundUpdateRole}
+                        options={roles}
                       />
                       <form action={boundRemove}>
                         <input type="hidden" name="membershipId" value={member.membershipId} />
@@ -251,7 +254,10 @@ export default async function SettingsPage({
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Invite a teammate</CardTitle>
-              <CardDescription>They must already have a Money Matters account.</CardDescription>
+              <CardDescription>
+                They must already have a Money Matters account. Choose <span className="font-medium">Read only</span> to let
+                someone look at the books at the same time as you without being able to change anything.
+              </CardDescription>
             </CardHeader>
             {memberError && (
               <p role="alert" className="mx-6 mb-4 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -265,32 +271,7 @@ export default async function SettingsPage({
                 Removing a member frees a seat.
               </p>
             )}
-            <form action={boundInvite}>
-              <fieldset disabled={seats?.isFull} className="contents">
-              <CardContent className="flex flex-col gap-4 sm:flex-row sm:items-end">
-                <div className="flex-1 space-y-2">
-                  <Label htmlFor="email">Email</Label>
-                  <Input id="email" name="email" type="email" placeholder="teammate@example.com" required />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="role">Role</Label>
-                  <select
-                    id="role"
-                    name="role"
-                    defaultValue="BOOKKEEPER"
-                    className="flex h-9 w-40 rounded-md border border-input bg-background px-3 text-sm"
-                  >
-                    {membershipRoleEnum.enumValues.map((role) => (
-                      <option key={role} value={role}>
-                        {role}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <Button type="submit">Invite</Button>
-              </CardContent>
-              </fieldset>
-            </form>
+            <InviteMemberForm action={boundInvite} options={roles} defaultRole={DEFAULT_INVITE_ROLE} disabled={seats?.isFull} />
           </Card>
         </>
       )}

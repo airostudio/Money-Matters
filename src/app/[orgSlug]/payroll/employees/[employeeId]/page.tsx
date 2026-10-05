@@ -1,4 +1,5 @@
 import { requireOrgAndActor } from "@/lib/session";
+import { roleHasPermission } from "@/domain/permissions/roles";
 import { EmployeeService } from "@/domain/payroll/employee-service";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -102,7 +103,7 @@ export default async function EmployeeDetailPage({
         </CardContent>
       </Card>
 
-      {employee.status === "ACTIVE" ? (
+      {employee.status === "ACTIVE" && roleHasPermission(actor.role, "employee:manage") ? (
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Terminate employment</CardTitle>

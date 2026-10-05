@@ -25,12 +25,17 @@ export default async function OrgHomePage({
   // connection (see the same note in DailyFinanceBriefService.generate).
   // This page also calls that service below, so keeping concurrency low
   // here matters even more — see the EMAXCONNSESSION incident.
-  const trialBalance = await LedgerService.getTrialBalance(actor);
-  const recentEntries = await LedgerService.listJournalEntries(actor, { limit: 5 });
-  const accounts = await AccountService.list(actor);
+  //
+  // Roles with no view of the books at all (EMPLOYEE has none of journal:read /
+  // account:read) skip these calls instead of tripping the service's permission
+  // refusal on their own home page.
+  const canSeeBooks = roleHasPermission(actor.role, "journal:read") && roleHasPermission(actor.role, "account:read");
+  const trialBalance = canSeeBooks ? await LedgerService.getTrialBalance(actor) : [];
+  const recentEntries = canSeeBooks ? await LedgerService.listJournalEntries(actor, { limit: 5 }) : [];
+  const accounts = canSeeBooks ? await AccountService.list(actor) : [];
 
   const needsOnboarding =
-    roleHasPermission(actor.role, "onboarding:manage") && !accounts.some((a) => !a.isSystemAccount);
+    canSeeBooks && roleHasPermission(actor.role, "onboarding:manage") && !accounts.some((a) => !a.isSystemAccount);
 
   const canSeeBrief = roleHasPermission(actor.role, "financial_report:read");
   const brief = canSeeBrief ? await DailyFinanceBriefService.generate(actor) : null;
@@ -80,6 +85,19 @@ export default async function OrgHomePage({
         </Card>
       )}
 
+      {!canSeeBooks && (
+        <Card>
+          <CardContent className="space-y-1 p-6 text-sm">
+            <p className="font-medium">Welcome to {org.name}.</p>
+            <p className="text-muted-foreground">
+              Your role doesn&apos;t include the company&apos;s books, so there are no balances to show here. Use the menu
+              on the left to open the areas you have access to.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {canSeeBooks && (
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <MetricCard label="Assets" value={<MoneyDisplay amount={assets.toString()} currency={org.baseCurrency} />} />
         <MetricCard
@@ -93,8 +111,10 @@ export default async function OrgHomePage({
           hint={`Revenue ${revenue.toString()} − Expenses ${expenses.toString()}`}
         />
       </div>
+      )}
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+        {canSeeBooks && (
         <Card className="lg:col-span-2">
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle className="text-base">Recent journal entries</CardTitle>
@@ -105,11 +125,16 @@ export default async function OrgHomePage({
           <CardContent className="p-0">
             {recentEntries.length === 0 ? (
               <p className="px-6 pb-6 text-sm text-muted-foreground">
-                No journal entries yet.{" "}
-                <Link href={`/${org.slug}/accounting/journals/new`} className="text-primary hover:underline">
-                  Post your first one
-                </Link>
-                .
+                No journal entries yet.
+                {roleHasPermission(actor.role, "journal:post") && (
+                  <>
+                    {" "}
+                    <Link href={`/${org.slug}/accounting/journals/new`} className="text-primary hover:underline">
+                      Post your first one
+                    </Link>
+                    .
+                  </>
+                )}
               </p>
             ) : (
               <div className="divide-y divide-border">
@@ -132,6 +157,7 @@ export default async function OrgHomePage({
             )}
           </CardContent>
         </Card>
+        )}
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">

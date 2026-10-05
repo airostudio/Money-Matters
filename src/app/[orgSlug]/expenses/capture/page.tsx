@@ -1,4 +1,5 @@
 import { requireOrgAndActor } from "@/lib/session";
+import { deniedViewUnless } from "@/lib/permission-gate";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { captureReceiptAction } from "../actions";
@@ -10,7 +11,9 @@ export default async function CaptureReceiptPage({
   params: { orgSlug: string };
   searchParams: { error?: string };
 }) {
-  const { actor: _actor, org } = await requireOrgAndActor(params.orgSlug);
+  const { actor, org } = await requireOrgAndActor(params.orgSlug);
+  const denied = deniedViewUnless(actor, "expense_receipt:manage", org.slug);
+  if (denied) return denied;
   const boundCapture = captureReceiptAction.bind(null, org.slug);
 
   return (

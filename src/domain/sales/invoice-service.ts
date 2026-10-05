@@ -5,8 +5,10 @@ import {
   invoiceLines,
   invoices,
   taxCodes,
+  users,
   type invoiceStatusEnum,
 } from "@/db/schema";
+import { StaleEditError, editVersionOf, isStaleEdit, nextUpdatedAt } from "@/domain/concurrency/stale-edit";
 import { withTenant, type TenantDb } from "@/db/tenant";
 import { Money } from "@/domain/money/money";
 import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
@@ -112,11 +114,12 @@ async function resolveProductLines(
   });
 }
 
-async function loadInvoiceOr404(tx: TenantDb, organizationId: string, invoiceId: string) {
-  const [invoice] = await tx
+async function loadInvoiceOr404(tx: TenantDb, organizationId: string, invoiceId: string, lockForUpdate = false) {
+  const query = tx
     .select()
     .from(invoices)
     .where(and(eq(invoices.id, invoiceId), eq(invoices.organizationId, organizationId)));
+  const [invoice] = await (lockForUpdate ? query.for("update") : query);
   if (!invoice) throw new InvoiceNotFoundError(invoiceId);
   return invoice;
 }
@@ -137,6 +140,7 @@ async function persistInvoiceWithLines(
   actor: Actor,
   input: CreateInvoiceInput,
   existingId?: string,
+  previousUpdatedAt?: Date,
 ): Promise<{ id: string; invoiceNumber: string; lines: { id: string; lineNumber: number }[] }> {
   const customer = await assertActiveCustomer(tx, actor.organizationId, input.customerContactId);
   const resolvedLines = await resolveProductLines(tx, actor.organizationId, input.lines, input.currency);
@@ -168,7 +172,7 @@ async function persistInvoiceWithLines(
         taxTotal: totals.taxTotal,
         total: totals.total,
         updatedById: actor.userId,
-        updatedAt: new Date(),
+        updatedAt: previousUpdatedAt ? nextUpdatedAt(previousUpdatedAt) : new Date(),
       })
       .where(eq(invoices.id, existingId))
       .returning({ id: invoices.id, invoiceNumber: invoices.invoiceNumber });
@@ -283,6 +287,8 @@ export const InvoiceService = {
 
       return {
         ...row.invoice,
+        /** Hidden-field token for the draft edit form (see StaleEditError). */
+        editVersion: editVersionOf(row.invoice.updatedAt),
         customer: row.customer,
         lines: lines.map((l) => ({ ...l.line, account: l.account, taxCode: l.taxCode })),
         allocations,
@@ -299,11 +305,21 @@ export const InvoiceService = {
   async update(actor: Actor, invoiceId: string, input: UpdateInvoiceInput) {
     assertPermission(actor, "customer_invoice:manage");
     return withTenant(actor.organizationId, async (tx) => {
-      const existing = await loadInvoiceOr404(tx, actor.organizationId, invoiceId);
+      // Row lock: the staleness check and the write below are one atomic step, so two
+      // simultaneous saves of the same draft cannot both pass the check.
+      const existing = await loadInvoiceOr404(tx, actor.organizationId, invoiceId, true);
       if (!EDITABLE_STATUSES.includes(existing.status)) {
         throw new InvoiceNotEditableError(existing.invoiceNumber);
       }
-      return persistInvoiceWithLines(tx, actor, input, invoiceId);
+      if (isStaleEdit(input.expectedVersion, existing.updatedAt)) {
+        let changedBy: string | null = null;
+        if (existing.updatedById) {
+          const [u] = await tx.select({ name: users.name }).from(users).where(eq(users.id, existing.updatedById));
+          changedBy = u?.name ?? null;
+        }
+        throw new StaleEditError("invoice", existing.invoiceNumber, changedBy, existing.updatedAt);
+      }
+      return persistInvoiceWithLines(tx, actor, input, invoiceId, existing.updatedAt);
     });
   },
 

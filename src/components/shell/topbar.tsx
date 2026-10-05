@@ -5,6 +5,7 @@ import { MobileNav } from "./mobile-nav";
 import { UserMenu } from "./user-menu";
 import { EntitySwitcher, type SwitcherOrg } from "./entity-switcher";
 import type { MembershipRole } from "@/domain/permissions/roles";
+import { createActionsFor } from "./nav-config";
 import { ModeToggle } from "./mode-toggle";
 import type { UiMode } from "./ui-mode";
 
@@ -35,11 +36,13 @@ export function Topbar({
       </div>
       <div className="flex items-center gap-3">
         <ModeToggle mode={mode} />
-        <Button asChild size="sm" variant="outline">
-          <Link href={`/${orgSlug}/accounting/journals/new`}>
-            <Plus /> New journal entry
-          </Link>
-        </Button>
+        {createActionsFor(role).map((action) => (
+          <Button key={action.href} asChild size="sm" variant="outline">
+            <Link href={`/${orgSlug}${action.href}`}>
+              <Plus /> {action.label}
+            </Link>
+          </Button>
+        ))}
         <UserMenu name={userName} email={userEmail} showAdminLink={showAdminLink} />
       </div>
     </header>

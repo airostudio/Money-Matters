@@ -17,14 +17,39 @@ export interface Actor {
   type?: ActorType;
 }
 
+/**
+ * Prefix of `PermissionDeniedError.digest`. Next.js replaces the message of an
+ * error thrown while rendering a server component (or running a server action)
+ * with a generic one in production, but preserves a `digest` the error already
+ * carries and hands it to the nearest `error.tsx`. Encoding the denial in the
+ * digest is what lets the org-level error boundary tell "you lack permission"
+ * apart from a genuine crash and say so plainly. Presentation only: the throw
+ * itself — the enforcement — is unchanged.
+ */
+export const PERMISSION_DENIED_DIGEST_PREFIX = "PERMISSION_DENIED";
+
 export class PermissionDeniedError extends Error {
+  readonly digest: string;
+
   constructor(
     public readonly permission: Permission,
     public readonly role: MembershipRole,
   ) {
-    super(`Role ${role} does not have permission "${permission}".`);
+    super(
+      `Role ${role} does not have permission "${permission}". ` +
+        `Ask an owner or administrator of this organization if you need this access.`,
+    );
     this.name = "PermissionDeniedError";
+    this.digest = `${PERMISSION_DENIED_DIGEST_PREFIX}|${permission}|${role}`;
   }
+}
+
+/** Reads a denial back out of an error digest (client-safe: pure string handling). Null when it is some other error. */
+export function parsePermissionDeniedDigest(digest: string | undefined): { permission: string; role: string } | null {
+  if (!digest?.startsWith(`${PERMISSION_DENIED_DIGEST_PREFIX}|`)) return null;
+  const [, permission, role] = digest.split("|");
+  if (!permission || !role) return null;
+  return { permission, role };
 }
 
 export class OrganizationMismatchError extends Error {

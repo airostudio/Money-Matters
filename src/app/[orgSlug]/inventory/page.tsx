@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Plus } from "lucide-react";
 import { requireOrgAndActor } from "@/lib/session";
+import { Can } from "@/components/shell/can";
 import { ProductService } from "@/domain/inventory/product-service";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -26,11 +27,13 @@ export default async function InventoryPage({ params }: { params: { orgSlug: str
           <Button asChild size="sm" variant="outline">
             <Link href={`/${org.slug}/inventory/reorder`}>Reorder alerts</Link>
           </Button>
-          <Button asChild size="sm">
-            <Link href={`/${org.slug}/inventory/new`}>
-              <Plus /> New product
-            </Link>
-          </Button>
+          <Can role={actor.role} permission="product:manage">
+            <Button asChild size="sm">
+              <Link href={`/${org.slug}/inventory/new`}>
+                <Plus /> New product
+              </Link>
+            </Button>
+          </Can>
         </div>
       </div>
 

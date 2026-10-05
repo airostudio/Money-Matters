@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 import { requireOrgAndActor } from "@/lib/session";
+import { deniedViewUnless } from "@/lib/permission-gate";
 import { BankAccountService } from "@/domain/banking/bank-account-service";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -14,6 +15,8 @@ export default async function ImportStatementPage({
   searchParams: { error?: string };
 }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
+  const denied = deniedViewUnless(actor, "bank_transaction:import", org.slug);
+  if (denied) return denied;
   const bankAccount = await BankAccountService.get(actor, params.bankAccountId);
   if (!bankAccount) notFound();
 

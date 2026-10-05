@@ -54,6 +54,22 @@ export class InvalidRoleError extends Error {
   }
 }
 
+/**
+ * Raised when an interactive grant of a role that can change financial data
+ * (any write permission; OWNER and ADMINISTRATOR included) was not explicitly
+ * confirmed. The settings UI asks for a tick-box; this is the server-side half
+ * so the rule cannot be bypassed by crafting a request.
+ */
+export class WriteAccessConfirmationRequiredError extends Error {
+  constructor(role: string) {
+    super(
+      `The ${role} role lets a person edit financial data (and, for Owner and Administrator, manage people and settings). ` +
+        `Confirm that you understand this before granting it - or choose Read only if they only need to look.`,
+    );
+    this.name = "WriteAccessConfirmationRequiredError";
+  }
+}
+
 export class AlreadyMemberError extends Error {
   constructor() {
     super("That user is already an active member of this organization.");

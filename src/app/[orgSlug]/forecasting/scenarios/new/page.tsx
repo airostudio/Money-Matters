@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireOrgAndActor } from "@/lib/session";
+import { deniedViewUnless } from "@/lib/permission-gate";
 import { SCENARIO_PARAM_SCHEMAS, SCENARIO_TYPE_LABELS, type ScenarioType } from "@/domain/forecasting/scenario-parameters";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -19,6 +20,8 @@ export default async function NewScenarioPage({
   searchParams: { type?: string; error?: string };
 }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
+  const denied = deniedViewUnless(actor, "scenario:manage", org.slug);
+  if (denied) return denied;
   const type = searchParams.type as ScenarioType | undefined;
   if (!type || !(type in SCENARIO_PARAM_SCHEMAS)) notFound();
   const options = await loadScenarioFormOptions(actor);

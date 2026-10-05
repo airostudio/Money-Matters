@@ -5,8 +5,10 @@ import {
   bills,
   contacts,
   taxCodes,
+  users,
   type billStatusEnum,
 } from "@/db/schema";
+import { StaleEditError, editVersionOf, isStaleEdit, nextUpdatedAt } from "@/domain/concurrency/stale-edit";
 import { withTenant, type TenantDb } from "@/db/tenant";
 import { Money } from "@/domain/money/money";
 import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
@@ -117,11 +119,12 @@ async function resolveProductLines(
   });
 }
 
-async function loadBillOr404(tx: TenantDb, organizationId: string, billId: string) {
-  const [bill] = await tx
+async function loadBillOr404(tx: TenantDb, organizationId: string, billId: string, lockForUpdate = false) {
+  const query = tx
     .select()
     .from(bills)
     .where(and(eq(bills.id, billId), eq(bills.organizationId, organizationId)));
+  const [bill] = await (lockForUpdate ? query.for("update") : query);
   if (!bill) throw new BillNotFoundError(billId);
   return bill;
 }
@@ -161,6 +164,7 @@ async function persistBillWithLines(
   actor: Actor,
   input: CreateBillInput,
   existingId?: string,
+  previousUpdatedAt?: Date,
 ): Promise<{ id: string; billNumber: string }> {
   const supplier = await assertActiveSupplier(tx, actor.organizationId, input.supplierContactId);
   const resolvedLines = await resolveProductLines(tx, actor.organizationId, input.lines, input.currency);
@@ -193,7 +197,7 @@ async function persistBillWithLines(
         taxTotal: totals.taxTotal,
         total: totals.total,
         updatedById: actor.userId,
-        updatedAt: new Date(),
+        updatedAt: previousUpdatedAt ? nextUpdatedAt(previousUpdatedAt) : new Date(),
         // purchaseOrderId is set once at creation (see below) and never re-pointed by an edit.
       })
       .where(eq(bills.id, existingId))
@@ -309,6 +313,8 @@ export const BillService = {
 
       return {
         ...row.bill,
+        /** Hidden-field token for the draft edit form (see StaleEditError). */
+        editVersion: editVersionOf(row.bill.updatedAt),
         supplier: row.supplier,
         lines: lines.map((l) => ({ ...l.line, account: l.account, taxCode: l.taxCode })),
         allocations,
@@ -325,11 +331,21 @@ export const BillService = {
   async update(actor: Actor, billId: string, input: UpdateBillInput) {
     assertPermission(actor, "supplier_bill:manage");
     return withTenant(actor.organizationId, async (tx) => {
-      const existing = await loadBillOr404(tx, actor.organizationId, billId);
+      // Row lock: the staleness check and the write below are one atomic step, so two
+      // simultaneous saves of the same draft cannot both pass the check.
+      const existing = await loadBillOr404(tx, actor.organizationId, billId, true);
       if (!EDITABLE_STATUSES.includes(existing.status)) {
         throw new BillNotEditableError(existing.billNumber);
       }
-      return persistBillWithLines(tx, actor, input, billId);
+      if (isStaleEdit(input.expectedVersion, existing.updatedAt)) {
+        let changedBy: string | null = null;
+        if (existing.updatedById) {
+          const [u] = await tx.select({ name: users.name }).from(users).where(eq(users.id, existing.updatedById));
+          changedBy = u?.name ?? null;
+        }
+        throw new StaleEditError("bill", existing.billNumber, changedBy, existing.updatedAt);
+      }
+      return persistBillWithLines(tx, actor, input, billId, existing.updatedAt);
     });
   },
 

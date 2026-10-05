@@ -1,4 +1,4 @@
-import type { Permission } from "@/domain/permissions/roles";
+import { roleHasPermission, type MembershipRole, type Permission } from "@/domain/permissions/roles";
 import type { LucideIcon } from "lucide-react";
 import type { UiMode } from "./ui-mode";
 import {
@@ -177,3 +177,23 @@ export const NAV_ITEMS: NavItem[] = [
 ];
 
 export const BRAND_ICON = Building2;
+
+export interface CreateAction {
+  label: string;
+  href: string;
+  /** The permission the actor's role needs; the action is not offered without it. */
+  permission: Permission;
+}
+
+/**
+ * Quick-create actions the top bar offers. Each carries the permission the
+ * destination needs, so a role that cannot do it is never shown a button that
+ * leads to a refusal. Presentation only: the domain service still enforces it.
+ */
+export const CREATE_ACTIONS: CreateAction[] = [
+  { label: "New journal entry", href: "/accounting/journals/new", permission: "journal:post" },
+];
+
+export function createActionsFor(role: MembershipRole): CreateAction[] {
+  return CREATE_ACTIONS.filter((a) => roleHasPermission(role, a.permission));
+}

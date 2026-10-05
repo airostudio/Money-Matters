@@ -1,4 +1,5 @@
 import { requireOrgAndActor } from "@/lib/session";
+import { deniedViewUnless } from "@/lib/permission-gate";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -18,7 +19,9 @@ export default async function RunDepreciationPage({
   params: { orgSlug: string };
   searchParams: { error?: string; ran?: string; posted?: string };
 }) {
-  const { org } = await requireOrgAndActor(params.orgSlug);
+  const { actor, org } = await requireOrgAndActor(params.orgSlug);
+  const denied = deniedViewUnless(actor, "fixed_asset:manage", org.slug);
+  if (denied) return denied;
   const boundRun = runDepreciationAction.bind(null, org.slug);
 
   return (

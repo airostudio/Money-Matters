@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { requireOrgAndActor } from "@/lib/session";
+import { deniedViewUnless } from "@/lib/permission-gate";
 import { AccountService } from "@/domain/accounts/account-service";
 import { TaxCodeService } from "@/domain/tax/tax-code-service";
 import { OrganizationService } from "@/domain/organizations/organization-service";
@@ -20,6 +21,8 @@ export default async function NewExpenseClaimPage({
   searchParams: { error?: string; receiptId?: string };
 }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
+  const denied = deniedViewUnless(actor, "expense_claim:manage", org.slug);
+  if (denied) return denied;
 
   const [accounts, taxCodes] = await Promise.all([AccountService.list(actor), TaxCodeService.list(actor)]);
   const payableAccounts = accounts.filter((a) => a.type === "LIABILITY");

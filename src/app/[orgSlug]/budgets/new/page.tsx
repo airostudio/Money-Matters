@@ -1,4 +1,5 @@
 import { requireOrgAndActor } from "@/lib/session";
+import { deniedViewUnless } from "@/lib/permission-gate";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,7 +14,9 @@ export default async function NewBudgetPage({
   params: { orgSlug: string };
   searchParams: { error?: string };
 }) {
-  const { org } = await requireOrgAndActor(params.orgSlug);
+  const { actor, org } = await requireOrgAndActor(params.orgSlug);
+  const denied = deniedViewUnless(actor, "budget:manage", org.slug);
+  if (denied) return denied;
   const action = createBudgetAction.bind(null, org.slug);
 
   return (

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Plus } from "lucide-react";
 import { requireOrgAndActor } from "@/lib/session";
+import { Can } from "@/components/shell/can";
 import { BudgetService } from "@/domain/budgeting/budget-service";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -34,11 +35,13 @@ export default async function BudgetsPage({ params }: { params: { orgSlug: strin
             Baseline budgets, revised forecasts and rolling forecasts (master spec §36).
           </p>
         </div>
-        <Button asChild size="sm">
-          <Link href={`/${org.slug}/budgets/new`}>
-            <Plus /> New budget
-          </Link>
-        </Button>
+        <Can role={actor.role} permission="budget:manage">
+          <Button asChild size="sm">
+            <Link href={`/${org.slug}/budgets/new`}>
+              <Plus /> New budget
+            </Link>
+          </Button>
+        </Can>
       </div>
 
       <Card>

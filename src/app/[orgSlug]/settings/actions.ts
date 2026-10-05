@@ -10,6 +10,7 @@ import {
   OrganizationService,
   SeatLimitReachedError,
   UserNotFoundError,
+  WriteAccessConfirmationRequiredError,
 } from "@/domain/organizations/organization-service";
 import { membershipRoleEnum } from "@/db/schema";
 import { AutonomySettingsService, InvalidAutonomyLevelError } from "@/domain/ai-controller/autonomy";
@@ -23,7 +24,13 @@ const roleValues = membershipRoleEnum.enumValues;
  * can act on (seat limit reached, unknown email, last owner) is surfaced via
  * a `memberError` query param the settings page renders as a banner.
  */
-const MEMBER_ERRORS = [SeatLimitReachedError, UserNotFoundError, AlreadyMemberError, LastOwnerError];
+const MEMBER_ERRORS = [
+  SeatLimitReachedError,
+  UserNotFoundError,
+  AlreadyMemberError,
+  LastOwnerError,
+  WriteAccessConfirmationRequiredError,
+];
 
 function memberErrorMessage(error: unknown): string | null {
   return MEMBER_ERRORS.some((E) => error instanceof E) ? (error as Error).message : null;
@@ -52,6 +59,8 @@ export async function inviteMemberAction(orgSlug: string, formData: FormData): P
       actor,
       parsed.data.email,
       parsed.data.role as (typeof roleValues)[number],
+      // Always passed on this path, so the server enforces the write-access confirmation.
+      { confirmWriteAccess: formData.get("confirmWriteAccess") === "true" },
     );
   } catch (error) {
     const message = memberErrorMessage(error);
@@ -70,7 +79,9 @@ export async function updateMemberRoleAction(orgSlug: string, formData: FormData
   if (!roleValues.includes(role as (typeof roleValues)[number])) return;
 
   try {
-    await OrganizationService.updateMemberRole(actor, membershipId, role as (typeof roleValues)[number]);
+    await OrganizationService.updateMemberRole(actor, membershipId, role as (typeof roleValues)[number], {
+      confirmWriteAccess: formData.get("confirmWriteAccess") === "true",
+    });
   } catch (error) {
     const message = memberErrorMessage(error);
     if (message) failWith(orgSlug, message);

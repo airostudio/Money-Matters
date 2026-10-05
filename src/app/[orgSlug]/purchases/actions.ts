@@ -119,7 +119,9 @@ export async function createBillAction(orgSlug: string, formData: FormData): Pro
 
 export async function updateBillAction(orgSlug: string, billId: string, formData: FormData): Promise<void> {
   const { actor, org } = await requireOrgAndActor(orgSlug);
-  const input = parseBillHeader(formData, org.baseCurrency);
+  // The edit form's hidden "expectedVersion" (the draft's updatedAt when it was opened). A form
+  // without one is treated as stale rather than skipping the check.
+  const input = { ...parseBillHeader(formData, org.baseCurrency), expectedVersion: String(formData.get("expectedVersion") ?? "") };
   const returnPath = `/${orgSlug}/purchases/bills/${billId}`;
 
   try {

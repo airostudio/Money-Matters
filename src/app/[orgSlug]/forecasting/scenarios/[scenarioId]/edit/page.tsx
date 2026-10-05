@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireOrgAndActor } from "@/lib/session";
+import { deniedViewUnless } from "@/lib/permission-gate";
 import { ScenarioService } from "@/domain/forecasting/scenario-service";
 import { formValuesFromParams } from "@/domain/forecasting/scenario-form";
 import { SCENARIO_TYPE_LABELS } from "@/domain/forecasting/scenario-parameters";
@@ -21,6 +22,8 @@ export default async function EditScenarioPage({
   searchParams: { error?: string };
 }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
+  const denied = deniedViewUnless(actor, "scenario:manage", org.slug);
+  if (denied) return denied;
   const scenario = await ScenarioService.get(actor, params.scenarioId);
   if (!scenario) notFound();
   const options = await loadScenarioFormOptions(actor);

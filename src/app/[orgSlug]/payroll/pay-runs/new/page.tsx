@@ -1,4 +1,5 @@
 import { requireOrgAndActor } from "@/lib/session";
+import { deniedViewUnless } from "@/lib/permission-gate";
 import { AccountService } from "@/domain/accounts/account-service";
 import { EmployeeService } from "@/domain/payroll/employee-service";
 import { Button } from "@/components/ui/button";
@@ -15,6 +16,8 @@ export default async function NewPayRunPage({
   searchParams: { error?: string };
 }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
+  const denied = deniedViewUnless(actor, "payrun:manage", org.slug);
+  if (denied) return denied;
 
   const [accounts, employees] = await Promise.all([
     AccountService.list(actor),

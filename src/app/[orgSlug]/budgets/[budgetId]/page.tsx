@@ -1,4 +1,6 @@
 import Link from "next/link";
+import { roleHasPermission } from "@/domain/permissions/roles";
+import { Can } from "@/components/shell/can";
 import { requireOrgAndActor } from "@/lib/session";
 import { BudgetService } from "@/domain/budgeting/budget-service";
 import { AccountService } from "@/domain/accounts/account-service";
@@ -46,7 +48,8 @@ export default async function BudgetDetailPage({
   ]);
 
   const columns = monthlyColumns({ from: budget.periodStart, to: budget.periodEnd });
-  const isEditable = budget.status === "DRAFT";
+  const canManage = roleHasPermission(actor.role, "budget:manage");
+  const isEditable = budget.status === "DRAFT" && canManage;
 
   // Group existing lines by account + dimension value for a compact "one row per account" table.
   const grouped = new Map<string, { accountCode: string; accountName: string; dimensionValueLabel: string | null; byMonth: Map<string, { id: string; amount: string }> }>();
@@ -86,9 +89,11 @@ export default async function BudgetDetailPage({
               Budget vs. Actual
             </Link>
           </Button>
-          <Button asChild size="sm" variant="outline">
-            <Link href={`/${org.slug}/budgets/${budget.id}/rolling-forecast`}>Create rolling forecast</Link>
-          </Button>
+          <Can role={actor.role} permission="budget:manage">
+            <Button asChild size="sm" variant="outline">
+              <Link href={`/${org.slug}/budgets/${budget.id}/rolling-forecast`}>Create rolling forecast</Link>
+            </Button>
+          </Can>
           {isEditable && (
             <form action={activate}>
               <Button type="submit" size="sm">
@@ -96,7 +101,7 @@ export default async function BudgetDetailPage({
               </Button>
             </form>
           )}
-          {budget.status !== "ARCHIVED" && (
+          {canManage && budget.status !== "ARCHIVED" && (
             <form action={archive}>
               <Button type="submit" size="sm" variant="destructive">
                 Archive

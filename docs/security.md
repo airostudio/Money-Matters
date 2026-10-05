@@ -722,3 +722,69 @@ failed audit rolls the change back); the client's tenant mutations (consent chan
 requests) write the client's own audit log with the real actor. Workpaper sign-offs and
 reopenings are additionally in the append-only `workpaper_signoffs` history with
 identity, role, version, reason and the single-staff-exception flag.
+
+## 14. Sharing a company file (read-only colleagues and concurrent sessions)
+
+**Adding a read-only colleague.** An Owner or Administrator opens **Settings -> Team ->
+Add a teammate**, types the email of someone who has **already registered** (there is no
+email sending and no pending-invite concept yet), and picks a role. The picker starts on
+**Read only**, lists roles from least to most privileged, and describes the selected role
+in plain language - what it can change and what it can only view - derived from the real
+permission matrix (`src/domain/permissions/role-info.ts`), so the text cannot drift from
+what the role can actually do. Granting any role that can change financial data (every
+role except Read only; Owner and Administrator included) requires the explicit
+confirmation "I understand this person will be able to edit financial data". That rule is
+**enforced in `OrganizationService.addMemberByEmail` / `updateMemberRole`**, not just by the
+checkbox: the settings actions always pass `{ confirmWriteAccess }`, and a missing
+confirmation is refused with `WriteAccessConfirmationRequiredError` (no seat is used,
+nothing is changed). Callers that pass no options at all are trusted server-side code
+(seed scripts, test fixtures, practice staff); nothing reachable from a browser does.
+Role changes and removals are audited as before (`membership.role_changed`, ...).
+
+**Two people at the same time.** Sessions are JWTs, so any two members can be signed in
+at once. Every request re-checks the user and membership, and permission checks happen in
+the domain services on every call.
+
+**What each role can do** - see the table in `roles.ts`; in short: Read only sees
+everything the books show and changes nothing; Employee submits own expenses/timesheets;
+Manager approves expenses/timesheets and manages projects; Accounts receivable / payable
+work the sales / purchases side; Payroll manager runs payroll; Bookkeeper does day-to-day
+bookkeeping; Accountant adds period close, voids and consolidation; Administrator and
+Owner can do everything including people and settings (there is always at least one
+Owner).
+
+**What a read-only member experiences.** A banner in the shell says they have read-only
+access and to ask the company owner for more; the nav shows only what they may read;
+"New ..." buttons, edit/post/void/approve actions and the settings forms are hidden
+(`Can`, `deniedViewUnless`, `createActionsFor`). "Read-only" is derived by
+`isReadOnlyRole(role)` - true when the role holds no permission other than `*:read` - not
+by comparing against the string `READ_ONLY`. A write page opened directly (a bookmark, a
+stale tab) shows a friendly "you can't make changes here" view naming the area and the
+role. A refusal from a service that bubbles up from any page or server action reaches the
+org-level `error.tsx`, which recognises `PermissionDeniedError` through its `digest`
+(Next.js hides the message in production but keeps a digest the error carries) and shows
+the same explanation instead of a generic "Application error".
+
+**Hiding is presentation only.** Every hidden action is still refused by the domain
+service (`assertPermission`); `src/tests/integration/organizations/shared-access.test.ts`
+proves a READ_ONLY member is refused for invoice create/update/delete/post, bill
+create/update/post, manual journal post, member add/remove/role change, AI-autonomy
+(organization) settings and account creation, while reading invoices, accounts, the
+ledger and reports works. No RLS policy, seat-limit rule or the platform-admin boundary
+changed.
+
+**Two writers at once.** Two people who can both write (say an Owner and an Accountant)
+could otherwise overwrite each other. Draft **invoice** and draft **bill** edit forms carry
+a hidden `expectedVersion` (the record's `updatedAt`). `InvoiceService.update` /
+`BillService.update` lock the row (`SELECT ... FOR UPDATE`), compare, and refuse a stale
+save with `StaleEditError` ("This invoice was changed by <name> at <time> since you
+opened it ... reload"), changing nothing. A form with no/garbled version is treated as
+stale; programmatic callers that omit the field are unaffected. **Limits:** only draft
+invoices and bills are covered. Posted documents are already immutable; quotes,
+contacts, projects, budgets, journals drafts, settings, etc. are still last-write-wins.
+
+**Seat limit.** Each company file defaults to **2 seats** (the owner plus one colleague);
+a read-only member occupies a seat like any other. When it is full, the Team card says so
+and removing someone frees a seat. More seats are raised by the **platform
+administrator** from `/admin/organizations/<id>` (see 10.6) - the owner cannot raise it
+themselves.

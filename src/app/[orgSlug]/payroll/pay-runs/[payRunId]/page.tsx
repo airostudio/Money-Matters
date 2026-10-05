@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { Can } from "@/components/shell/can";
 import { requireOrgAndActor } from "@/lib/session";
 import { PayRunService } from "@/domain/payroll/pay-run-service";
 import { Button } from "@/components/ui/button";
@@ -42,16 +43,20 @@ export default async function PayRunDetailPage({
           </span>
           {run.status === "DRAFT" ? (
             <>
-              <form action={boundDiscard}>
-                <Button type="submit" variant="outline" size="sm">
-                  Discard draft
-                </Button>
-              </form>
-              <form action={boundPost}>
-                <Button type="submit" size="sm">
-                  Post pay run
-                </Button>
-              </form>
+              <Can role={actor.role} permission="payrun:manage">
+                <form action={boundDiscard}>
+                  <Button type="submit" variant="outline" size="sm">
+                    Discard draft
+                  </Button>
+                </form>
+              </Can>
+              <Can role={actor.role} permission="payrun:post">
+                <form action={boundPost}>
+                  <Button type="submit" size="sm">
+                    Post pay run
+                  </Button>
+                </form>
+              </Can>
             </>
           ) : (
             <Button asChild size="sm" variant="outline">

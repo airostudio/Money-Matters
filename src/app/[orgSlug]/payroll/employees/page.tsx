@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Plus } from "lucide-react";
 import { requireOrgAndActor } from "@/lib/session";
+import { Can } from "@/components/shell/can";
 import { EmployeeService } from "@/domain/payroll/employee-service";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -18,11 +19,13 @@ export default async function EmployeesPage({ params }: { params: { orgSlug: str
             Payroll records — tax file numbers and bank details are masked unless your role can manage payroll.
           </p>
         </div>
-        <Button asChild size="sm">
-          <Link href={`/${org.slug}/payroll/employees/new`}>
-            <Plus /> Add employee
-          </Link>
-        </Button>
+        <Can role={actor.role} permission="employee:manage">
+          <Button asChild size="sm">
+            <Link href={`/${org.slug}/payroll/employees/new`}>
+              <Plus /> Add employee
+            </Link>
+          </Button>
+        </Can>
       </div>
 
       <Card>

@@ -1,4 +1,5 @@
 import { requireOrgAndActor } from "@/lib/session";
+import { deniedViewUnless } from "@/lib/permission-gate";
 import { BudgetService } from "@/domain/budgeting/budget-service";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -18,6 +19,8 @@ export default async function CreateRollingForecastPage({
   searchParams: { error?: string };
 }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
+  const denied = deniedViewUnless(actor, "budget:manage", org.slug);
+  if (denied) return denied;
   const source = await BudgetService.get(actor, params.budgetId);
   if (!source) return <p className="text-sm text-muted-foreground">Budget not found.</p>;
 

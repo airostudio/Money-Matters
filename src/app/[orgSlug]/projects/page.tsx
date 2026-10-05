@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Plus } from "lucide-react";
 import { requireOrgAndActor } from "@/lib/session";
+import { Can } from "@/components/shell/can";
 import { ProjectService } from "@/domain/projects/project-service";
 import { projectStatusEnum } from "@/db/schema";
 import { Button } from "@/components/ui/button";
@@ -32,11 +33,13 @@ export default async function ProjectsPage({
           <h1 className="text-2xl font-semibold tracking-tight">Projects</h1>
           <p className="text-sm text-muted-foreground">Jobs, budgets, time tracking and billing.</p>
         </div>
-        <Button asChild size="sm">
-          <Link href={`/${org.slug}/projects/new`}>
-            <Plus /> New project
-          </Link>
-        </Button>
+        <Can role={actor.role} permission="project:manage">
+          <Button asChild size="sm">
+            <Link href={`/${org.slug}/projects/new`}>
+              <Plus /> New project
+            </Link>
+          </Button>
+        </Can>
       </div>
 
       <div className="flex flex-wrap gap-2 text-sm">

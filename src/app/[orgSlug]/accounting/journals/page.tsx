@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Plus } from "lucide-react";
 import { requireOrgAndActor } from "@/lib/session";
+import { Can } from "@/components/shell/can";
 import { LedgerService } from "@/domain/ledger/ledger-service";
 import { Money } from "@/domain/money/money";
 import { Button } from "@/components/ui/button";
@@ -19,11 +20,13 @@ export default async function JournalsPage({ params }: { params: { orgSlug: stri
           <h1 className="text-2xl font-semibold tracking-tight">Journals</h1>
           <p className="text-sm text-muted-foreground">{entries.length} entries.</p>
         </div>
-        <Button asChild size="sm">
-          <Link href={`/${org.slug}/accounting/journals/new`}>
-            <Plus /> New journal entry
-          </Link>
-        </Button>
+        <Can role={actor.role} permission="journal:post">
+          <Button asChild size="sm">
+            <Link href={`/${org.slug}/accounting/journals/new`}>
+              <Plus /> New journal entry
+            </Link>
+          </Button>
+        </Can>
       </div>
 
       <Card>

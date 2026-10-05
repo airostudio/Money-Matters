@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Plus } from "lucide-react";
 import { requireOrgAndActor } from "@/lib/session";
+import { Can } from "@/components/shell/can";
 import { FixedAssetRegisterService } from "@/domain/fixed-assets/fixed-asset-register-service";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -23,14 +24,18 @@ export default async function FixedAssetsPage({ params }: { params: { orgSlug: s
           <Button asChild size="sm" variant="outline">
             <Link href={`/${org.slug}/fixed-assets/classes`}>Asset classes</Link>
           </Button>
-          <Button asChild size="sm" variant="outline">
-            <Link href={`/${org.slug}/fixed-assets/depreciation`}>Run depreciation</Link>
-          </Button>
-          <Button asChild size="sm">
-            <Link href={`/${org.slug}/fixed-assets/new`}>
-              <Plus /> Register asset
-            </Link>
-          </Button>
+          <Can role={actor.role} permission="fixed_asset:manage">
+            <Button asChild size="sm" variant="outline">
+              <Link href={`/${org.slug}/fixed-assets/depreciation`}>Run depreciation</Link>
+            </Button>
+          </Can>
+          <Can role={actor.role} permission="fixed_asset:manage">
+            <Button asChild size="sm">
+              <Link href={`/${org.slug}/fixed-assets/new`}>
+                <Plus /> Register asset
+              </Link>
+            </Button>
+          </Can>
         </div>
       </div>
 

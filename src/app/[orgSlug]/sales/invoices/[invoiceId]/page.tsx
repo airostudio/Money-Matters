@@ -73,9 +73,12 @@ export default async function InvoiceDetailPage({
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Edit draft</CardTitle>
+            <CardTitle className="text-base">{canManage ? "Edit draft" : "Draft (view only)"}</CardTitle>
           </CardHeader>
           <form action={boundUpdate}>
+            {/* Optimistic concurrency: the save is refused if someone else changed this draft since it was opened. */}
+            <input type="hidden" name="expectedVersion" value={invoice.editVersion} />
+            <fieldset disabled={!canManage} className="contents">
             <CardContent className="space-y-6">
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
@@ -148,6 +151,7 @@ export default async function InvoiceDetailPage({
                 }))}
               />
             </CardContent>
+            </fieldset>
             <div className="flex justify-end gap-2 border-t border-border px-6 py-4">
               {canManage && (
                 <Button type="submit" variant="outline">

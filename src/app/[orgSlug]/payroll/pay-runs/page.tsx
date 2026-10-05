@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Plus } from "lucide-react";
 import { requireOrgAndActor } from "@/lib/session";
+import { Can } from "@/components/shell/can";
 import { PayRunService } from "@/domain/payroll/pay-run-service";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -21,11 +22,13 @@ export default async function PayRunsPage({ params }: { params: { orgSlug: strin
             tables before this is used for real payroll.
           </p>
         </div>
-        <Button asChild size="sm">
-          <Link href={`/${org.slug}/payroll/pay-runs/new`}>
-            <Plus /> New pay run
-          </Link>
-        </Button>
+        <Can role={actor.role} permission="payrun:manage">
+          <Button asChild size="sm">
+            <Link href={`/${org.slug}/payroll/pay-runs/new`}>
+              <Plus /> New pay run
+            </Link>
+          </Button>
+        </Can>
       </div>
 
       <Card>

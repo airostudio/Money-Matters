@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Camera, Plus } from "lucide-react";
 import { requireOrgAndActor } from "@/lib/session";
+import { Can } from "@/components/shell/can";
 import { ExpenseClaimService } from "@/domain/expenses/expense-claim-service";
 import { roleHasPermission } from "@/domain/permissions/roles";
 import { expenseClaimStatusEnum } from "@/db/schema";
@@ -37,16 +38,20 @@ export default async function ExpensesPage({
           </p>
         </div>
         <div className="flex gap-2">
-          <Button asChild size="sm" variant="outline">
-            <Link href={`/${org.slug}/expenses/capture`}>
-              <Camera /> Capture receipt
-            </Link>
-          </Button>
-          <Button asChild size="sm">
-            <Link href={`/${org.slug}/expenses/new`}>
-              <Plus /> New claim
-            </Link>
-          </Button>
+          <Can role={actor.role} permission="expense_receipt:manage">
+            <Button asChild size="sm" variant="outline">
+              <Link href={`/${org.slug}/expenses/capture`}>
+                <Camera /> Capture receipt
+              </Link>
+            </Button>
+          </Can>
+          <Can role={actor.role} permission="expense_claim:manage">
+            <Button asChild size="sm">
+              <Link href={`/${org.slug}/expenses/new`}>
+                <Plus /> New claim
+              </Link>
+            </Button>
+          </Can>
         </div>
       </div>
 

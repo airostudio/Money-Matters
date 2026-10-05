@@ -5,10 +5,12 @@ import { organizationMemberships, organizations, users } from "@/db/schema";
 import { AccountService } from "@/domain/accounts/account-service";
 import { AuditService } from "@/domain/audit/audit-service";
 import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
-import type { MembershipRole } from "@/domain/permissions/roles";
+import { ROLE_PERMISSIONS, type MembershipRole } from "@/domain/permissions/roles";
+import { roleNeedsWriteConfirmation } from "@/domain/permissions/role-info";
 import { normalizeEmail } from "@/domain/auth/email";
 import {
   OrganizationRecordNotFoundError,
+  WriteAccessConfirmationRequiredError,
   addMembership,
   changeMembershipRole,
   deactivateMembership,
@@ -20,6 +22,7 @@ export {
   LastOwnerError,
   MembershipNotFoundError,
   SeatLimitReachedError,
+  WriteAccessConfirmationRequiredError,
 } from "./membership-rules";
 
 /**
@@ -61,6 +64,21 @@ const STARTER_SYSTEM_ACCOUNTS = [
   { code: "3900", name: "Retained Earnings", type: "EQUITY" as const },
   { code: "3000", name: "Opening Balance Equity", type: "EQUITY" as const },
 ];
+
+export interface MemberGrantOptions {
+  /** The person granting access ticked "I understand this person will be able to edit financial data". */
+  confirmWriteAccess: boolean;
+}
+
+function assertWriteAccessConfirmed(role: MembershipRole, options: MemberGrantOptions | undefined): void {
+  if (!options) return;
+  // An unknown role string must fail as InvalidRoleError (raised by the
+  // membership rules), not be misclassified here.
+  if (!(role in ROLE_PERMISSIONS)) return;
+  if (roleNeedsWriteConfirmation(role) && options.confirmWriteAccess !== true) {
+    throw new WriteAccessConfirmationRequiredError(role);
+  }
+}
 
 export const OrganizationService = {
   /**
@@ -178,8 +196,21 @@ export const OrganizationService = {
       .where(eq(organizationMemberships.organizationId, actor.organizationId));
   },
 
-  async addMemberByEmail(actor: Actor, email: string, role: MembershipRole) {
+  /**
+   * Adds an existing user by email.
+   *
+   * `options` is the interactive path's explicit-confirmation contract: when a
+   * caller supplies it (the settings page always does), granting a role that
+   * can change financial data (`roleNeedsWriteConfirmation` - every role but
+   * the read-only ones, OWNER and ADMINISTRATOR included) requires
+   * `confirmWriteAccess: true`, else `WriteAccessConfirmationRequiredError`.
+   * Calls that omit `options` entirely are trusted server-side callers (seed
+   * scripts, test fixtures, the practice staff service) and keep their original
+   * behaviour; nothing reachable from a browser omits it.
+   */
+  async addMemberByEmail(actor: Actor, email: string, role: MembershipRole, options?: MemberGrantOptions) {
     assertPermission(actor, "membership:manage");
+    assertWriteAccessConfirmed(role, options);
     const normalized = normalizeEmail(email);
 
     return withTenant(actor.organizationId, async (tx) => {
@@ -202,8 +233,10 @@ export const OrganizationService = {
     });
   },
 
-  async updateMemberRole(actor: Actor, membershipId: string, role: MembershipRole) {
+  /** Changes a member's role. `options` works exactly as in `addMemberByEmail`. */
+  async updateMemberRole(actor: Actor, membershipId: string, role: MembershipRole, options?: MemberGrantOptions) {
     assertPermission(actor, "membership:manage");
+    assertWriteAccessConfirmed(role, options);
     return withTenant(actor.organizationId, async (tx) => {
       const { before, after } = await changeMembershipRole(tx, actor.organizationId, membershipId, role);
 

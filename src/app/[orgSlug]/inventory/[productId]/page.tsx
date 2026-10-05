@@ -1,4 +1,6 @@
 import { notFound } from "next/navigation";
+import { roleHasPermission } from "@/domain/permissions/roles";
+import { Can } from "@/components/shell/can";
 import { requireOrgAndActor } from "@/lib/session";
 import { ProductService } from "@/domain/inventory/product-service";
 import { InventoryService } from "@/domain/inventory/inventory-service";
@@ -42,12 +44,14 @@ export default async function ProductDetailPage({
             {product.type.toLowerCase().replace(/_/g, " ")} — {product.isActive ? "Active" : "Inactive"}
           </p>
         </div>
-        <form action={boundSetActive}>
-          <input type="hidden" name="isActive" value={product.isActive ? "false" : "true"} />
-          <Button type="submit" variant="outline" size="sm">
-            {product.isActive ? "Deactivate" : "Reactivate"}
-          </Button>
-        </form>
+        <Can role={actor.role} permission="product:manage">
+          <form action={boundSetActive}>
+            <input type="hidden" name="isActive" value={product.isActive ? "false" : "true"} />
+            <Button type="submit" variant="outline" size="sm">
+              {product.isActive ? "Deactivate" : "Reactivate"}
+            </Button>
+          </form>
+        </Can>
       </div>
 
       {searchParams.error ? (
@@ -83,7 +87,7 @@ export default async function ProductDetailPage({
         </Card>
       )}
 
-      {isTracked && (
+      {isTracked && roleHasPermission(actor.role, "inventory:manage") && (
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Record a manual adjustment</CardTitle>

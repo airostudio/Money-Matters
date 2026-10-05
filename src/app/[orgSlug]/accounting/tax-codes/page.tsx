@@ -1,4 +1,5 @@
 import { requireOrgAndActor } from "@/lib/session";
+import { deniedViewUnless } from "@/lib/permission-gate";
 import { TaxCodeService } from "@/domain/tax/tax-code-service";
 import { AccountService } from "@/domain/accounts/account-service";
 import { Button } from "@/components/ui/button";
@@ -9,6 +10,8 @@ import { createTaxCodeAction } from "./actions";
 
 export default async function TaxCodesPage({ params }: { params: { orgSlug: string } }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
+  const denied = deniedViewUnless(actor, "tax_code:manage", org.slug);
+  if (denied) return denied;
   const taxCodes = await TaxCodeService.list(actor);
   const accounts = await AccountService.list(actor);
   const liabilityAccounts = accounts.filter((a) => a.type === "LIABILITY");

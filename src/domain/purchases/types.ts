@@ -61,7 +61,14 @@ export interface CreateBillInput {
   lines: BillLineInput[];
 }
 
-export type UpdateBillInput = CreateBillInput;
+export interface UpdateBillInput extends CreateBillInput {
+  /**
+   * The `editVersion` the edit form was rendered with. When supplied, the save is
+   * refused with `StaleEditError` if the draft changed since. Omitted by
+   * programmatic callers that do not take part in the check.
+   */
+  expectedVersion?: string;
+}
 
 export interface RecordSupplierPaymentAllocationInput {
   billId: string;

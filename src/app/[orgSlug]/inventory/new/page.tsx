@@ -1,4 +1,5 @@
 import { requireOrgAndActor } from "@/lib/session";
+import { deniedViewUnless } from "@/lib/permission-gate";
 import { AccountService } from "@/domain/accounts/account-service";
 import { ContactService } from "@/domain/contacts/contact-service";
 import { Button } from "@/components/ui/button";
@@ -15,6 +16,8 @@ export default async function NewProductPage({
   searchParams: { error?: string };
 }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
+  const denied = deniedViewUnless(actor, "product:manage", org.slug);
+  if (denied) return denied;
 
   const [accounts, suppliersOnly, both] = await Promise.all([
     AccountService.list(actor),

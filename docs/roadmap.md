@@ -3085,6 +3085,43 @@ an organization.
 - Notifying customers in-app of platform changes beyond the org audit-log entry
   (there is no org-facing audit-log page yet).
 
+## Shared access UX (read-only colleagues, safe role picker, concurrent-edit guard) - complete
+
+Goal (from the owner): add a second person to the same company file so both can be signed
+in at once, read-only so they cannot break anything. The base already existed (add member
+by email, a `READ_ONLY` role, a two-seat limit, JWT sessions, server-side permission
+checks); this slice makes it safe and coherent to use. Details: `docs/security.md` section 14.
+
+**Built**
+- Add-member and change-role pickers: `READ_ONLY` preselected, roles ordered least to most
+  privileged, plain-language description plus "can change / can only view" derived from the
+  permission matrix, and a required confirmation for any role that can change financial
+  data. The confirmation is **enforced server-side** (`WriteAccessConfirmationRequiredError`).
+- `isReadOnlyRole(role)` (derived from the matrix, tested over every role) drives a
+  persistent read-only banner in the org shell - no new queries, it uses the role the
+  layout already loads.
+- Write controls hidden for roles lacking the permission: the top-bar create action, primary
+  "New ..." buttons on Projects, Payroll (employees, pay runs), Expenses, Fixed Assets,
+  Inventory, Budgets, Journals; edit/post/void-style controls on project time logging and
+  invoicing, pay run, employee, product, budget and draft invoice/bill pages; write-only
+  pages (about 25 "New ..."/depreciation/tax-code/chart-of-accounts forms) show a friendly
+  view instead of a form that could only fail. Shared helpers: `Can`, `deniedViewUnless`,
+  `createActionsFor`. Sales, Purchases, Money, Forecasting and the other detail pages were
+  already guarded in earlier slices (audited, unchanged).
+- Permission denial is a friendly state, not a 500: org-level `error.tsx` reads
+  `PermissionDeniedError.digest`; `PermissionDeniedError`'s message now ends with who to ask.
+- The org home page no longer calls ledger services for roles without `journal:read` /
+  `account:read` (an EMPLOYEE would previously have hit a permission error there).
+- Optimistic concurrency (`StaleEditError`) for **draft invoices and draft bills**.
+
+**Deferred / not covered**
+- Optimistic concurrency for other editable entities (quotes, recurring templates, contacts,
+  projects, budgets, scenarios, draft journals, ...) - they remain last-write-wins.
+- Read-only "ask <owner name>" in the banner (would need an extra query; the banner says
+  "the company owner"). Presence indicators / live "someone else is editing".
+- **Pending invites for emails that have not registered yet, and any email sending, are a
+  candidate follow-up awaiting the owner's decision - deliberately not built.**
+
 ## Phase 10 — Platform (not started)
 
 (With Phase 9 complete, the remaining roadmap is Phase 8's later slices — BAS/GST, STP lodgement, awards — and this phase.)

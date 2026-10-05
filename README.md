@@ -393,3 +393,12 @@ application code forgets a filter — see
 - Each account (organization) can currently be shared by **2 people** (its
   `seat_limit`); more will be a paid add-on later. A platform admin can raise
   an organization's limit from `/admin/organizations/<id>`.
+
+## Sharing a company file
+
+To let a second person look at the books at the same time as you, open **Settings -> Team**,
+add their email (they must already have registered) and keep the default role **Read only**:
+they can open invoices, reports and accounts but cannot change anything, and a banner tells
+them so. Giving a role that can edit asks for an explicit confirmation. Each company file
+has 2 seats by default; the platform administrator can raise that. See
+`docs/security.md` section 14.

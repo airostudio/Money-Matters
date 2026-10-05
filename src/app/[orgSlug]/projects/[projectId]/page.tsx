@@ -39,6 +39,8 @@ export default async function ProjectDetailPage({
 
   const canManage = roleHasPermission(actor.role, "project:manage");
   const canApprove = roleHasPermission(actor.role, "timesheet:approve");
+  const canLogTime = roleHasPermission(actor.role, "timesheet:manage");
+  const canInvoiceTime = canManage && roleHasPermission(actor.role, "customer_invoice:manage");
 
   const [entries, profitability, runningTimer, accounts, taxCodes, unbilledPreview] = await Promise.all([
     TimesheetService.list(actor, { projectId: project.id }),
@@ -214,7 +216,9 @@ export default async function ProjectDetailPage({
             <CardTitle>Log time</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            {runningTimer ? (
+            {!canLogTime ? (
+              <p className="text-sm text-muted-foreground">Your role can view time entries but not log them.</p>
+            ) : runningTimer ? (
               <form action={boundStopTimer} className="flex items-center justify-between rounded-md bg-success/10 p-3">
                 <span className="text-sm text-success">Timer running since {runningTimer.startedAt?.toLocaleTimeString()}</span>
                 <Button type="submit" size="sm">Stop timer</Button>
@@ -234,7 +238,7 @@ export default async function ProjectDetailPage({
               <p className="text-sm text-muted-foreground">Project is not active.</p>
             )}
 
-            {project.status === "ACTIVE" ? (
+            {canLogTime && project.status === "ACTIVE" ? (
               <form action={boundCreateTime} className="space-y-2 border-t border-border pt-4">
                 <div className="grid grid-cols-2 gap-2">
                   <Input name="entryDate" type="date" defaultValue={today} required />
@@ -284,7 +288,7 @@ export default async function ProjectDetailPage({
                     <td className="p-3">{e.billable ? "Yes" : "No"}</td>
                     <td className="p-3"><StatusBadge status={e.status} /></td>
                     <td className="p-3 text-right">
-                      {e.status === "DRAFT" || e.status === "REJECTED" ? (
+                      {canLogTime && (e.status === "DRAFT" || e.status === "REJECTED") ? (
                         <form action={submitTimeEntryAction.bind(null, org.slug, project.id, e.id)} className="inline">
                           <Button type="submit" size="sm" variant="outline">Submit</Button>
                         </form>
@@ -310,7 +314,7 @@ export default async function ProjectDetailPage({
       </Card>
 
       {/* Create invoice from unbilled time — master spec §23's integration */}
-      {canManage && project.customer ? (
+      {canInvoiceTime && project.customer ? (
         <Card>
           <CardHeader>
             <CardTitle>Create invoice from unbilled time</CardTitle>

@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { requireOrgAndActor } from "@/lib/session";
+import { deniedViewUnless } from "@/lib/permission-gate";
 import { ContactService } from "@/domain/contacts/contact-service";
 import { AccountService } from "@/domain/accounts/account-service";
 import { TaxCodeService } from "@/domain/tax/tax-code-service";
@@ -19,6 +20,8 @@ export default async function NewBillPage({
   searchParams: { error?: string; supplierContactId?: string };
 }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
+  const denied = deniedViewUnless(actor, "supplier_bill:manage", org.slug);
+  if (denied) return denied;
 
   const [suppliersOnly, both, accounts, taxCodes, products] = await Promise.all([
     ContactService.list(actor, { kind: "SUPPLIER" }),

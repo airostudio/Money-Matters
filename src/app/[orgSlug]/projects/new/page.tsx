@@ -1,4 +1,5 @@
 import { requireOrgAndActor } from "@/lib/session";
+import { deniedViewUnless } from "@/lib/permission-gate";
 import { ContactService } from "@/domain/contacts/contact-service";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,6 +15,8 @@ export default async function NewProjectPage({
   searchParams: { error?: string };
 }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
+  const denied = deniedViewUnless(actor, "project:manage", org.slug);
+  if (denied) return denied;
   const [customersOnly, both] = await Promise.all([
     ContactService.list(actor, { kind: "CUSTOMER" }),
     ContactService.list(actor, { kind: "BOTH" }),

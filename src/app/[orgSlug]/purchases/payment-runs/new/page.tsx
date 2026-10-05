@@ -1,4 +1,5 @@
 import { requireOrgAndActor } from "@/lib/session";
+import { deniedViewUnless } from "@/lib/permission-gate";
 import { BillService } from "@/domain/purchases/bill-service";
 import { AccountService } from "@/domain/accounts/account-service";
 import { Button } from "@/components/ui/button";
@@ -16,6 +17,8 @@ export default async function NewPaymentRunPage({
   searchParams: { error?: string };
 }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
+  const denied = deniedViewUnless(actor, "payment_run:manage", org.slug);
+  if (denied) return denied;
 
   const [allBills, accounts] = await Promise.all([BillService.list(actor), AccountService.list(actor)]);
   const eligibleBills = allBills.filter(

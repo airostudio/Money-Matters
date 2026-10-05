@@ -1,4 +1,5 @@
 import { requireOrgAndActor } from "@/lib/session";
+import { deniedViewUnless } from "@/lib/permission-gate";
 import { AccountService } from "@/domain/accounts/account-service";
 import { FixedAssetClassService } from "@/domain/fixed-assets/asset-class-service";
 import { FixedAssetService } from "@/domain/fixed-assets/fixed-asset-service";
@@ -16,6 +17,8 @@ export default async function NewFixedAssetPage({
   searchParams: { error?: string };
 }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
+  const denied = deniedViewUnless(actor, "fixed_asset:manage", org.slug);
+  if (denied) return denied;
 
   const [accounts, assetClasses, candidateBillLines] = await Promise.all([
     AccountService.list(actor),

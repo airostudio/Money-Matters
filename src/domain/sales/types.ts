@@ -52,7 +52,14 @@ export interface CreateInvoiceInput {
   lines: InvoiceLineInput[];
 }
 
-export type UpdateInvoiceInput = CreateInvoiceInput;
+export interface UpdateInvoiceInput extends CreateInvoiceInput {
+  /**
+   * The `editVersion` the edit form was rendered with. When supplied, the save is
+   * refused with `StaleEditError` if the draft changed since. Omitted by
+   * programmatic callers that do not take part in the check.
+   */
+  expectedVersion?: string;
+}
 
 export interface RecordPaymentAllocationInput {
   invoiceId: string;
