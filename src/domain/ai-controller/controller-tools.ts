@@ -1,6 +1,6 @@
 import "server-only";
 import { z } from "zod";
-import { type Actor, PermissionDeniedError } from "@/domain/permissions/permission-service";
+import { type Actor, PermissionDeniedError, assertPermission } from "@/domain/permissions/permission-service";
 import type { Permission } from "@/domain/permissions/roles";
 import { LedgerService } from "@/domain/ledger/ledger-service";
 import { ReportingService } from "@/domain/reporting/reporting-service";
@@ -20,6 +20,10 @@ import { CashForecastService } from "@/domain/forecasting/cash-forecast-service"
 import { CloseChecklistService } from "@/domain/close/checklist-service";
 import { checklistFacts } from "@/domain/close/checklist-summary";
 import { monthKey, previousMonth } from "@/domain/close/period-ref";
+import { GroupService } from "@/domain/consolidation/group-service";
+import { ConsolidationService } from "@/domain/consolidation/consolidation-service";
+import { MixedCurrencyError } from "@/domain/consolidation/errors";
+import { consolidatedSummary } from "@/domain/consolidation/summary";
 import { FORECAST_HORIZONS, type CashForecast, type ForecastLine, type KnownForecastLine } from "@/domain/forecasting/types";
 
 /**
@@ -102,6 +106,13 @@ export interface ControllerToolDefinition {
   permission: Permission;
   execute: (actor: Actor, args: unknown) => Promise<ToolOutcome>;
 }
+
+const ConsolidatedReportArgsSchema = z.object({
+  report: z.enum(["PROFIT_AND_LOSS", "BALANCE_SHEET", "CASH"]),
+  group: z.string().min(1).max(200).optional(),
+  period: PeriodArgSchema.optional(),
+  asOfDate: DateArgSchema,
+});
 
 function truncate<T>(list: T[], max: number): { shown: T[]; omitted: number } {
   return { shown: list.slice(0, max), omitted: Math.max(0, list.length - max) };
@@ -318,6 +329,85 @@ export function buildControllerTools(dimensions: DimensionWithValues[]): Control
               drillDownHref: `/accounting/close/${key}`,
             },
           };
+        }),
+    },
+    {
+      name: "consolidated_report",
+      description:
+        "Read-only CONSOLIDATED report across the entities of one of the user's entity groups (multi-company): consolidated Profit & Loss, Balance Sheet or cash position, with per-entity figures, intercompany eliminations and the intercompany reconciliation exceptions. " +
+        "Use for 'what is the group's total cash', 'consolidated profit this quarter', 'does the group balance sheet balance'. " +
+        "It covers ONLY the entities this user is permitted to read: every entity is checked with the user's own role in that entity, and any entity they cannot access is left out and reported only as a count (\"N entities excluded — no access\") — you must repeat that notice if it is present and must never guess at, estimate or describe an excluded entity. " +
+        "If the tool reports an intercompany mismatch or unmapped accounts, say so rather than presenting the total as final. You cannot change groups, mappings or adjustments from here.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          report: { type: "string", enum: ["PROFIT_AND_LOSS", "BALANCE_SHEET", "CASH"] },
+          group: { type: "string", description: "The entity group's name. Optional when the user has exactly one group." },
+          period: periodArgJsonSchema(),
+          asOfDate: { type: "string", description: "YYYY-MM-DD for BALANCE_SHEET / CASH, defaults to today." },
+        },
+        required: ["report"],
+      },
+      argsSchema: ConsolidatedReportArgsSchema,
+      permission: "financial_report:read",
+      execute: (actor, rawArgs) =>
+        guarded(async () => {
+          const args = ConsolidatedReportArgsSchema.parse(rawArgs);
+
+          // Same gate as every other report tool in the organization the user is chatting in; the
+          // per-ENTITY gates (the user's real role in each group entity) are applied inside the service.
+          assertPermission(actor, "financial_report:read");
+          const groupActor = { userId: actor.userId, type: "AI" as const };
+
+          const groups = await GroupService.list(groupActor);
+          if (groups.length === 0) {
+            return { ok: true, summary: "This user has no entity groups set up, so there is nothing to consolidate.", citation: { tool: "consolidated_report", description: "Consolidated report" } };
+          }
+          const wanted = args.group?.trim().toLowerCase();
+          const exact = wanted ? groups.filter((g) => g.name.toLowerCase() === wanted) : [];
+          const partial = wanted ? groups.filter((g) => g.name.toLowerCase().includes(wanted)) : [];
+          const candidates = wanted ? (exact.length > 0 ? exact : partial) : groups;
+          if (candidates.length !== 1) {
+            return {
+              ok: true,
+              summary: `Which entity group? This user's groups are: ${groups.map((g) => g.name).join(", ")}. Ask the user to pick one.`,
+              citation: { tool: "consolidated_report", description: "Entity groups" },
+            };
+          }
+          const group = candidates[0]!;
+
+          try {
+            if (args.report === "PROFIT_AND_LOSS") {
+              const period = args.period ?? { kind: "THIS_YEAR" as const };
+              const range = resolvePeriodArg(period);
+              const report = await ConsolidationService.profitAndLoss(groupActor, group.id, range);
+              return {
+                ok: true,
+                summary: consolidatedSummary.profitAndLoss(report, `${formatDateParam(range.from)} to ${formatDateParam(range.to)}`),
+                citation: { tool: "consolidated_report", description: `Consolidated Profit & Loss — ${group.name}`, periodLabel: periodArgLabel(period, range) },
+              };
+            }
+            const asOfDate = parseAsOf(args.asOfDate);
+            const dateLabel = formatDateParam(asOfDate);
+            if (args.report === "BALANCE_SHEET") {
+              const report = await ConsolidationService.balanceSheet(groupActor, group.id, asOfDate);
+              return {
+                ok: true,
+                summary: consolidatedSummary.balanceSheet(report, dateLabel),
+                citation: { tool: "consolidated_report", description: `Consolidated Balance Sheet — ${group.name}`, periodLabel: `as of ${dateLabel}` },
+              };
+            }
+            const report = await ConsolidationService.cash(groupActor, group.id, asOfDate);
+            return {
+              ok: true,
+              summary: consolidatedSummary.cash(report, dateLabel),
+              citation: { tool: "consolidated_report", description: `Consolidated cash position — ${group.name}`, periodLabel: `as of ${dateLabel}` },
+            };
+          } catch (err) {
+            // The refusal text names only currencies of entities the user can read.
+            if (err instanceof MixedCurrencyError) return { ok: false, error: err.message };
+            throw err;
+          }
         }),
     },
     {

@@ -7,6 +7,14 @@ import type { Actor } from "@/domain/permissions/permission-service";
 import type { MembershipRole } from "@/domain/permissions/roles";
 
 const TENANT_TABLES = [
+  "entity_group_audit_logs",
+  "entity_group_adjustment_lines",
+  "entity_group_adjustments",
+  "entity_group_intercompany_accounts",
+  "entity_group_account_mappings",
+  "entity_group_accounts",
+  "entity_group_members",
+  "entity_groups",
   "platform_admin_audit_logs",
   "period_lock_events",
   "close_signoffs",
