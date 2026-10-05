@@ -143,8 +143,30 @@ entity — an entity they cannot read is left out and reported as "N entities
 excluded — no access", including from the AI Financial Controller's new
 read-only `consolidated_report` tool. A topbar switcher lets a multi-company
 user jump between companies. Groups of mixed base currencies are refused (no
-translation yet). Accountant practice management is the remaining Phase 9
-slice — see `docs/roadmap.md`.
+translation yet).
+
+Phase 9 Slice 5 adds accountant practice management and workpapers, which
+**closes out Phase 9**. Any registered user can set up a *practice* at
+`/practice` (partner / manager / staff roles) and link client organizations
+through a two-sided handshake: the practice proposes by organization slug and
+the client's owner or administrator accepts — and can revoke at any moment,
+effective on the very next read. A link grants no access by itself; staff read
+a client only as real members of it, with their own role there, one client at a
+time. The practice dashboard (Client | Books | Reconciliation | BAS/Tax |
+Payroll | Issues | Assigned to | Snapshot age, worst first, 10 per page) is read
+from saved snapshots that a Refresh updates sequentially, so it stays inside the
+database connection budget. Also built: client groups, staff assignment, bulk
+actions, practice tasks, a tax calendar of rules the practice writes itself (no
+ATO dates are hardcoded and there is no BAS/GST feature yet), client queries and
+document requests that appear in the client's own "Requests from your
+accountant" inbox, and digital workpapers (balance-sheet account
+reconciliation with an exact-decimal difference, evidence, review notes,
+preparer and reviewer sign-off with segregation of duties, immutability once
+signed off, and carry-forward) that never write to the client's ledger. A
+Business | Accountant toggle changes terminology and shows the Practice entry
+points (presentation only), and the AI Financial Controller gains read-only
+`practice_overview` and `workpaper_status` tools. See `docs/security.md` §13
+and `docs/roadmap.md`.
 See
 [`docs/roadmap.md`](docs/roadmap.md) for exactly what's built
 vs. explicitly deferred in each phase (a customer portal, AI-drafted

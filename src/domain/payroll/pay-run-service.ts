@@ -1,4 +1,4 @@
-import { and, asc, eq, gte, lt, lte, sum } from "drizzle-orm";
+import { and, asc, eq, gte, lt, lte, sql, sum } from "drizzle-orm";
 import Decimal from "decimal.js";
 import { employees, payRunLines, payRuns, payrollTaxRuleSets, timesheetEntries } from "@/db/schema";
 import { withTenant, type TenantDb } from "@/db/tenant";
@@ -111,6 +111,18 @@ export interface PayRunAccountWiring {
  * disposeAsset`'s doc comment, etc).
  */
 export const PayRunService = {
+  /** How many pay runs are still DRAFT (a count only; gated on `payrun:read`). Used by the accountant practice dashboard. */
+  async countDrafts(actor: Actor): Promise<number> {
+    assertPermission(actor, "payrun:read");
+    return withTenant(actor.organizationId, async (tx) => {
+      const [row] = await tx
+        .select({ n: sql<number>`count(*)::int` })
+        .from(payRuns)
+        .where(and(eq(payRuns.organizationId, actor.organizationId), eq(payRuns.status, "DRAFT")));
+      return Number(row?.n ?? 0);
+    });
+  },
+
   async list(actor: Actor): Promise<PayRunView[]> {
     assertPermission(actor, "payrun:read");
     return withTenant(actor.organizationId, async (tx) => {

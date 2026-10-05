@@ -538,3 +538,187 @@ carries the notice. A mandatory test with real restricted-role actors (EMPLOYEE 
 one entity, no membership in another) captures every payload sent to the mocked
 model and asserts no figure, name, slug or id of an unauthorised entity appears,
 in the tool output or anywhere in the model's context or the answer path.
+
+
+## 13. Accountant practices (Phase 9 Slice 5): practice scoping, consent, revocation
+
+A practice (accounting firm) serves many client organizations and has several
+staff. Its internal data (tasks, review notes, workpapers, assignments) belongs to
+the **practice**, clients must not see it, yet staff must read client books. Tenant
+isolation is one `app.current_org_id` per transaction, and the consolidation slice
+added user-scoped tables on one `app.current_user_id`. This slice extends the same
+model **without weakening RLS and without any bypass, privileged connection,
+SECURITY DEFINER function or multi-valued predicate** (asserted by
+`src/tests/unit/practice/boundary.test.ts`, which reads the migration).
+
+### 13.1 Practice tables: one variable plus practice membership
+
+Practice tables carry `practice_id` (and neither `organization_id` nor
+`owner_user_id`). Their policy is a single-variable membership check:
+
+```
+EXISTS (SELECT 1 FROM practice_members pm
+        WHERE pm.practice_id = <row>.practice_id
+          AND pm.user_id = nullif(current_setting('app.current_user_id', true), '')::uuid
+          AND pm.status = 'ACTIVE')
+```
+
+set per transaction by `withUserScope(userId, …)`; FORCEd on every table. Because a
+policy that queries its own table recurses in Postgres, the gate is built in layers:
+
+- **`practice_partners`** — the ANCHOR: own-row policy only (`user_id = me`), no
+  sub-select. A founder can insert themselves once (while they have no member row); a
+  partner can promote another; **only the partner can delete their own row** (step
+  down). Consequently a partner cannot be demoted or removed by someone else — the
+  documented trade-off for keeping the policies recursion-free (a practice always
+  keeps a partner).
+- **`practice_members`** — the GATE (authoritative role/status): SELECT = my own row
+  or any row of a practice I am a partner of (one sub-select, onto the trivial
+  anchor); INSERT = the founder's first row or a partner adding someone; UPDATE = a
+  partner, or a member leaving (WITH CHECK allows a non-partner to write only
+  `status = 'REMOVED'` to their own row — no self-promotion).
+- **`practice_roster`** — a read-only colleague directory any ACTIVE member may read
+  (assignee lists, counting reviewers). Its role/status are not independent: a
+  composite foreign key with `ON UPDATE CASCADE` onto `practice_members` keeps them
+  equal.
+- every other practice table asks only "is there an ACTIVE `practice_members` row for
+  me in this practice?" (a sub-select onto the gate, whose own policy reaches only the
+  trivial anchor — never itself).
+
+A user outside the practice reads **zero rows** and every write is refused, in every
+practice table, **even calling `withUserScope` directly** (tested table by table, plus
+joining by writing one's own member/partner/roster row, self-promotion, and a removed
+member losing access on the next statement). A removed member's access ends
+immediately because the gate row's status changes.
+
+Further database-level guarantees: `practice_audit_logs`, `workpaper_snapshots` and
+`workpaper_signoffs` are **append-only** (SELECT + INSERT; UPDATE/DELETE refused by
+Postgres — tested as the real `mm_app` role); a workpaper's schedule lines, evidence
+and adjustments can be written **only while the workpaper is not SIGNED_OFF** (the
+policy's `EXISTS (… w.status <> 'SIGNED_OFF')`), review-note **text** is immutable
+(column-level UPDATE grant covers only the resolution columns) and a note is never
+deleted.
+
+### 13.2 The isolation audit
+
+`src/db/isolation-audit.ts` classifies a table with a `practice_id` column (and no
+`organization_id`/`owner_user_id`) as **practice-scoped**, plus the root `practices`.
+For each it requires FORCEd RLS, a policy, every policy keyed on
+`app.current_user_id`, none mentioning `app.current_org_id`, and — except for the two
+gate tables and the root — every policy **consulting `practice_members`**. A table
+whose policy lost the membership check (a bare user-variable predicate, or `true`) is
+flagged in the build log and by `src/tests/unit/db/isolation-audit.test.ts`; the real
+test database must pass with 18 practice tables. The three client-side tables
+(`practice_client_consents`, `client_requests`, `client_request_messages`) carry
+`organization_id` and are audited as ordinary tenant tables.
+
+### 13.3 Reading a client's books: real membership + consent, one client at a time
+
+The practice link grants **no** data access. Every read of a client:
+
+1. loads the staff member's **actual membership role in that client** (the same
+   `organization_memberships` row as any user; no membership → a specific error);
+2. re-checks the client's **own consent record** (`practice_client_consents`, ACTIVE)
+   in a fresh short `withTenant(clientId)` transaction **immediately before** the
+   read — so revocation is effective on the very next read;
+3. calls the client's existing service with an `Actor` carrying that real role, which
+   applies the client's own RBAC (`close_checklist:read`, `bank_account:read`,
+   `payrun:read`, `financial_report:read`, `journal:read` …).
+
+A platform admin gets nothing extra (there is no admin branch). Practice modules open
+no connection of their own, set no session variable, never call `Promise.all`, and
+import no tenant table outside the two client-side services (all structurally tested).
+**They cannot write a client's ledger**: no posting, journal, reversal or period-lock
+service is imported — the single ledger import is the read-only
+`LedgerService.getAccountBalance` (tested: journal entries/lines/trial balance/audit
+ids of the client are byte-identical after a full workpaper lifecycle).
+
+### 13.4 The handshake, revocation and retention
+
+- The practice **proposes** by organization slug (partner or manager). The
+  authoritative record is a row in the **client's own tenant**
+  (`practice_client_consents`); the practice's `practice_client_links` row is a working
+  copy. Only the client's OWNER/ADMINISTRATOR (`organization:manage`) can accept,
+  decline, revoke, or re-approve; the practice can withdraw its own request or end an
+  active link (partner). Each step writes the client's own audit log (real actor, opaque
+  practice id) and the practice's append-only audit log.
+- The proposal is the one write into a tenant by a non-member, so it is narrow: one
+  PENDING row, a generic error (`ProposalNotPossibleError`) whatever the reason (unknown
+  slug, queue full), at most 5 PENDING per organization, 100 links and 3 founded
+  practices per user, and a declined link cannot be re-proposed by the practice.
+- **Revocation is immediate** (step 2 above). The practice's working copy is brought
+  up to date whenever it next verifies — each dashboard page load verifies that page's
+  rows one at a time, and "Check status" does so on demand — at which point the link is
+  marked, the event is audited and the retained dashboard snapshot is **blanked**
+  (state `LINK_INACTIVE`, every figure NULL). The dashboard stops listing the client.
+- **Retention (explicit):** the practice keeps its **own** records after a client leaves —
+  tasks, review notes, sign-offs, evidence, and workpaper snapshots — because they are
+  the firm's working papers. They are shown clearly "as of" the snapshot date with a
+  banner that the client ended access; **no new client data can be read** (creating,
+  refreshing or carrying forward a workpaper, requests, dashboard figures all refuse).
+  A client who wants its data erased must raise that with the practice outside the
+  product; the system does not delete a practice's records on revocation.
+
+### 13.5 Client-visible vs practice-internal data
+
+| Where | What | Who sees it |
+|---|---|---|
+| client tenant (`client_requests`, `client_request_messages`, `practice_client_consents`, the client's `audit_logs`) | queries, document requests, replies and attachments; the consent record; informational audit notes | the client's members by their own roles (`client_request:read`/`respond`, `organization:manage`, `audit:read`) |
+| practice tables | tasks, deadline rules, review notes, workpapers, evidence, sign-offs, assignments, groups, snapshots, practice audit log | active practice members only |
+
+The client's own audit log gets **only** an informational entry with the opaque
+practice id and the acting user when a link is proposed/accepted/revoked/ended or staff
+are assigned — never the practice name, other clients, assignee, tasks, notes or any
+figure (tested). Practice-internal notes must never be put in a client request (the
+UI says so); requests are in-app only (no email/notification infrastructure).
+
+### 13.6 Seats
+
+Staff who work on a client must be members of it, which uses one of that client's
+seats (`organizations.seat_limit`, default 2). Nothing is bypassed or special-cased:
+`addMemberByEmail` and `SeatLimitReachedError` are unchanged. When a staff member is not
+a member the practice sees a **specific** message (`NotAClientMemberError`) naming the
+client and its seat position — "… at its seat limit (2 of 2 seats used) … the platform
+administrator must raise the limit … the limit is not bypassed" (tested end to end,
+including the owner's add succeeding after the platform raises the limit). The client's
+Accountant-access page shows its seat usage and where to add the person.
+
+### 13.7 Connection discipline
+
+Every `withTenant`/`withUserScope`/`db.transaction` checks out a pooled connection and
+the Supabase session pooler caps the project at roughly 15, so the dashboard never
+fans out: it reads materialised `client_health_snapshots` (counts only) in one
+user-scoped transaction of set-based queries; **Refresh** runs one client at a time (a
+tenant consent check, then the checklist's own sequential reads, then a user-scoped
+upsert), per client or per page of at most 10; the page verifies at most its own
+10 rows' consent one after another. Caps: 10 clients per page and per bulk action, 100
+links, 25 staff. Tests instrument both wrappers and assert at most one scoped
+transaction is open at any time and exactly which organizations were opened.
+
+### 13.8 Who sees which figure
+
+A snapshot refreshed by a colleague with more permissions must not widen what you
+see: each dashboard indicator is gated by **the viewer's own role in that client**
+(payroll "not visible to your role" without `payrun:read`; likewise books and
+reconciliation), and a client appears only if the viewer is a member of it. A
+refresh by a role lacking a permission stores NULL ("not measured"), never zero.
+
+### 13.9 AI no-leak
+
+`practice_overview` and `workpaper_status` (read-only Financial Controller tools) take
+no organization, client or account id. They read saved snapshots and the practice's own
+records, include a client only if the user holds a real membership with the needed
+permissions **and** the link is ACTIVE, and report every other client only as a count
+("N … excluded"). Tests with real restricted-role actors and a mocked model prove that
+no unauthorised, pending, revoked or foreign client's name, id, slug or figure reaches
+the tool output or any payload sent to the model, that payroll respects `payrun:read`,
+that a write attempt is an unknown tool, and that the auto-execution policy and the
+human-only period-close rule are unchanged. See `docs/ai-agents.md`.
+
+### 13.10 Audit
+
+Every practice mutation writes `practice_audit_logs` in the same transaction (a
+failed audit rolls the change back); the client's tenant mutations (consent changes,
+requests) write the client's own audit log with the real actor. Workpaper sign-offs and
+reopenings are additionally in the append-only `workpaper_signoffs` history with
+identity, role, version, reason and the single-staff-exception flag.

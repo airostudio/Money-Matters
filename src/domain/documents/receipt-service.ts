@@ -4,33 +4,25 @@ import { uploadedReceipts } from "@/db/schema";
 import { withTenant } from "@/db/tenant";
 import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
 import { AuditService } from "@/domain/audit/audit-service";
+import {
+  DocumentFileTooLargeError,
+  MAX_DOCUMENT_FILE_SIZE_BYTES,
+  SUPPORTED_DOCUMENT_MIME_TYPES,
+  UnsupportedDocumentFileTypeError,
+  assertValidDocumentUpload,
+} from "./document-validation";
 import { PostgresDocumentStorageProvider } from "./storage-provider";
 import { extractReceiptData, type ReceiptExtraction } from "./receipt-extraction-service";
 
-/** Reject anything larger than this before it ever reaches storage or the AI call. */
-export const MAX_RECEIPT_FILE_SIZE_BYTES = 10 * 1024 * 1024;
-
-export const SUPPORTED_RECEIPT_MIME_TYPES = new Set([
-  "image/jpeg",
-  "image/png",
-  "image/webp",
-  "image/gif",
-  "application/pdf",
-]);
-
-export class UnsupportedReceiptFileTypeError extends Error {
-  constructor(mimeType: string) {
-    super(`Unsupported file type "${mimeType}" — upload a JPEG/PNG/WebP/GIF image or a PDF.`);
-    this.name = "UnsupportedReceiptFileTypeError";
-  }
-}
-
-export class ReceiptFileTooLargeError extends Error {
-  constructor(size: number) {
-    super(`File is ${(size / 1024 / 1024).toFixed(1)}MB — the maximum is 10MB.`);
-    this.name = "ReceiptFileTooLargeError";
-  }
-}
+// The MIME / size / emptiness rules live in document-validation.ts, shared with the other
+// uploads that use the bytea document store (client request attachments, workpaper evidence).
+// The original receipt-specific names are kept as aliases so every existing caller is unchanged.
+export {
+  DocumentFileTooLargeError as ReceiptFileTooLargeError,
+  MAX_DOCUMENT_FILE_SIZE_BYTES as MAX_RECEIPT_FILE_SIZE_BYTES,
+  SUPPORTED_DOCUMENT_MIME_TYPES as SUPPORTED_RECEIPT_MIME_TYPES,
+  UnsupportedDocumentFileTypeError as UnsupportedReceiptFileTypeError,
+};
 
 export class ReceiptNotFoundError extends Error {
   constructor(id: string) {
@@ -63,15 +55,7 @@ export const ReceiptService = {
   ): Promise<UploadReceiptResult> {
     assertPermission(actor, "expense_receipt:manage");
 
-    if (!SUPPORTED_RECEIPT_MIME_TYPES.has(input.mimeType)) {
-      throw new UnsupportedReceiptFileTypeError(input.mimeType);
-    }
-    if (input.data.byteLength === 0) {
-      throw new Error("Uploaded file is empty.");
-    }
-    if (input.data.byteLength > MAX_RECEIPT_FILE_SIZE_BYTES) {
-      throw new ReceiptFileTooLargeError(input.data.byteLength);
-    }
+    assertValidDocumentUpload(input.mimeType, input.data);
 
     const extraction = await extractReceiptData({
       mimeType: input.mimeType,

@@ -654,6 +654,54 @@ captures every request payload sent to the model plus the final answer and
 asserts none of it contains unauthorised data. As elsewhere the real Anthropic
 API is only exercised through the mocked SDK.
 
+## 0i. Eleventh integration: the read-only `practice_overview` and `workpaper_status` tools, and workpaper commentary (Phase 9 Slice 5)
+
+Two more read tools for an accountant who asks the Controller about their practice,
+built on the same permission-parity rule as `consolidated_report` — and one level
+stricter, because the data spans clients:
+
+- **`practice_overview`** — the practice dashboard from **saved snapshots** (the model
+  cannot refresh them, so it cannot cause a connection fan-out): per client the Books,
+  Reconciliation, BAS/Tax (a deadline the practice typed in — never an official date),
+  Payroll and Issues indicators, worst first, with the snapshot age. Arguments are only
+  an optional practice **name**, a filter and a page — **no organization, client or
+  account id**.
+- **`workpaper_status`** — workpapers by status/client with the snapshot balance and date,
+  open notes and, for at most three papers, the computed reconciliation (schedule total,
+  difference, proposed adjustments, who signed). Arguments: practice name, part of a
+  client name, a status.
+
+Both first apply the chat organization's `financial_report:read` gate, then read through
+`src/domain/practice/assistant-views.ts` using the person's own identity: the practice must
+be one they are an ACTIVE member of (the database refuses any other); a client is included
+only if they hold a real membership in it, its link is ACTIVE, and **their role there**
+allows the figure (payroll reads "not visible to your role" without `payrun:read`; a
+workpaper needs `financial_report:read` and `journal:read` in that client); every other
+client — unreachable, pending, revoked, foreign — is reported **only as a count**
+("N linked client(s) are excluded — this user has no access to them") and never named.
+The result text reminds the model that figures are snapshots and that there is no BAS/GST
+preparation in this system.
+
+**No write path; autonomy and close exclusions untouched.** There is no tool to link,
+assign, refresh, sign off, reopen, post or close; a model asking for one gets "Unknown
+tool". The write-tool registry still holds only `prepare_draft_*` tools; nothing practice-
+related is auto-approvable; period close remains human-only (all asserted).
+
+**Optional workpaper commentary** (`WorkpaperCommentaryService`, shown on the workpaper
+page only when asked for with `?summary=1`): a 3-5 sentence reading aid written from the
+already-computed facts (balance, schedule total, difference, counts) with the instruction
+never to calculate or introduce a figure; omitted (`null`) with no `ANTHROPIC_API_KEY` or
+if the call fails; it cannot sign off or change anything.
+
+**The leak test (mandatory, `src/tests/integration/practice/ai-tools.test.ts`).** With real
+restricted-role actors — S1 as MANAGER (no `payrun:read`) or EMPLOYEE (no report
+permissions) in a client, no membership in another, a client that revoked, a pending one,
+and a workpaper (with a distinctive 88,888.00 balance) in a client only a colleague belongs
+to — the tool output for each tool contains no name, slug, id or figure of any of them, and
+an end-to-end run with a mocked Anthropic SDK captures every payload sent to the model plus
+the answer and asserts the same; an attempted `sign_off_workpaper` is an unknown tool and
+the workpaper stays a draft.
+
 ## 1. Why this belongs in the Phase 1 docs
 
 The single most important constraint on the AI layer is: **it must never see

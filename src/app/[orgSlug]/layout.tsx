@@ -3,6 +3,7 @@ import { getCurrentUser } from "@/lib/session";
 import { isPlatformAdminUser } from "@/lib/platform-admin";
 import { OrganizationService } from "@/domain/organizations/organization-service";
 import { DashboardShell } from "@/components/shell/dashboard-shell";
+import { getUiMode } from "@/lib/ui-mode";
 
 /**
  * Matches what `slugify()` produces (src/lib/utils.ts). Checked before any
@@ -47,6 +48,7 @@ export default async function OrgLayout({
       userName={user.name}
       userEmail={user.email}
       showAdminLink={isPlatformAdminUser(user)}
+      mode={getUiMode()}
     >
       {children}
     </DashboardShell>

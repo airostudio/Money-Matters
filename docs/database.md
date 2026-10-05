@@ -756,6 +756,61 @@ hand-written RLS + grants, with no function, no `SECURITY DEFINER`, no
 `BYPASSRLS` and no multi-organization predicate (asserted by a test that reads
 the file). Test helpers truncate the new tables in `resetDatabase`.
 
+## 2q. Phase 9 Slice 5: accountant practices, workpapers, client requests (migrations `0040`, `0041`)
+
+Twenty-one new tables in two scoping models (see `docs/security.md` §13). `0040` is the
+generated schema (statements re-ordered so unique indexes exist before the composite
+foreign keys that reference them); `0041` is hand-written RLS + grants with no function,
+no `SECURITY DEFINER`, no `BYPASSRLS` and no multi-valued predicate (a test reads the
+file). `resetDatabase` truncates them.
+
+**Practice-scoped** (`practice_id`, no `organization_id`; FORCEd RLS on
+`app.current_user_id` + an ACTIVE `practice_members` row; reached with `withUserScope`):
+
+- **`practices`** — name, `created_by_user_id`; visible to creator and active staff.
+- **`practice_partners`** — the own-row ANCHOR (no sub-select) that lets a partner see
+  other staff rows without a self-referencing policy.
+- **`practice_members`** — the gate: role `PARTNER`/`MANAGER`/`STAFF`, status
+  `ACTIVE`/`REMOVED`, unique (practice, user) and (practice, user, role, status).
+- **`practice_roster`** — read-only mirror for colleague lookup; composite FK to the
+  gate with `ON UPDATE CASCADE`.
+- **`practice_audit_logs`** — append-only.
+- **`practice_client_links`** — the practice's working copy of a client link (name/slug
+  snapshot, status mirror, assignee via composite FK to the roster-backed member row,
+  `status_verified_at`). Unique (practice, client). Never deleted.
+- **`practice_client_groups`** / **`practice_client_group_members`** — labels; the
+  membership row FKs the link.
+- **`client_health_snapshots`** — one row per (practice, client): **counts only**
+  (books percent, blocking/attention, unreconciled/uncategorised, draft pay runs,
+  tax-locked-through) plus who/when/with which role it was computed. NULL = not
+  measured. Blanked (state `LINK_INACTIVE`) when a link ends.
+- **`practice_deadline_templates`** / **`practice_tasks`** — the user-entered rule
+  (frequency, period-end month 1-12, months after 0-12, due day 1-31, CHECKed) and the
+  tasks; unique (template, period end) makes generation idempotent.
+- **`workpapers`** — one per (practice, client, account, period end); stored snapshot
+  (`ledger_balance`, `snapshot_taken_at/by`), version, status, comparative columns,
+  account display snapshots (`account_id` is a plain uuid — **no FK into any tenant
+  table**).
+- **`workpaper_snapshots`** (append-only), **`workpaper_schedule_lines`**,
+  **`workpaper_evidence`** (bytea, same store pattern as `uploaded_receipts`),
+  **`workpaper_adjustments`** (notes, never posted), **`workpaper_review_notes`**
+  (column-level UPDATE grant: only status/resolution fields), **`workpaper_signoffs`**
+  (append-only). The lines/evidence/adjustments/notes write policies require the
+  workpaper not to be SIGNED_OFF.
+
+**Tenant-scoped** (client organization; `app.current_org_id`; `withTenant`):
+
+- **`practice_client_consents`** — the AUTHORITATIVE consent record: practice id (opaque),
+  name snapshot, status `PENDING`/`ACTIVE`/`DECLINED`/`REVOKED`/`WITHDRAWN`. Unique
+  (organization, practice).
+- **`client_requests`** / **`client_request_messages`** — queries and document requests
+  and their thread (messages append-only; an attachment is an `uploaded_receipts` row).
+
+The isolation audit reports "70 organization-scoped, 8 user-scoped and 18 practice-scoped
+tables (of 103)". New enums: `practice_role`, `practice_member_status`,
+`practice_link_status`, task/priority/category/frequency enums, `workpaper_*`, and the
+three `client_request_*` enums. New permissions: `client_request:read|respond|manage`.
+
 ## 3. Row-Level Security
 
 Every tenant table gets an RLS policy of the shape:

@@ -1,7 +1,10 @@
 import type { Permission } from "@/domain/permissions/roles";
 import type { LucideIcon } from "lucide-react";
+import type { UiMode } from "./ui-mode";
 import {
   Banknote,
+  Briefcase,
+  Inbox,
   Boxes,
   Bot,
   Building2,
@@ -28,6 +31,10 @@ export interface NavItem {
   /** Shown if the actor's role holds ANY of these — used when a section covers more than one permission domain (e.g. Purchases also covers Expenses, which an EMPLOYEE role can reach without `supplier_bill:read`). */
   anyPermission?: Permission[];
   children?: Array<{ label: string; href: string; permission?: Permission }>;
+  /** A route OUTSIDE `/{orgSlug}` (the accountant practice section). When set, `href` is ignored. */
+  absoluteHref?: string;
+  /** Shown only in this presentation mode (see ui-mode.ts). Omit to show in both. */
+  onlyInMode?: UiMode;
 }
 
 /**
@@ -148,6 +155,12 @@ export const NAV_ITEMS: NavItem[] = [
       { label: "Tax Codes", href: "/accounting/tax-codes", permission: "tax_code:manage" },
     ],
   },
+  {
+    label: "Client requests",
+    href: "/requests",
+    icon: Inbox,
+    permission: "client_request:read",
+  },
   { label: "Insights", href: "/insights", icon: Sparkles },
   {
     label: "AI Finance",
@@ -159,6 +172,7 @@ export const NAV_ITEMS: NavItem[] = [
       { label: "Daily Finance Brief", href: "/ai-finance/brief", permission: "financial_report:read" },
     ],
   },
+  { label: "Practice", href: "/practice", absoluteHref: "/practice", icon: Briefcase, onlyInMode: "ACCOUNTANT" },
   { label: "Settings", href: "/settings", icon: Settings },
 ];
 

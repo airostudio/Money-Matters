@@ -913,3 +913,86 @@ then per entity one tenant transaction per statement (P&L, Balance Sheet; two
 for cash), strictly sequential and capped at 10 entities — which is why there is
 no always-on dashboard widget (an N-entity headline on a home page would hold N
 connections' worth of work on every visit).
+
+
+## 17. Phase 9 Slice 5 — workpaper reconciliation method (master spec §43)
+
+A workpaper is a **practice-owned record of one reading of a client's ledger**, never a
+posting. The first kind is a balance-sheet account reconciliation.
+
+### 17a. The snapshot
+
+`LedgerService.getAccountBalance(actor, accountId, asOf)` — one set-based aggregate over
+that account's lines (every non-DRAFT entry, REVERSED included, exactly like the Trial
+Balance) — returns the balance in the account's **normal direction** (debit-normal for
+assets, credit-normal for liabilities and equity) in the base currency. `asOf` is the end
+of the period-end day (UTC), so a later posting is not in it. The workpaper stores the
+balance with `snapshot_taken_at`, who pulled it and with which client role, and every
+pull is an append-only history row. It is labelled "per ledger as at <date>, pulled
+<timestamp> by <who>" and is a point-in-time figure, not live.
+
+### 17b. The schedule and the difference
+
+The supporting schedule is a list of signed decimal amounts of two kinds —
+**supporting balances** (the bank statement balance, a sub-ledger total) and **reconciling
+items** (signed so that an outstanding cheque is negative). With exact decimal arithmetic
+(`Money`, never floats; up to 4 decimal places):
+
+```
+schedule total = Σ every line
+difference     = ledger balance − schedule total
+reconciled     ⇔ difference = 0   (tested on the exact value; a sub-cent residue is
+                                   displayed, never rounded to 0.00)
+```
+
+Hand-checked: ledger 12,000.00; statement 12,450.00; outstanding items −450.00 → schedule
+total 12,000.00, difference 0.00. With items −350.00 → total 12,100.00, difference
+**−100.00** (the ledger is 100.00 lower than the schedule supports). Signing with a
+non-zero difference needs an explicit acknowledgement, recorded in the audit log.
+
+### 17c. Staleness
+
+On view one extra query (the same single-account balance) compares the current balance
+to the snapshot; any change, however small, is "stale" and shown with the exact change.
+Refreshing pulls a new snapshot (DRAFT only) and keeps the history. When the client has
+ended access no check is made and the paper is shown as of its snapshot date.
+
+### 17d. Adjustments are notes
+
+A proposed adjustment (description, amount, account text) is recorded as a note. The
+system never posts it: the accountant posts an agreed adjustment through the client's
+normal journal screen, then may mark it "posted" with a free-text reference that is
+**not verified**. No workpaper code imports a posting service.
+
+### 17e. Review, sign-off and versions
+
+DRAFT → (preparer signs) IN_REVIEW → (reviewer signs) SIGNED_OFF. The preparer must be
+the person who prepared it; the reviewer must differ from the preparer **whenever the
+practice has two or more active staff**, with a documented exception for a one-person
+practice (flagged `single_staff_exception` in the history and the audit log — the same
+exception the payment-run slice makes). Every review note must be resolved before the
+reviewer signs; notes are resolved, never deleted or rewritten. SIGNED_OFF is immutable
+(the database refuses schedule/evidence/note/adjustment changes); a correction is a
+**reopen with a mandatory reason** (a manager or partner for a signed-off paper), which
+bumps the version and returns it to DRAFT while every earlier sign-off, note and
+snapshot stays in the append-only history.
+
+### 17f. Carry-forward
+
+From a SIGNED-OFF workpaper the next period's is created (date defaults to the end of
+the following month) with: the schedule **structure** (supporting-balance lines kept
+with amounts reset to 0.00 — they must be re-entered from the new evidence), **recurring**
+reconciling items copied with their amounts, other reconciling items dropped, and the
+prior ledger balance carried as the **comparative** (copied, not recomputed). A fresh
+balance is pulled for the new period. **Never carried:** evidence, sign-offs, review
+notes, proposed adjustments, the old snapshot (the plan type has no field for them).
+
+### 17g. Practice tax calendar
+
+Recurring deadlines are **rules the practice writes** (frequency; the month a period
+ends; months after; due day, clamped to the month's length), turned into tasks on demand
+by pure date arithmetic (`src/domain/practice/tax-calendar.ts`); generation is idempotent
+per (rule, period end). Nothing is taken from tax law: starter rules are editable form
+prefills labelled "suggestion — verify at ato.gov.au". The dashboard's BAS/Tax indicator
+shows only the practice's own deadline and the client's tax-lock; **there is no BAS/GST
+preparation, lodgement or ATO integration** (a later Phase 8 item).

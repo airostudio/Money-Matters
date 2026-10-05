@@ -111,6 +111,22 @@ function rowKey(row: FiscalPeriodRow): string {
 
 export const PeriodCloseService = {
   /**
+   * The end date (YYYY-MM-DD) of the latest period that is TAX_LOCKED or HARD_LOCKED, or null —
+   * "the books are tax-locked through ...". One aggregate query, gated on `close_checklist:read`.
+   * Used by the accountant practice dashboard (Phase 9 Slice 5).
+   */
+  async getTaxLockedThrough(actor: Actor): Promise<string | null> {
+    assertPermission(actor, "close_checklist:read");
+    return withTenant(actor.organizationId, async (tx) => {
+      const [row] = await tx
+        .select({ end: sql<string | null>`max(${fiscalPeriods.endDate})::text` })
+        .from(fiscalPeriods)
+        .where(and(eq(fiscalPeriods.organizationId, actor.organizationId), inArray(fiscalPeriods.status, ["TAX_LOCKED", "HARD_LOCKED"])));
+      return row?.end ? String(row.end).slice(0, 10) : null;
+    });
+  },
+
+  /**
    * Close a period: runs the live checklist, refuses with a typed error listing
    * every BLOCKING item, requires an explicit acknowledgement when outstanding
    * (ATTENTION / unsigned manual) items remain, then — in one transaction —

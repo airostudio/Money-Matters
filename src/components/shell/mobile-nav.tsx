@@ -6,15 +6,18 @@ import { Menu, X } from "lucide-react";
 import { BRAND_ICON } from "./nav-config";
 import { NavLinks } from "./nav-links";
 import type { MembershipRole } from "@/domain/permissions/roles";
+import type { UiMode } from "./ui-mode";
 
 export function MobileNav({
   orgSlug,
   orgName,
   role,
+  mode = "BUSINESS",
 }: {
   orgSlug: string;
   orgName: string;
   role: MembershipRole;
+  mode?: UiMode;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -50,7 +53,7 @@ export function MobileNav({
             </Dialog.Close>
           </div>
           <div className="flex-1 overflow-y-auto py-3">
-            <NavLinks orgSlug={orgSlug} role={role} onNavigate={() => setOpen(false)} />
+            <NavLinks orgSlug={orgSlug} role={role} mode={mode} onNavigate={() => setOpen(false)} />
           </div>
         </Dialog.Content>
       </Dialog.Portal>

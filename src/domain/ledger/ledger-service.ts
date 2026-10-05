@@ -1,9 +1,9 @@
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lte, ne, sql } from "drizzle-orm";
 import { accounts, contacts, journalEntries, journalLines, organizations, taxCodes } from "@/db/schema";
 import { withTenant, type TenantDb } from "@/db/tenant";
 import { Money } from "@/domain/money/money";
 import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
-import type { AccountType } from "@/domain/accounts/account-service";
+import { AccountNotFoundError, type AccountType } from "@/domain/accounts/account-service";
 import { sumPostedActivityByAccount } from "./gl-aggregation";
 
 /**
@@ -67,6 +67,52 @@ export function normalBalanceSide(type: AccountType): "DEBIT" | "CREDIT" {
 }
 
 export const LedgerService = {
+  /**
+   * ONE account's posted balance as at `asOfDate`, in the base currency and in the account's
+   * normal direction (positive = in the direction it normally carries), with the same rules as
+   * the Trial Balance (every non-DRAFT entry counts, REVERSED included). A single set-based
+   * aggregate over that account's lines — the cheap check an accountant's workpaper uses to see
+   * whether the ledger has moved since a snapshot. Gated on `journal:read`.
+   */
+  async getAccountBalance(
+    actor: Actor,
+    accountId: string,
+    asOfDate: Date,
+  ): Promise<{ accountId: string; code: string; name: string; type: AccountType; currency: string; balance: string }> {
+    assertPermission(actor, "journal:read");
+    return withTenant(actor.organizationId, async (tx) => {
+      const [account] = await tx
+        .select({ id: accounts.id, code: accounts.code, name: accounts.name, type: accounts.type })
+        .from(accounts)
+        .where(and(eq(accounts.id, accountId), eq(accounts.organizationId, actor.organizationId)));
+      if (!account) throw new AccountNotFoundError(accountId);
+      const [org] = await tx
+        .select({ baseCurrency: organizations.baseCurrency })
+        .from(organizations)
+        .where(eq(organizations.id, actor.organizationId));
+      const currency = org?.baseCurrency ?? "AUD";
+      const [sums] = await tx
+        .select({
+          debit: sql<string>`coalesce(sum(${journalLines.baseDebit}), 0)`,
+          credit: sql<string>`coalesce(sum(${journalLines.baseCredit}), 0)`,
+        })
+        .from(journalLines)
+        .innerJoin(journalEntries, eq(journalEntries.id, journalLines.journalEntryId))
+        .where(
+          and(
+            eq(journalEntries.organizationId, actor.organizationId),
+            eq(journalLines.accountId, accountId),
+            ne(journalEntries.status, "DRAFT"),
+            lte(journalEntries.postingDate, asOfDate),
+          ),
+        );
+      const debit = Money.of(sums?.debit ?? "0", currency);
+      const credit = Money.of(sums?.credit ?? "0", currency);
+      const balance = normalBalanceSide(account.type) === "DEBIT" ? debit.subtract(credit) : credit.subtract(debit);
+      return { accountId: account.id, code: account.code, name: account.name, type: account.type, currency, balance: balance.toString() };
+    });
+  },
+
   /**
    * Every account in the organization with its posted, as-of-date activity
    * summed in the base currency — the foundation for the Trial Balance

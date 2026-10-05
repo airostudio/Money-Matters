@@ -26,6 +26,33 @@ async function loadBankTransaction(tx: TenantDb, organizationId: string, bankTra
 }
 
 export const ReconciliationService = {
+  /**
+   * Counts only (no amounts, no descriptions): how many bank transactions on ACTIVE bank
+   * accounts are still UNMATCHED, and how many of those have no categorisation suggestion.
+   * One set-based query — used by the accountant practice dashboard (Phase 9 Slice 5), which
+   * calls it with the staff member's real role in the client. Gated on `bank_account:read`.
+   */
+  async getSummary(actor: Actor): Promise<{ unreconciled: number; uncategorised: number }> {
+    assertPermission(actor, "bank_account:read");
+    return withTenant(actor.organizationId, async (tx) => {
+      const [row] = await tx
+        .select({
+          unreconciled: sql<number>`count(*)::int`,
+          uncategorised: sql<number>`(count(*) filter (where ${bankTransactions.categorizedAccountId} is null))::int`,
+        })
+        .from(bankTransactions)
+        .innerJoin(bankAccounts, eq(bankAccounts.id, bankTransactions.bankAccountId))
+        .where(
+          and(
+            eq(bankTransactions.organizationId, actor.organizationId),
+            eq(bankTransactions.status, "UNMATCHED"),
+            eq(bankAccounts.isActive, true),
+          ),
+        );
+      return { unreconciled: Number(row?.unreconciled ?? 0), uncategorised: Number(row?.uncategorised ?? 0) };
+    });
+  },
+
   async listUnreconciled(actor: Actor, bankAccountId: string) {
     assertPermission(actor, "bank_transaction:reconcile");
     return withTenant(actor.organizationId, (tx) =>

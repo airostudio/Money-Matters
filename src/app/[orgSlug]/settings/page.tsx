@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { requireOrgAndActor } from "@/lib/session";
 import { OrganizationService } from "@/domain/organizations/organization-service";
 import { roleHasPermission } from "@/domain/permissions/roles";
@@ -81,6 +82,20 @@ export default async function SettingsPage({
           </div>
         </CardContent>
       </Card>
+
+      {canManageOrganization && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Accountant access</CardTitle>
+            <CardDescription>
+              Approve or revoke an accounting practice that wants to work on {org.name}&apos;s books, and see what to do to give its staff access.{" "}
+              <Link href={`/${org.slug}/settings/accountant`} className="text-primary underline">
+                Manage accountant access
+              </Link>
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>

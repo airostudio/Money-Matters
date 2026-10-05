@@ -85,3 +85,18 @@ When real object storage credentials exist:
   original document (e.g. to check a figure the AI got wrong), and losing
   the source image the moment it's uploaded would make every extraction
   unverifiable after the fact.
+
+## Addendum (Phase 9 Slice 5): two more users of the same store pattern
+
+The bytea store and its validation are now shared, not duplicated:
+
+- **Validation** moved to `src/domain/documents/document-validation.ts`
+  (`assertValidDocumentUpload`: supported MIME types, non-empty, 10 MB cap). The
+  receipt upload still exports its original names as aliases.
+- **A client's reply attachment** on an accountant's request uses the existing
+  `PostgresDocumentStorageProvider` (an `uploaded_receipts` row in the CLIENT's tenant).
+- **Workpaper evidence** belongs to the accounting PRACTICE, not to any client, so it must
+  not live in the client's tenant table (the client could read it, and it would be exposed or
+  lost if the client left). `PostgresPracticeEvidenceStorageProvider` implements the same
+  store/retrieve abstraction over the practice-scoped `workpaper_evidence` table, reached
+  through `withUserScope`. A future object-storage provider is the same additive swap for both.

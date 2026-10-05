@@ -23,6 +23,7 @@ import { monthKey, previousMonth } from "@/domain/close/period-ref";
 import { GroupService } from "@/domain/consolidation/group-service";
 import { ConsolidationService } from "@/domain/consolidation/consolidation-service";
 import { MixedCurrencyError } from "@/domain/consolidation/errors";
+import { practiceOverviewFacts, workpaperStatusFacts } from "@/domain/practice/assistant-views";
 import { consolidatedSummary } from "@/domain/consolidation/summary";
 import { FORECAST_HORIZONS, type CashForecast, type ForecastLine, type KnownForecastLine } from "@/domain/forecasting/types";
 
@@ -408,6 +409,62 @@ export function buildControllerTools(dimensions: DimensionWithValues[]): Control
             if (err instanceof MixedCurrencyError) return { ok: false, error: err.message };
             throw err;
           }
+        }),
+    },
+    {
+      name: "practice_overview",
+      description:
+        "Read-only overview of the user's ACCOUNTANT PRACTICE dashboard: per client, the saved snapshot of Books (month-end close progress), Reconciliation (unreconciled bank transactions), BAS/Tax (a deadline the practice typed in by hand), Payroll (draft pay runs) and Issues, worst first. " +
+        "Use for 'which clients need attention?', 'who is behind on reconciliation?'. " +
+        "Figures are SAVED SNAPSHOTS with their age — you cannot refresh them. It lists ONLY clients the user is a member of with an active practice link; every figure is limited by the user's own role in that client (e.g. payroll reads 'not visible to your role' without payroll access), and any client the user cannot read is left out and reported only as a count — repeat that notice and never guess at an excluded client. " +
+        "There is no BAS/GST preparation or lodgement in this system: never present a BAS figure or an official due date. You cannot change links, assignments, tasks or snapshots from here.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          practice: { type: "string", description: "The practice's name. Optional when the user belongs to exactly one." },
+          filter: { type: "string", enum: ["NEEDS_INTERVENTION", "ALL"], description: "Defaults to NEEDS_INTERVENTION." },
+          page: { type: "integer", minimum: 1, description: "Ten clients per page." },
+        },
+      },
+      argsSchema: z.object({ practice: z.string().min(1).max(200).optional(), filter: z.enum(["NEEDS_INTERVENTION", "ALL"]).optional(), page: z.number().int().min(1).max(100).optional() }),
+      permission: "financial_report:read",
+      execute: (actor, rawArgs) =>
+        guarded(async () => {
+          const args = z
+            .object({ practice: z.string().min(1).max(200).optional(), filter: z.enum(["NEEDS_INTERVENTION", "ALL"]).optional(), page: z.number().int().min(1).max(100).optional() })
+            .parse(rawArgs);
+          // The same gate as every report tool in the organization being chatted in; the per-CLIENT gates
+          // (the user's real role in each client) are applied inside the service, one client at a time.
+          assertPermission(actor, "financial_report:read");
+          const summary = await practiceOverviewFacts(actor.userId, { practice: args.practice, filter: args.filter, page: args.page });
+          return { ok: true, summary, citation: { tool: "practice_overview", description: "Practice dashboard (saved snapshots)", drillDownHref: undefined } };
+        }),
+    },
+    {
+      name: "workpaper_status",
+      description:
+        "Read-only status of the user's accountant-practice WORKPAPERS (balance-sheet account reconciliations): status, version, the snapshot ledger balance with its date, open review notes, and for up to three papers the computed reconciliation (schedule total, difference, proposed adjustments, who signed). " +
+        "Use for 'which workpapers are waiting for review?', 'is the bank reconciliation for Acme signed off?'. " +
+        "Only clients the user can currently read (real membership, active link, and report permissions in that client) are included; any others are reported only as a count — never guess at them. " +
+        "A workpaper is a point-in-time snapshot and proposed adjustments are notes that this system never posts. You cannot sign off, reopen, post or change anything.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          practice: { type: "string", description: "The practice's name. Optional when the user belongs to exactly one." },
+          client: { type: "string", description: "Part of a client's name." },
+          status: { type: "string", enum: ["DRAFT", "IN_REVIEW", "SIGNED_OFF"] },
+        },
+      },
+      argsSchema: z.object({ practice: z.string().min(1).max(200).optional(), client: z.string().min(1).max(200).optional(), status: z.enum(["DRAFT", "IN_REVIEW", "SIGNED_OFF"]).optional() }),
+      permission: "financial_report:read",
+      execute: (actor, rawArgs) =>
+        guarded(async () => {
+          const args = z
+            .object({ practice: z.string().min(1).max(200).optional(), client: z.string().min(1).max(200).optional(), status: z.enum(["DRAFT", "IN_REVIEW", "SIGNED_OFF"]).optional() })
+            .parse(rawArgs);
+          assertPermission(actor, "financial_report:read");
+          const summary = await workpaperStatusFacts(actor.userId, { practice: args.practice, client: args.client, status: args.status });
+          return { ok: true, summary, citation: { tool: "workpaper_status", description: "Practice workpapers" } };
         }),
     },
     {

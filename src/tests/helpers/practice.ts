@@ -116,3 +116,25 @@ export async function createPracticeWorld(options: { links?: boolean } = {}): Pr
     s1In: (key, role = "ACCOUNTANT") => ({ userId: s1.id, organizationId: clients[key].organizationId, role }),
   };
 }
+
+/**
+ * Creates one more client organization with the full handshake done (proposed by the partner,
+ * accepted by its owner, observed by the practice) and S1 a member with `s1Role` (pass null for
+ * "S1 is not a member"). Returns the client's world entry.
+ */
+export async function addLinkedClient(
+  w: PracticeWorld,
+  namePrefix: string,
+  opts: { s1Role?: MembershipRole | null; accept?: boolean } = {},
+): Promise<ClientWorld> {
+  const created = await createTestOrg(namePrefix, { seatLimit: 50 });
+  const org = (await db.select().from(organizations).where(eq(organizations.id, created.organizationId)))[0]!;
+  const client: ClientWorld = { key: "A", organizationId: org.id, name: org.name, slug: org.slug, owner: created.owner };
+  if (opts.s1Role !== null) await joinClient(client, w.s1, opts.s1Role ?? "ACCOUNTANT");
+  await ClientLinkService.propose(w.partnerActor, w.practiceId, client.slug);
+  if (opts.accept !== false) {
+    await acceptProposal(client, w.practiceId);
+    await ClientLinkService.verify(w.partnerActor, w.practiceId, [client.organizationId]);
+  }
+  return client;
+}

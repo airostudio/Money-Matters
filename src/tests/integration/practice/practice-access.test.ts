@@ -141,11 +141,6 @@ describe("Practices and staff — membership gate, roles and row-level security"
   });
 
   describe("a user outside the practice can neither read nor write any practice row — even calling withUserScope directly", () => {
-    const readers = [
-      ["practices", () => withUserScope("00000000-0000-0000-0000-000000000000", (tx) => tx.select().from(practices))],
-    ] as const;
-    void readers;
-
     it("reads nothing from any practice table", async () => {
       await ClientGroupService.create(w.partnerActor, w.practiceId, "Hospitality");
       const outsiderRead = await withUserScope(w.outsider.id, async (tx) => ({

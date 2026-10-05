@@ -2197,7 +2197,7 @@ session paper over this:**
   request/approval UI is a reasonable future addition), and any
   scheduled/automatic pay run (on-demand only, no job queue exists).
 
-## Phase 9 — Advanced Finance
+## Phase 9 — Advanced Finance — **complete** (Slices 1-5)
 
 ### Slice 1 — Budgeting & Budget vs. Actual (complete, scoped per this slice's brief)
 
@@ -2868,7 +2868,130 @@ the existing connection discipline (one connection at a time) is preserved.
   **comparison periods** on consolidated reports, and **sharing a group** with a
   second user (a group is private to its owner).
 
-**Remaining Phase 9 item:** accountant practice management and workpapers (§42/43).
+**Phase 9's last slice** — accountant practice management and workpapers (§42/43) — follows below.
+
+## Phase 9 Slice 5 — Accountant practice management and workpapers — complete (closes Phase 9)
+
+Master spec §42 (accountant/bookkeeper edition: practice dashboard, client groups,
+staff assignment, tasks, deadlines, workpapers, review notes, client queries,
+document requests, tax calendar, bulk actions), §43 (digital working papers) and
+§72 (Business vs Accountant mode on the same engine). Design detail:
+`docs/security.md` §13 (the practice scoping model, the consent handshake,
+revocation and retention, seats, the AI no-leak guarantee), `docs/accounting-engine.md`
+§17 (the workpaper reconciliation method), `docs/database.md` §2q, `docs/ai-agents.md`.
+
+**The central design decision: practice-internal data is isolated by a single-value
+predicate on the USER plus practice membership; client data is never reached through
+the practice.** A practice (accounting firm) has several staff, so the previous
+slice's `owner_user_id = app.current_user_id` cannot apply. Practice tables carry
+`practice_id`, and every policy is `EXISTS (SELECT 1 FROM practice_members pm WHERE
+pm.practice_id = <row>.practice_id AND pm.user_id = app.current_user_id AND pm.status
+= 'ACTIVE')` — one session variable, one membership check, no bypass, no
+SECURITY DEFINER, no multi-valued predicate. `practice_members` is the gate and is
+protected without recursion by a trivial own-row anchor table (`practice_partners`);
+a read-only mirror (`practice_roster`, kept equal by a cascading composite foreign
+key) is the colleague directory. The isolation audit classifies the 18 practice tables
+and fails the build log if a policy loses the membership check. A user outside the
+practice cannot read or write any practice row, even by calling `withUserScope`
+directly (tested table by table).
+
+**Reading a client's data goes through the client's own services, one client at a
+time, sequentially**, each inside `withTenant(clientOrgId)` with an `Actor` built
+from the staff member's **real membership role in that client** (`requireClientActor`:
+membership first, then the client's own consent record re-checked immediately before
+the read). A practice link grants nothing by itself; a platform admin gets nothing
+extra (there is no admin branch). The only client-tenant writes are explicit and
+permission-checked: the consent record, `client_requests` and informational audit notes.
+
+**Built**
+- **Practices and staff**: any registered user sets up a practice and becomes its
+  first PARTNER; roles PARTNER / MANAGER / STAFF; staff are existing users added by
+  email (same pattern as `addMemberByEmail`); a partner can only step down or leave
+  themselves (the anchor is own-row-only), a practice always keeps one partner; limits
+  (3 practices per user, 25 staff).
+- **Client links — a two-sided handshake.** The practice proposes by organization slug;
+  the authoritative consent record is `practice_client_consents` in the **client's own
+  tenant**; only the client's OWNER/ADMINISTRATOR (`organization:manage`) can accept,
+  decline or revoke, and may re-approve. **Revocation is immediate**: every read first
+  re-checks that row, so the next read after a revoke is refused, with no practice-side
+  action needed. The practice learns its working copy is stale when it next verifies
+  (dashboard load verifies the page's rows; "Check status" does too) and then blanks the
+  retained snapshot figures. **Retention**: practice-owned history (tasks, workpapers,
+  review notes, sign-offs, evidence) is kept, shown "as of" its snapshot date and clearly
+  marked; nothing new can be read. Proposal spam is bounded (generic error, 5 pending per
+  organization, 100 links per practice).
+- **Seats**: staff must be real members of each client, which uses that client's seat
+  (the two-seat limit from the platform-admin slice is untouched). When a client is full
+  the practice sees a specific message with the seat position ("2 of 2 seats used … the
+  platform administrator can raise the limit … not bypassed") instead of a cryptic failure.
+- **Dashboard** (`/practice`, paginated at 10): Client | Books | Reconciliation | BAS/Tax |
+  Payroll | Issues | Assigned to | Snapshot age, with traffic lights worst-first and a
+  needs-intervention filter. Indicators come from the existing engines — Books = the
+  month-end checklist's progress/blocking for the previous month (`CloseChecklistService`,
+  not re-derived), Reconciliation = counts from the new `ReconciliationService.getSummary`,
+  Payroll = `PayRunService.countDrafts` (only with `payrun:read`, else "not visible to
+  your role"), tax-lock = `PeriodCloseService.getTaxLockedThrough`. **BAS/Tax shows only
+  the deadline the practice typed in** and the client's tax-lock; there is no BAS/GST
+  feature in this codebase and none is fabricated.
+- **Connection budget** (production-incident lesson): the dashboard is read from
+  materialised `client_health_snapshots` (counts only), never recomputed across clients;
+  Refresh is per client or per page, strictly sequential (no `Promise.all` anywhere,
+  asserted structurally and by instrumentation: at most one scoped transaction is ever
+  open), bounded to 10 clients, with the snapshot age shown honestly ("as of 2 hours ago",
+  "stale" after 24 h). Every list is capped (page 10, bulk 10, 100 links, 25 staff).
+  Each viewer sees an indicator only if THEIR role in that client allows it — a snapshot
+  refreshed by a colleague with more permissions does not widen what you see.
+- **Client groups, staff assignment, bulk actions** (bulk-assign, apply group, create a task
+  per client, refresh — all bounded and sequential). Assignment grants no client access
+  and leaves an opaque note in the client's own audit log.
+- **Tasks, deadlines, tax calendar**: practice-owned `practice_tasks` (client optional,
+  priority, category, assignee); recurring deadline **rules the practice writes**
+  (frequency, period-end month, months after, due day) with on-demand, idempotent
+  generation of the next occurrences; starter templates are labelled editable suggestions
+  to verify at ato.gov.au — no due date is hardcoded as authoritative.
+- **Client queries and document requests** (`client_requests`, `client_request_messages` —
+  tenant tables with RLS in the client org): raised by practice staff with their real role
+  (`client_request:manage`), read/answered by the client (`client_request:read` /
+  `client_request:respond`) in a "Requests from your accountant" inbox, with attachments
+  through the receipt storage abstraction and its shared validation. In-app only — no email.
+- **Workpapers** (§43): balance-sheet account reconciliation. A labelled point-in-time
+  snapshot of the account balance ("per ledger as at <date>, pulled <timestamp> by <who>")
+  with an append-only pull history; a reconciliation schedule with the exact-decimal
+  difference (ledger − schedule); evidence held by the practice (bytea, same validation);
+  proposed adjustments recorded as notes, **never posted**; review notes (resolve, never
+  delete, text immutable); preparer then reviewer sign-off (reviewer ≠ preparer when the
+  practice has two or more staff; documented single-staff exception, flagged); immutable
+  once signed off (database-enforced) with reopen-with-reason starting a new version over an
+  append-only history; carry-forward (structure + recurring lines + comparative, never
+  evidence/sign-offs/notes); a one-query stale-snapshot warning on view. A test proves the
+  client's ledger (journal entries, lines, trial balance, audit ids) is byte-identical after
+  a full workpaper lifecycle.
+- **Business vs Accountant mode** (§72): a per-browser cookie toggle that relabels the
+  accounting terms (General Ledger / Journals / Trial Balance vs Accounts & reports / Manual
+  entries / Account balances) and shows the Practice entry points — presentation only; no
+  permission, data or calculation changes.
+- **AI (optional, read-only)**: Controller tools `practice_overview` and `workpaper_status`
+  (saved snapshots and the practice's own records; per-client real-role gates; unreachable or
+  revoked clients excluded as counts) and an optional workpaper commentary over
+  already-computed facts (omitted without an API key). No write tools; autonomy and
+  period-close exclusions unchanged and re-asserted.
+
+**Explicitly deferred (and why)**
+- **Automated BAS/GST preparation and ATO lodgement**: needs the later Phase 8 tax
+  features and ATO credentials; the calendar is user-entered.
+- **Email/SMS notifications** for requests and deadlines, and **scheduled/automatic snapshot
+  refresh**: no messaging infrastructure and no job queue.
+- **A client portal for non-members**: needs a different auth model (Phase 3's customer-portal
+  deferral applies); clients answer requests as ordinary organization members.
+- **Time-and-billing for the practice itself**, **workpaper kinds beyond balance-sheet account
+  reconciliation**, **cross-practice data sharing**, removing another partner (a partner can
+  only step down; adding a quorum rule is future work), per-practice customised dashboard
+  thresholds, and a practice-level audit-log page (the append-only log is written and tested;
+  there is no browse UI yet).
+
+**Phase 9 is complete.** Remaining on the roadmap: **Phase 8's later slices** (BAS/GST,
+STP lodgement, award interpretation and the other compliance features) and **Phase 10**
+(public API, webhooks, integration marketplace, advanced automation centre).
 
 ## Platform admin & seat limit — complete
 
@@ -2933,6 +3056,8 @@ an organization.
   (there is no org-facing audit-log page yet).
 
 ## Phase 10 — Platform (not started)
+
+(With Phase 9 complete, the remaining roadmap is Phase 8's later slices — BAS/GST, STP lodgement, awards — and this phase.)
 
 Public API, webhooks, integration marketplace, advanced automation centre.
 
