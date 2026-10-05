@@ -2832,6 +2832,18 @@ Groups are bounded at 10 entities.
   other-user isolation at service and database level; append-only history;
   sequential instrumentation; platform admin has no special access; AI no-leak).
 
+**Verification.** `npm run typecheck`, `npm run lint`, the full suite (1088 tests,
+up from 1003) and a production build pass. Smoke-tested for real (HTTP against
+`next start`, real NextAuth credentials login, the real server actions): one user
+in two organizations → the switcher lists both → create a group, add both
+entities, designate the intercompany loan on each side → the consolidated Balance
+Sheet balances with the 10,000 loan eliminated, drill-down links point at each
+entity's own pages, P&L and cash render → the user's role in one entity lowered to
+EMPLOYEE, then the membership removed → that entity drops out of the next view
+with "1 entity excluded — no access" (named only while the user still belongs to
+it), the loan is reported as "counterparty unavailable", and the entity's own
+pages 404. The Anthropic API itself is only exercised through a mocked SDK.
+
 **Dashboard widget — not built, on purpose.** A group headline is N entities ×
 several queries on N pooled connections; that does not belong on a home page
 that renders on every visit. Consolidated reporting is an on-demand page, and
