@@ -132,6 +132,7 @@ export const NAV_ITEMS: NavItem[] = [
       { label: "Chart of Accounts", href: "/accounting/chart-of-accounts", permission: "account:read" },
       { label: "Journals", href: "/accounting/journals", permission: "journal:read" },
       { label: "Trial Balance", href: "/accounting/trial-balance", permission: "journal:read" },
+      { label: "Month-End Close", href: "/accounting/close", permission: "close_checklist:read" },
       {
         label: "Profit & Loss",
         href: "/accounting/reports/profit-and-loss",

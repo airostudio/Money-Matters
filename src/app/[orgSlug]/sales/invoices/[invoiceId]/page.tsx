@@ -13,6 +13,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatusBadge } from "@/components/accounting/status-badge";
 import { MoneyDisplay } from "@/components/accounting/money-display";
 import { InvoiceLineEditor } from "@/components/sales/invoice-line-editor";
+import { PostAnywayForm } from "@/components/accounting/post-anyway";
 import {
   approveAndPostInvoiceAction,
   deleteDraftInvoiceAction,
@@ -26,7 +27,7 @@ export default async function InvoiceDetailPage({
   searchParams,
 }: {
   params: { orgSlug: string; invoiceId: string };
-  searchParams: { error?: string };
+  searchParams: { error?: string; lock?: string };
 }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
   const invoice = await InvoiceService.get(actor, params.invoiceId);
@@ -68,6 +69,7 @@ export default async function InvoiceDetailPage({
         {searchParams.error && (
           <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">{searchParams.error}</p>
         )}
+        {searchParams.lock === "override" && canPost && <PostAnywayForm action={boundPost} />}
 
         <Card>
           <CardHeader>

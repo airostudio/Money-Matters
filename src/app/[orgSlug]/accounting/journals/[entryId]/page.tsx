@@ -10,12 +10,15 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatusBadge } from "@/components/accounting/status-badge";
 import { MoneyDisplay } from "@/components/accounting/money-display";
+import { PostAnywayForm } from "@/components/accounting/post-anyway";
 import { deleteDraftAction, postDraftAction, reverseEntryAction } from "../actions";
 
 export default async function JournalEntryDetailPage({
   params,
+  searchParams,
 }: {
   params: { orgSlug: string; entryId: string };
+  searchParams: { error?: string; lock?: string };
 }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
   const entry = await LedgerService.getJournalEntry(actor, params.entryId);
@@ -102,6 +105,19 @@ export default async function JournalEntryDetailPage({
           )}
         </div>
       </div>
+
+      {searchParams.error && (
+        <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">{searchParams.error}</p>
+      )}
+      {entry.status === "DRAFT" && searchParams.lock === "override" && canPost && (
+        <PostAnywayForm action={boundPostDraft} />
+      )}
+      {entry.status === "POSTED" && entry.lockOverrideLevel && (
+        <p className="rounded-md bg-warning/10 px-3 py-2 text-sm text-warning">
+          Posted into a {entry.lockOverrideLevel.toLowerCase().replace("_", " ")} period under an authorised override
+          {entry.lockOverrideReason ? <>: &ldquo;{entry.lockOverrideReason}&rdquo;</> : "."}
+        </p>
+      )}
 
       <Card>
         <CardContent className="p-0">

@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import { requireOrgAndActor } from "@/lib/session";
+import { lockFailureQuery, postOptionsFromForm } from "@/lib/lock-feedback";
 import { ContactService } from "@/domain/contacts/contact-service";
 import { BillService } from "@/domain/purchases/bill-service";
 import { SupplierPaymentAllocationService } from "@/domain/purchases/supplier-payment-service";
@@ -140,12 +141,14 @@ export async function deleteDraftBillAction(orgSlug: string, billId: string): Pr
   redirect(`/${orgSlug}/purchases/bills`);
 }
 
-export async function approveAndPostBillAction(orgSlug: string, billId: string): Promise<void> {
+export async function approveAndPostBillAction(orgSlug: string, billId: string, formData?: FormData): Promise<void> {
   const { actor } = await requireOrgAndActor(orgSlug);
   const returnPath = `/${orgSlug}/purchases/bills/${billId}`;
   try {
-    await BillService.approveAndPost(actor, billId);
+    await BillService.approveAndPost(actor, billId, postOptionsFromForm(formData));
   } catch (error) {
+    const lockQuery = lockFailureQuery(error);
+    if (lockQuery) redirect(`${returnPath}?${lockQuery}`);
     const message = error instanceof Error ? error.message : "Failed to post bill.";
     redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
   }
@@ -452,12 +455,14 @@ export async function createSupplierCreditAction(orgSlug: string, formData: Form
   redirect(`/${orgSlug}/purchases/supplier-credits/${created.id}`);
 }
 
-export async function approveAndPostCreditAction(orgSlug: string, creditId: string): Promise<void> {
+export async function approveAndPostCreditAction(orgSlug: string, creditId: string, formData?: FormData): Promise<void> {
   const { actor } = await requireOrgAndActor(orgSlug);
   const returnPath = `/${orgSlug}/purchases/supplier-credits/${creditId}`;
   try {
-    await SupplierCreditService.approveAndPost(actor, creditId);
+    await SupplierCreditService.approveAndPost(actor, creditId, postOptionsFromForm(formData));
   } catch (error) {
+    const lockQuery = lockFailureQuery(error);
+    if (lockQuery) redirect(`${returnPath}?${lockQuery}`);
     const message = error instanceof Error ? error.message : "Failed to post credit note.";
     redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
   }

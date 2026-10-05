@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import { requireOrgAndActor } from "@/lib/session";
+import { lockFailureQuery, postOptionsFromForm } from "@/lib/lock-feedback";
 import { ContactService } from "@/domain/contacts/contact-service";
 import { InvoiceService } from "@/domain/sales/invoice-service";
 import { PaymentAllocationService } from "@/domain/sales/payment-service";
@@ -135,12 +136,14 @@ export async function deleteDraftInvoiceAction(orgSlug: string, invoiceId: strin
   redirect(`/${orgSlug}/sales/invoices`);
 }
 
-export async function approveAndPostInvoiceAction(orgSlug: string, invoiceId: string): Promise<void> {
+export async function approveAndPostInvoiceAction(orgSlug: string, invoiceId: string, formData?: FormData): Promise<void> {
   const { actor } = await requireOrgAndActor(orgSlug);
   const returnPath = `/${orgSlug}/sales/invoices/${invoiceId}`;
   try {
-    await InvoiceService.approveAndPost(actor, invoiceId);
+    await InvoiceService.approveAndPost(actor, invoiceId, postOptionsFromForm(formData));
   } catch (error) {
+    const lockQuery = lockFailureQuery(error);
+    if (lockQuery) redirect(`${returnPath}?${lockQuery}`);
     const message = error instanceof Error ? error.message : "Failed to post invoice.";
     redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
   }
