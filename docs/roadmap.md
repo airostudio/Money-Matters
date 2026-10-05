@@ -2594,6 +2594,68 @@ labels.
   one scenario's three cases against the baseline; a cross-scenario compare
   is a reasonable follow-up.
 
+## Platform admin & seat limit — complete
+
+Built to the owner's brief: "an admin section accessible from
+typhoon.tall69@gmail.com only, with access to upgrade users, financials and
+reports; two users can share the same account; more will be a paid add-on
+later." Interpreted (owner-confirmed): *financials and reports* = **platform
+business metrics only** (never any customer's books); *upgrade users* = grant an
+organization extra seats / change its plan tier **and** change a user's role in
+an organization.
+
+**Built**
+- **Admin gate** — `PLATFORM_ADMIN_EMAILS` env var (fail closed, normalised
+  comparison, DB-sourced email), `requirePlatformAdmin()` on every page, route
+  handler and server action, 404 for everyone else, service-layer re-check,
+  admin link only server-rendered for admins. See `docs/security.md` §10.
+- **Case-insensitive email uniqueness** (CHECK + `lower(email)` unique index,
+  normalise-on-write) closing the look-alike-account hole in an app with no
+  email verification.
+- **Dashboard**: users (active/suspended), organizations, seats used vs
+  allowed, orgs at/over limit, plan-tier breakdown, signups per week/month,
+  recent signups, recently suspended — all SQL aggregates over the three
+  non-tenant tables.
+- **Directory**: searchable, paginated organizations and users; org and user
+  detail pages (members, roles, join dates, seats, plan, recent admin actions);
+  an "at/over seat limit" filter; CSV export of directory data (formula-
+  injection-safe, itself audited).
+- **Upgrade controls**: set an organization's seat limit and plan tier; change a
+  member's role; remove a member — through the same shared membership rules as
+  an organization's own settings (last-OWNER protection, role validation).
+- **Suspend / reactivate** a user; sign-in refused and existing JWT sessions cut
+  off on the next request; an admin can't suspend themselves.
+- **Admin audit trail**: append-only `platform_admin_audit_logs` (mm_app
+  INSERT/SELECT only) + a matching entry in the affected organization's own
+  audit log; an admin audit page with action/organization/date filters.
+- **Seat limit (two people share an account)**: `organizations.seat_limit`
+  (default 2), grandfathering of existing >2-member orgs, race-safe service-layer
+  enforcement (row lock), a typed `SeatLimitReachedError` whose message explains
+  the paid add-on and who to contact, and a settings page showing
+  "Seats: N of M used" with the invite control disabled when full. The org's own
+  settings also gained last-OWNER protection, role validation, and
+  re-activation of a previously removed member (previously a re-add hit the
+  unique index).
+- Reserved organization slugs (`admin`, `app`, `api`, `login`, `register`) so a
+  customer can't claim a slug that shadows a real route.
+
+**Deferred (deliberately)**
+- **Billing / paid extra-seat add-on**, pricing, Stripe, invoices: only a
+  `plan_tier` label and an admin-set `seat_limit` exist.
+- **Self-service seat purchase** by an organization owner (the limit message
+  tells them to contact the platform admin; no upgrade button is offered).
+- **Impersonation / "log in as user"**: explicitly out of scope.
+- **Email verification** — **recommended next, and the most important
+  follow-up**: a single-email gate on an unverified-email credentials login is
+  the weakest link in the platform's security (see `docs/security.md` §10.2).
+- **MFA / passkeys for the admin account**, and login rate limiting.
+- Pending-invitation seats (there is no invitation concept yet; if invites are
+  added they must count toward seats).
+- Per-organization suspension (only user-level suspension exists), bulk
+  actions, and emailing affected users.
+- Notifying customers in-app of platform changes beyond the org audit-log entry
+  (there is no org-facing audit-log page yet).
+
 ## Phase 10 — Platform (not started)
 
 Public API, webhooks, integration marketplace, advanced automation centre.

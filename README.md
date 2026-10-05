@@ -200,6 +200,7 @@ read Production-scoped variables):
 | `DIRECT_DATABASE_URL` | The Supabase **Session pooler** connection string (admin role). Migrations use it. |
 | `MM_APP_DB_PASSWORD` | Any password you choose for the restricted `mm_app` role. Alphanumeric avoids all URL-encoding questions. |
 | `NEXTAUTH_SECRET` | `openssl rand -base64 32`. Keep it stable — changing it invalidates every session. |
+| `PLATFORM_ADMIN_EMAILS` | Comma-separated emails allowed into the platform admin section (`/admin`) — for this deployment `typhoon.tall69@gmail.com`. Compared case-insensitively. **Unset or empty means nobody is an admin.** Register that account yourself first: there is no email verification (see `docs/security.md` §10). |
 
 Leave `DATABASE_URL` **unset**. The application's connection is derived from
 `MM_APP_DB_PASSWORD` plus the host and database in `DIRECT_DATABASE_URL`, so
@@ -332,3 +333,14 @@ application code forgets a filter — see
 - [`docs/ai-agents.md`](docs/ai-agents.md) — the AI layer's architecture: the AI Financial Controller foundation (Phase 6 Slice 1), the autonomy-level gate, prepare/confirm write tools, and specialist-agent modes (Phase 6 Slice 2), and the full 0-4 autonomy dial with whitelisted auto-execution, undo, and an emergency stop (Phase 6 Slice 3). Payroll/Tax specialist agents are not yet built — see that doc and `docs/roadmap.md` for why
 - [`docs/roadmap.md`](docs/roadmap.md) — phase-by-phase status
 - [`docs/decisions/`](docs/decisions/) — ADRs for the non-obvious technical calls
+
+## Platform admin and seat limit
+
+- `/admin` (platform dashboard, organization/user directory, seat-limit and
+  plan-tier controls, member role changes, user suspension, admin audit log)
+  is visible only to the email(s) in `PLATFORM_ADMIN_EMAILS`; everyone else
+  gets a 404. It reads platform-level tables only and never any customer's
+  books. Details: `docs/security.md` §10, `docs/roadmap.md`.
+- Each account (organization) can currently be shared by **2 people** (its
+  `seat_limit`); more will be a paid add-on later. A platform admin can raise
+  an organization's limit from `/admin/organizations/<id>`.

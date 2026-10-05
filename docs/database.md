@@ -30,9 +30,11 @@ every future migration must follow. See
 ### Identity & tenancy
 - `User` — authentication identity (email, hashed password for the
   Credentials provider; `passwordHash` nullable to allow future SSO-only
-  users).
+  users). `email` is stored normalised (trim + lowercase) and is unique
+  case-insensitively (see §2n); `disabledAt` is set when a platform admin
+  suspends the account.
 - `Organization` — a tenant. `slug`, `name`, `baseCurrency`, `country`,
-  `industry`.
+  `industry`, `seatLimit` (default 2) and `planTier` (see §2n).
 - `OrganizationMembership` — join of `User`×`Organization` with a
   `MembershipRole`. A user can belong to many organizations with different
   roles in each (master spec §30, §46).
@@ -640,6 +642,40 @@ Two small org-scoped tables, both with RLS enabled + FORCEd + a policy + an
   the documented default of zero, so no row is seeded for existing orgs. Kept
   as its own table rather than a column on `organizations` so forecasting stays
   additive and never widens the core org row every query reads.
+
+## 2n. Platform admin & seat limit (migration `0035`)
+
+New/changed columns (all on non-tenant tables — no RLS, granted to `mm_app`
+directly, see `drizzle/0001_row_level_security.sql`):
+
+- `users.disabled_at timestamptz null` — suspension marker.
+- `users`: `CHECK (email = lower(btrim(email)))` (`users_email_normalised`) and
+  a unique index on `lower(email)` (`users_email_lower_unique`), alongside the
+  original `users_email_unique`. The migration aborts, naming them, if existing
+  rows collide case-insensitively (never merges silently); otherwise it
+  normalises mixed-case rows in place.
+- `organizations.seat_limit integer not null default 2` (`CHECK >= 1`) — max
+  **active** memberships. **Grandfathering:** in the same migration every
+  organization that already had more than 2 active members has its
+  `seat_limit` set to its current active-member count, so nobody is locked out;
+  such an org can't grow until a platform admin raises the limit. New orgs get 2.
+- `organizations.plan_tier plan_tier not null default 'STANDARD'` — enum
+  `STANDARD | EXTENDED | COMPLIMENTARY`. A label only: no billing, pricing or
+  entitlement logic hangs off it yet (`EXTENDED` is the slot a future paid
+  extra-seats add-on will occupy).
+
+New table `platform_admin_audit_logs` (platform-level, append-only): `id`,
+`admin_user_id`, `admin_email` (snapshot), `action`, `target_type`, `target_id`,
+`target_organization` (uuid, **no FK** so the row outlives anything it
+describes, and deliberately *not* named `organization_id` so the
+tenant-isolation audit doesn't treat it as a tenant table), `before`, `after`,
+`metadata`, `created_at`. `mm_app` has `SELECT, INSERT` only. No RLS (it is not
+tenant data; access is only via the platform-admin gate).
+
+A "seat" is one `organization_memberships` row with `is_active = true`.
+Removing a member sets `is_active = false` (frees the seat); re-adding the same
+user re-activates that row (the `(organization_id, user_id)` unique index means
+a second row can't be inserted).
 
 ## 3. Row-Level Security
 

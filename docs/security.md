@@ -206,3 +206,159 @@ same sensitivity as a password throughout this codebase:
   `docs/roadmap.md`'s Phase 8 Slice 1 entry), so these fields carry no
   transmission risk beyond their storage in this database, which the
   controls above address.
+
+## 10. Platform admin section and seat limit
+
+The platform admin section (`/admin`) is the operator's console: platform
+business metrics, an organization/user directory, seat-limit/plan-tier and
+member-role controls, user suspension, and an admin audit log. It is **not** a
+back door into customer books — see the boundary below.
+
+### 10.1 The identity gate
+
+- **Source of truth**: the server-side environment variable
+  `PLATFORM_ADMIN_EMAILS` (comma-separated). It is never hardcoded in source,
+  never sent to the client, and not part of the session payload. For this
+  deployment it is `typhoon.tall69@gmail.com`.
+- **Fails closed**: unset, empty, whitespace-only or commas-only means *nobody*
+  is a platform admin (`parsePlatformAdminEmails` returns an empty set; the
+  gate and every service refuse).
+- **Normalised comparison**: both sides go through `normalizeEmail` (trim +
+  lowercase), the same function registration, sign-in and add-member use.
+- **The email compared is the database's, not the token's**: the JWT only
+  carries the user id. `getCurrentUser()` re-reads the user row on each request
+  (see 10.3), so a forged/stale token claim cannot supply an admin email.
+- **One gate, used everywhere**: `requirePlatformAdmin()`
+  (`src/lib/platform-admin.ts`) is called by the admin layout, **every** admin
+  page, the CSV export route handler and **every** server action — server
+  actions are directly invocable, so the layout alone is not a control. A
+  structural test asserts every `page|route|actions` file under `src/app/admin`
+  references it. Non-admins (signed-in ordinary users, suspended admins and
+  signed-out visitors) get `notFound()` — a **404**, never a 403 or a
+  redirect — so the section's existence isn't revealed. (`src/middleware.ts`
+  deliberately lets `/admin` through so a signed-out visitor sees a 404, not a
+  redirect to `/login`; it performs no authorisation itself.)
+- **Defence in depth**: every `PlatformAdminService` / `MetricsService` /
+  `DirectoryService` / `PlatformAuditService` / `ExportService` method takes the
+  caller's user id and re-verifies it against the database
+  (`verifyPlatformAdmin`: active user, stored email in the list) before doing
+  anything, so the domain layer refuses a non-admin even if a caller forgot the
+  page-level gate. Tests invoke every service method and every server action as
+  an ordinary user and as a signed-out visitor and assert refusal and no change.
+- **The admin link** is rendered only by a server component
+  (`isPlatformAdminUser`) and passed to the user menu as a boolean; for everyone
+  else the link is simply absent from the HTML. Nothing about admin status is
+  in the JWT or session.
+- **A platform admin is not a tenant member.** Being an admin grants no
+  organization membership, no role in any organization, and no tenant data
+  access whatsoever. (They can still belong to organizations as an ordinary
+  user, with ordinary roles.)
+
+### 10.2 The no-email-verification caveat and the case-variant mitigation
+
+This app has **no email-verification step**: anyone can register any
+address. For a single-email gate that is the crux. What was found: registration
+already lowercased the email before checking/inserting, but the database's
+`users_email_unique` index was a plain **case-sensitive** index, and nothing
+stopped other write paths (a seed script, direct SQL, a future code path) from
+storing a mixed-case address — so `Typhoon.Tall69@gmail.com` could in principle
+have coexisted with `typhoon.tall69@gmail.com`. Also `addMemberByEmail` looked
+users up with the raw, un-normalised string.
+
+Fix (migration `0035_platform_admin_and_seat_limit.sql`, `UserService`):
+
+- Emails are normalised on write in `UserService.register`, and
+  `addMemberByEmail` / `verifyCredentials` normalise on lookup.
+- The database enforces it: `CHECK (email = lower(btrim(email)))`
+  (`users_email_normalised`) **and** a unique index on `lower(email)`
+  (`users_email_lower_unique`). A second account differing only by case/whitespace
+  is impossible, including via direct SQL; a unique-violation race between two
+  simultaneous registrations surfaces as the normal "already registered" error.
+- The migration first checks for existing case-duplicates and **aborts naming
+  them** rather than merging or deleting anything; it then normalises
+  mixed-case rows in place. (The local development and test databases had none; check production before deploying.)
+
+**Residual risk (be honest about it):** because there is no email
+verification, the first person to register `typhoon.tall69@gmail.com` owns that
+account and, with `PLATFORM_ADMIN_EMAILS` set to it, is the platform admin. The
+real owner must therefore register that address **before** the variable is set
+in production (or immediately after, checking the user directory shows exactly
+one such account). There is also no MFA: the admin account is protected only by
+its password (bcrypt, no rate limiting beyond the platform's). **Recommended
+follow-ups, in priority order: (1) email verification, at minimum for the
+platform admin address; (2) MFA/passkey for the admin account; (3) login rate
+limiting.** Until then a single email on an unverified credentials login is the
+weakest link in the platform's security.
+
+### 10.3 Suspended users and session cut-off
+
+`users.disabled_at` marks a suspended user. Two mechanisms:
+
+1. **Sign-in is refused** (`UserService.verifyCredentials` returns `null`, the
+   same result as a wrong password — no account-state oracle).
+2. **Already-issued sessions stop working.** NextAuth JWT sessions are
+   self-contained (docs/decisions/0002-auth-strategy.md), so blocking sign-in
+   alone would leave an existing token valid until it expires. Instead
+   `getCurrentUser()` (`src/lib/session.ts`) — which every page, layout, server
+   action, `requireOrgAndActor`, `requireActor`, `getActorForOrganization` and
+   the admin gate go through — does one primary-key lookup of the user row
+   (`UserService.getActiveIdentity`) per request and returns `null` for a
+   suspended or deleted user. It is wrapped in React's per-request `cache`, so a
+   layout and its page cost one query, not two, and it is a single sequential
+   query (no fan-out — the Supabase pooler lesson in `src/db/client.ts`).
+   **Latency: the user's very next request** (not "eventually"/on token expiry).
+   Limitation: `src/middleware.ts` runs on the edge and only checks that a token
+   exists; a suspended user with a stale token can therefore still *load* a
+   route's shell, but every data/auth lookup returns "not signed in" and the
+   layouts redirect to `/login`. No data is served.
+3. An admin cannot suspend themselves (enforced in the service, not just hidden
+   in the UI). Suspending an admin also revokes their admin access immediately.
+
+### 10.4 The strict non-tenant boundary
+
+The admin section reads and writes **only** `users`, `organizations`,
+`organization_memberships` and its own `platform_admin_audit_logs`. It never
+reads a tenant-scoped table (invoices, journals, accounts, employees, payroll,
+bank data, ...) for any purpose, including metrics; the only tenant table it
+ever *writes* is the affected organization's own `audit_logs`, through
+`AuditService.recordPlatformAction` inside `withTenant(org.id)`. It never uses a
+privileged/owner connection (the app only ever connects as `mm_app`) and there is
+**no impersonation / "log in as user" feature**. Enforced structurally by
+`src/tests/unit/platform-admin/boundary.test.ts`: admin modules may import only
+the allow-listed non-tenant schema symbols, may not name any
+`organization_id`-bearing table (ts or raw SQL), may only import allow-listed
+domain modules, and may not open their own DB connection.
+
+The admin domain code is **not** AI-accessible: no Financial Controller tool
+references it, a test asserts the tool registry (read and write tools) contains
+nothing admin-related, and another asserts no `ai-controller` module imports
+`platform-admin`.
+
+### 10.5 Admin audit trail
+
+Every admin write (plan/seat-limit change, role change, member removal,
+suspend/reactivate, and even a directory CSV export) writes a row to
+`platform_admin_audit_logs` (admin user id **and email snapshot**, action,
+target type/id, target organization, before/after, metadata) in the **same
+transaction** as the change. The table has no `organization_id` column (it is a
+platform table, deliberately outside the tenant-isolation audit) and `mm_app`
+holds `SELECT, INSERT` only — `UPDATE`, `DELETE` and `TRUNCATE` are denied at the
+database, verified in a test using the real restricted role. Organization-
+affecting actions additionally write an entry to that organization's own
+`audit_logs` (actor type `SYSTEM`, no user id, so customers see "the platform"
+rather than the admin's identity; `metadata.platformAdmin = true` and the
+matching `platformAuditId`) so customers can see their seat limit, a role or a
+membership was changed by the platform. Suspension is user-level (a user spans
+organizations), so it is recorded in the platform log only.
+
+### 10.6 Seat limit
+
+`organizations.seat_limit` (default 2) caps **active** memberships — a seat is
+one active `organization_memberships` row; there is no invitation concept (a
+member can only be attached by an existing user's email), so there are no
+pending invites to count. Enforcement is in the service layer
+(`src/domain/organizations/membership-rules.ts`, used by both the org's own
+settings and the admin section) under `SELECT … FOR UPDATE` on the organization
+row, so simultaneous adds cannot overshoot (tested with a deterministic
+lock-hold test plus a parallel-adds test). The same locked section protects the
+last OWNER from being demoted/removed by two concurrent requests.
