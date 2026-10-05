@@ -1,5 +1,6 @@
 "use server";
 
+import { rethrowPermissionDenied } from "@/lib/action-errors";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
@@ -35,30 +36,34 @@ export async function createBankAccountAction(
   onErrorPath?: string,
   onSuccessPath?: string,
 ): Promise<void> {
-  const { actor, org } = await requireOrgAndActor(orgSlug);
-  const errorPath = onErrorPath ?? `/${orgSlug}/money/new`;
-  const successPath = onSuccessPath ?? `/${orgSlug}/money`;
-
-  const parsed = CreateBankAccountSchema.safeParse({
-    name: formData.get("name"),
-    glAccountId: formData.get("glAccountId"),
-    currency: formData.get("currency") || org.baseCurrency,
-    institutionName: formData.get("institutionName") || undefined,
-    accountNumberLast4: formData.get("accountNumberLast4") || undefined,
-  });
-  if (!parsed.success) {
-    redirectWithError(errorPath, new Error(parsed.error.issues[0]?.message ?? "Invalid input."));
-  }
-
   try {
-    await BankAccountService.create(actor, parsed.data);
-  } catch (error) {
-    redirectWithError(errorPath, error);
-  }
+    const { actor, org } = await requireOrgAndActor(orgSlug);
+    const errorPath = onErrorPath ?? `/${orgSlug}/money/new`;
+    const successPath = onSuccessPath ?? `/${orgSlug}/money`;
 
-  revalidatePath(`/${orgSlug}/money`);
-  revalidatePath(`/${orgSlug}`);
-  redirect(successPath);
+    const parsed = CreateBankAccountSchema.safeParse({
+      name: formData.get("name"),
+      glAccountId: formData.get("glAccountId"),
+      currency: formData.get("currency") || org.baseCurrency,
+      institutionName: formData.get("institutionName") || undefined,
+      accountNumberLast4: formData.get("accountNumberLast4") || undefined,
+    });
+    if (!parsed.success) {
+      redirectWithError(errorPath, new Error(parsed.error.issues[0]?.message ?? "Invalid input."));
+    }
+
+    try {
+      await BankAccountService.create(actor, parsed.data);
+    } catch (error) {
+      redirectWithError(errorPath, error);
+    }
+
+    revalidatePath(`/${orgSlug}/money`);
+    revalidatePath(`/${orgSlug}`);
+    redirect(successPath);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }
 
 const FORMAT_BY_EXTENSION: Record<string, (typeof bankImportFormatEnum.enumValues)[number]> = {
@@ -73,48 +78,52 @@ export async function importStatementAction(
   bankAccountId: string,
   formData: FormData,
 ): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  const returnPath = `/${orgSlug}/money/${bankAccountId}`;
-
-  const file = formData.get("file");
-  if (!(file instanceof File) || file.size === 0) {
-    redirectWithError(`${returnPath}/import`, new Error("Choose a statement file to import."));
-  }
-
-  const requestedFormat = formData.get("format");
-  const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
-  const format =
-    (requestedFormat && bankImportFormatEnum.enumValues.includes(requestedFormat as never)
-      ? (requestedFormat as (typeof bankImportFormatEnum.enumValues)[number])
-      : FORMAT_BY_EXTENSION[extension]) ?? null;
-
-  if (!format) {
-    redirectWithError(
-      `${returnPath}/import`,
-      new Error("Couldn't tell the file format from its extension — choose CSV, OFX, or QIF explicitly."),
-    );
-    return;
-  }
-
-  const text = await file.text();
-
-  let result;
   try {
-    result = await BankImportService.importStatement(actor, {
-      bankAccountId,
-      format,
-      fileName: file.name,
-      text,
-    });
-  } catch (error) {
-    redirectWithError(`${returnPath}/import`, error);
-  }
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const returnPath = `/${orgSlug}/money/${bankAccountId}`;
 
-  revalidatePath(returnPath);
-  redirect(
-    `${returnPath}?imported=${result.importedRowCount}&duplicates=${result.duplicateRowCount}` +
-      (result.warnings.length > 0 ? `&warnings=${encodeURIComponent(result.warnings.join("; "))}` : ""),
-  );
+    const file = formData.get("file");
+    if (!(file instanceof File) || file.size === 0) {
+      redirectWithError(`${returnPath}/import`, new Error("Choose a statement file to import."));
+    }
+
+    const requestedFormat = formData.get("format");
+    const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+    const format =
+      (requestedFormat && bankImportFormatEnum.enumValues.includes(requestedFormat as never)
+        ? (requestedFormat as (typeof bankImportFormatEnum.enumValues)[number])
+        : FORMAT_BY_EXTENSION[extension]) ?? null;
+
+    if (!format) {
+      redirectWithError(
+        `${returnPath}/import`,
+        new Error("Couldn't tell the file format from its extension — choose CSV, OFX, or QIF explicitly."),
+      );
+      return;
+    }
+
+    const text = await file.text();
+
+    let result;
+    try {
+      result = await BankImportService.importStatement(actor, {
+        bankAccountId,
+        format,
+        fileName: file.name,
+        text,
+      });
+    } catch (error) {
+      redirectWithError(`${returnPath}/import`, error);
+    }
+
+    revalidatePath(returnPath);
+    redirect(
+      `${returnPath}?imported=${result.importedRowCount}&duplicates=${result.duplicateRowCount}` +
+        (result.warnings.length > 0 ? `&warnings=${encodeURIComponent(result.warnings.join("; "))}` : ""),
+    );
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }
 
 export async function createJournalFromTransactionAction(
@@ -123,25 +132,29 @@ export async function createJournalFromTransactionAction(
   bankTransactionId: string,
   formData: FormData,
 ): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  const returnPath = `/${orgSlug}/money/${bankAccountId}`;
-
-  const categorizedAccountId = formData.get("categorizedAccountId");
-  if (typeof categorizedAccountId !== "string" || categorizedAccountId.length === 0) {
-    redirectWithError(returnPath, new Error("Choose an account to categorize this transaction to."));
-    return;
-  }
-
   try {
-    await ReconciliationService.createJournalFromTransaction(actor, bankTransactionId, {
-      categorizedAccountId,
-    });
-  } catch (error) {
-    redirectWithError(returnPath, error);
-  }
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const returnPath = `/${orgSlug}/money/${bankAccountId}`;
 
-  revalidatePath(returnPath);
-  redirect(returnPath);
+    const categorizedAccountId = formData.get("categorizedAccountId");
+    if (typeof categorizedAccountId !== "string" || categorizedAccountId.length === 0) {
+      redirectWithError(returnPath, new Error("Choose an account to categorize this transaction to."));
+      return;
+    }
+
+    try {
+      await ReconciliationService.createJournalFromTransaction(actor, bankTransactionId, {
+        categorizedAccountId,
+      });
+    } catch (error) {
+      redirectWithError(returnPath, error);
+    }
+
+    revalidatePath(returnPath);
+    redirect(returnPath);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }
 
 export async function confirmMatchAction(
@@ -150,9 +163,13 @@ export async function confirmMatchAction(
   bankTransactionId: string,
   journalLineId: string,
 ): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  await ReconciliationService.confirmMatch(actor, bankTransactionId, journalLineId);
-  revalidatePath(`/${orgSlug}/money/${bankAccountId}`);
+  try {
+    const { actor } = await requireOrgAndActor(orgSlug);
+    await ReconciliationService.confirmMatch(actor, bankTransactionId, journalLineId);
+    revalidatePath(`/${orgSlug}/money/${bankAccountId}`);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }
 
 export async function excludeTransactionAction(
@@ -160,9 +177,13 @@ export async function excludeTransactionAction(
   bankAccountId: string,
   bankTransactionId: string,
 ): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  await ReconciliationService.exclude(actor, bankTransactionId);
-  revalidatePath(`/${orgSlug}/money/${bankAccountId}`);
+  try {
+    const { actor } = await requireOrgAndActor(orgSlug);
+    await ReconciliationService.exclude(actor, bankTransactionId);
+    revalidatePath(`/${orgSlug}/money/${bankAccountId}`);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }
 
 const CreateBankRuleSchema = z.object({
@@ -172,30 +193,34 @@ const CreateBankRuleSchema = z.object({
 });
 
 export async function createBankRuleAction(orgSlug: string, formData: FormData): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-
-  const parsed = CreateBankRuleSchema.safeParse({
-    name: formData.get("name"),
-    descriptionContains: formData.get("descriptionContains"),
-    categorizedAccountId: formData.get("categorizedAccountId"),
-  });
-  if (!parsed.success) {
-    redirectWithError(`/${orgSlug}/money/rules/new`, new Error(parsed.error.issues[0]?.message ?? "Invalid input."));
-    return;
-  }
-
   try {
-    await BankRuleService.create(actor, {
-      name: parsed.data.name,
-      conditions: [{ field: "description", operator: "CONTAINS", value: parsed.data.descriptionContains }],
-      actions: { categorizedAccountId: parsed.data.categorizedAccountId },
-    });
-  } catch (error) {
-    redirectWithError(`/${orgSlug}/money/rules/new`, error);
-  }
+    const { actor } = await requireOrgAndActor(orgSlug);
 
-  revalidatePath(`/${orgSlug}/money/rules`);
-  redirect(`/${orgSlug}/money/rules`);
+    const parsed = CreateBankRuleSchema.safeParse({
+      name: formData.get("name"),
+      descriptionContains: formData.get("descriptionContains"),
+      categorizedAccountId: formData.get("categorizedAccountId"),
+    });
+    if (!parsed.success) {
+      redirectWithError(`/${orgSlug}/money/rules/new`, new Error(parsed.error.issues[0]?.message ?? "Invalid input."));
+      return;
+    }
+
+    try {
+      await BankRuleService.create(actor, {
+        name: parsed.data.name,
+        conditions: [{ field: "description", operator: "CONTAINS", value: parsed.data.descriptionContains }],
+        actions: { categorizedAccountId: parsed.data.categorizedAccountId },
+      });
+    } catch (error) {
+      redirectWithError(`/${orgSlug}/money/rules/new`, error);
+    }
+
+    revalidatePath(`/${orgSlug}/money/rules`);
+    redirect(`/${orgSlug}/money/rules`);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }
 
 export async function setBankRuleActiveAction(
@@ -203,7 +228,11 @@ export async function setBankRuleActiveAction(
   bankRuleId: string,
   isActive: boolean,
 ): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  await BankRuleService.setActive(actor, bankRuleId, isActive);
-  revalidatePath(`/${orgSlug}/money/rules`);
+  try {
+    const { actor } = await requireOrgAndActor(orgSlug);
+    await BankRuleService.setActive(actor, bankRuleId, isActive);
+    revalidatePath(`/${orgSlug}/money/rules`);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }

@@ -1,5 +1,6 @@
 "use server";
 
+import { rethrowPermissionDenied } from "@/lib/action-errors";
 import { z } from "zod";
 import { requireOrgAndActor } from "@/lib/session";
 import { recommendChartOfAccounts, type Recommendation } from "@/domain/onboarding/chart-of-accounts-recommender";
@@ -30,31 +31,35 @@ export async function getRecommendationAction(
   orgSlug: string,
   input: { description: string; country: string; industry?: string },
 ): Promise<RecommendationResult> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  assertPermission(actor, "onboarding:manage");
+  try {
+    const { actor } = await requireOrgAndActor(orgSlug);
+    assertPermission(actor, "onboarding:manage");
 
-  const parsed = BusinessBasicsSchema.safeParse(input);
-  if (!parsed.success) {
-    throw new Error(parsed.error.issues[0]?.message ?? "Invalid input.");
+    const parsed = BusinessBasicsSchema.safeParse(input);
+    if (!parsed.success) {
+      throw new Error(parsed.error.issues[0]?.message ?? "Invalid input.");
+    }
+
+    const recommendation = await recommendChartOfAccounts({
+      description: parsed.data.description,
+      country: parsed.data.country,
+      industry: input.industry,
+    });
+
+    const proposedAccounts = expandTemplate(recommendation.templateKey, recommendation.flags);
+    const existing = await OnboardingService.getExistingAccounts(actor);
+    const existingCodes = new Set(existing.map((a) => a.code));
+    const newAccounts = proposedAccounts.filter((a) => !existingCodes.has(a.code));
+
+    return {
+      recommendation,
+      proposedAccounts: newAccounts,
+      groups: groupAccounts(newAccounts),
+      existingCodes: [...existingCodes],
+    };
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
   }
-
-  const recommendation = await recommendChartOfAccounts({
-    description: parsed.data.description,
-    country: parsed.data.country,
-    industry: input.industry,
-  });
-
-  const proposedAccounts = expandTemplate(recommendation.templateKey, recommendation.flags);
-  const existing = await OnboardingService.getExistingAccounts(actor);
-  const existingCodes = new Set(existing.map((a) => a.code));
-  const newAccounts = proposedAccounts.filter((a) => !existingCodes.has(a.code));
-
-  return {
-    recommendation,
-    proposedAccounts: newAccounts,
-    groups: groupAccounts(newAccounts),
-    existingCodes: [...existingCodes],
-  };
 }
 
 const ApplyAccountSchema = z.object({
@@ -105,47 +110,55 @@ export async function applyChartOfAccountsAction(
     };
   },
 ): Promise<ApplyResult> {
-  const { actor, org } = await requireOrgAndActor(orgSlug);
-  assertPermission(actor, "onboarding:manage");
+  try {
+    const { actor, org } = await requireOrgAndActor(orgSlug);
+    assertPermission(actor, "onboarding:manage");
 
-  const parsed = ApplySchema.safeParse(payload);
-  if (!parsed.success) {
-    throw new Error(parsed.error.issues[0]?.message ?? "Invalid input.");
+    const parsed = ApplySchema.safeParse(payload);
+    if (!parsed.success) {
+      throw new Error(parsed.error.issues[0]?.message ?? "Invalid input.");
+    }
+
+    const created = await OnboardingService.applyChartOfAccounts(actor, {
+      templateKey: parsed.data.templateKey,
+      flags: parsed.data.flags,
+      baseCurrency: org.baseCurrency,
+      accountsToCreate: parsed.data.accounts,
+      recommendation: parsed.data.recommendation,
+    });
+
+    return {
+      createdCount: created.length,
+      skippedCount: parsed.data.accounts.length - created.length,
+      createdAssetAccounts: created
+        .filter((a) => a.type === "ASSET")
+        .map((a) => ({ id: a.id, code: a.code, name: a.name })),
+    };
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
   }
-
-  const created = await OnboardingService.applyChartOfAccounts(actor, {
-    templateKey: parsed.data.templateKey,
-    flags: parsed.data.flags,
-    baseCurrency: org.baseCurrency,
-    accountsToCreate: parsed.data.accounts,
-    recommendation: parsed.data.recommendation,
-  });
-
-  return {
-    createdCount: created.length,
-    skippedCount: parsed.data.accounts.length - created.length,
-    createdAssetAccounts: created
-      .filter((a) => a.type === "ASSET")
-      .map((a) => ({ id: a.id, code: a.code, name: a.name })),
-  };
 }
 
 /** Whether onboarding still has meaningful work to do — used by the dashboard banner and to resume the wizard at the right step. */
 export async function getOnboardingStatusAction(orgSlug: string) {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  const accounts = await OnboardingService.getExistingAccounts(actor);
-  const nonSystemAccounts = accounts.filter((a) => !a.isSystemAccount);
-  const assetAccounts = accounts.filter((a) => a.type === "ASSET");
-  return {
-    hasChartOfAccounts: nonSystemAccounts.length > 0,
-    hasAssetAccount: assetAccounts.length > 0,
-    canManageOnboarding: (() => {
-      try {
-        assertPermission(actor, "onboarding:manage");
-        return true;
-      } catch {
-        return false;
-      }
-    })(),
-  };
+  try {
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const accounts = await OnboardingService.getExistingAccounts(actor);
+    const nonSystemAccounts = accounts.filter((a) => !a.isSystemAccount);
+    const assetAccounts = accounts.filter((a) => a.type === "ASSET");
+    return {
+      hasChartOfAccounts: nonSystemAccounts.length > 0,
+      hasAssetAccount: assetAccounts.length > 0,
+      canManageOnboarding: (() => {
+        try {
+          assertPermission(actor, "onboarding:manage");
+          return true;
+        } catch {
+          return false;
+        }
+      })(),
+    };
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }

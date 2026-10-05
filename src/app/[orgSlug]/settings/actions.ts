@@ -1,5 +1,6 @@
 "use server";
 
+import { rethrowPermissionDenied } from "@/lib/action-errors";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
@@ -46,64 +47,76 @@ const InviteSchema = z.object({
 });
 
 export async function inviteMemberAction(orgSlug: string, formData: FormData): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-
-  const parsed = InviteSchema.safeParse({
-    email: formData.get("email"),
-    role: formData.get("role"),
-  });
-  if (!parsed.success) return;
-
   try {
-    await OrganizationService.addMemberByEmail(
-      actor,
-      parsed.data.email,
-      parsed.data.role as (typeof roleValues)[number],
-      // Always passed on this path, so the server enforces the write-access confirmation.
-      { confirmWriteAccess: formData.get("confirmWriteAccess") === "true" },
-    );
+    const { actor } = await requireOrgAndActor(orgSlug);
+
+    const parsed = InviteSchema.safeParse({
+      email: formData.get("email"),
+      role: formData.get("role"),
+    });
+    if (!parsed.success) return;
+
+    try {
+      await OrganizationService.addMemberByEmail(
+        actor,
+        parsed.data.email,
+        parsed.data.role as (typeof roleValues)[number],
+        // Always passed on this path, so the server enforces the write-access confirmation.
+        { confirmWriteAccess: formData.get("confirmWriteAccess") === "true" },
+      );
+    } catch (error) {
+      const message = memberErrorMessage(error);
+      if (message) failWith(orgSlug, message);
+      throw error;
+    }
+    revalidatePath(`/${orgSlug}/settings`);
   } catch (error) {
-    const message = memberErrorMessage(error);
-    if (message) failWith(orgSlug, message);
-    throw error;
+    return rethrowPermissionDenied(error, orgSlug);
   }
-  revalidatePath(`/${orgSlug}/settings`);
 }
 
 export async function updateMemberRoleAction(orgSlug: string, formData: FormData): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-
-  const membershipId = formData.get("membershipId");
-  const role = formData.get("role");
-  if (typeof membershipId !== "string" || typeof role !== "string") return;
-  if (!roleValues.includes(role as (typeof roleValues)[number])) return;
-
   try {
-    await OrganizationService.updateMemberRole(actor, membershipId, role as (typeof roleValues)[number], {
-      confirmWriteAccess: formData.get("confirmWriteAccess") === "true",
-    });
+    const { actor } = await requireOrgAndActor(orgSlug);
+
+    const membershipId = formData.get("membershipId");
+    const role = formData.get("role");
+    if (typeof membershipId !== "string" || typeof role !== "string") return;
+    if (!roleValues.includes(role as (typeof roleValues)[number])) return;
+
+    try {
+      await OrganizationService.updateMemberRole(actor, membershipId, role as (typeof roleValues)[number], {
+        confirmWriteAccess: formData.get("confirmWriteAccess") === "true",
+      });
+    } catch (error) {
+      const message = memberErrorMessage(error);
+      if (message) failWith(orgSlug, message);
+      throw error;
+    }
+    revalidatePath(`/${orgSlug}/settings`);
   } catch (error) {
-    const message = memberErrorMessage(error);
-    if (message) failWith(orgSlug, message);
-    throw error;
+    return rethrowPermissionDenied(error, orgSlug);
   }
-  revalidatePath(`/${orgSlug}/settings`);
 }
 
 export async function removeMemberAction(orgSlug: string, formData: FormData): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-
-  const membershipId = formData.get("membershipId");
-  if (typeof membershipId !== "string") return;
-
   try {
-    await OrganizationService.removeMember(actor, membershipId);
+    const { actor } = await requireOrgAndActor(orgSlug);
+
+    const membershipId = formData.get("membershipId");
+    if (typeof membershipId !== "string") return;
+
+    try {
+      await OrganizationService.removeMember(actor, membershipId);
+    } catch (error) {
+      const message = memberErrorMessage(error);
+      if (message) failWith(orgSlug, message);
+      throw error;
+    }
+    revalidatePath(`/${orgSlug}/settings`);
   } catch (error) {
-    const message = memberErrorMessage(error);
-    if (message) failWith(orgSlug, message);
-    throw error;
+    return rethrowPermissionDenied(error, orgSlug);
   }
-  revalidatePath(`/${orgSlug}/settings`);
 }
 
 /**
@@ -118,18 +131,22 @@ export async function removeMemberAction(orgSlug: string, formData: FormData): P
  * and a permission refusal are both swallowed here for that reason.
  */
 export async function updateAutonomyLevelAction(orgSlug: string, formData: FormData): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  const raw = formData.get("autonomyLevel");
-  const level = Number(raw);
-  if (!Number.isInteger(level)) return;
-
   try {
-    await AutonomySettingsService.setLevel(actor, level);
-  } catch (err) {
-    if (err instanceof InvalidAutonomyLevelError) return;
-    throw err;
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const raw = formData.get("autonomyLevel");
+    const level = Number(raw);
+    if (!Number.isInteger(level)) return;
+
+    try {
+      await AutonomySettingsService.setLevel(actor, level);
+    } catch (err) {
+      if (err instanceof InvalidAutonomyLevelError) return;
+      throw err;
+    }
+    revalidatePath(`/${orgSlug}/settings`);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
   }
-  revalidatePath(`/${orgSlug}/settings`);
 }
 
 /**
@@ -141,13 +158,17 @@ export async function updateAutonomyLevelAction(orgSlug: string, formData: FormD
  * stale/forged request, not a real user hitting an error they need to see.
  */
 export async function emergencyStopAction(orgSlug: string): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
   try {
-    await AutonomySettingsService.emergencyStop(actor);
-  } catch {
-    return;
+    const { actor } = await requireOrgAndActor(orgSlug);
+    try {
+      await AutonomySettingsService.emergencyStop(actor);
+    } catch {
+      return;
+    }
+    revalidatePath(`/${orgSlug}/settings`);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
   }
-  revalidatePath(`/${orgSlug}/settings`);
 }
 
 /**
@@ -158,18 +179,22 @@ export async function emergencyStopAction(orgSlug: string): Promise<void> {
  * refused structurally, not just prevented by the UI.
  */
 export async function updateAutoApprovedActionAction(orgSlug: string, formData: FormData): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  const actionType = formData.get("actionType");
-  const enabled = formData.get("enabled") === "true";
-  if (typeof actionType !== "string") return;
-
   try {
-    await AutoApprovedActionsService.setEnabled(actor, actionType, enabled);
-  } catch (err) {
-    if (err instanceof InvalidAutoApprovedActionTypeError) return;
-    throw err;
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const actionType = formData.get("actionType");
+    const enabled = formData.get("enabled") === "true";
+    if (typeof actionType !== "string") return;
+
+    try {
+      await AutoApprovedActionsService.setEnabled(actor, actionType, enabled);
+    } catch (err) {
+      if (err instanceof InvalidAutoApprovedActionTypeError) return;
+      throw err;
+    }
+    revalidatePath(`/${orgSlug}/settings`);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
   }
-  revalidatePath(`/${orgSlug}/settings`);
 }
 
 /**
@@ -180,7 +205,11 @@ export async function updateAutoApprovedActionAction(orgSlug: string, formData: 
  * BOTH Level 3/4 AND explicitly whitelisted.
  */
 export async function runAutoExecutionsAction(orgSlug: string): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  await AutoExecutionService.runPendingAutoExecutions(actor);
-  revalidatePath(`/${orgSlug}/settings`);
+  try {
+    const { actor } = await requireOrgAndActor(orgSlug);
+    await AutoExecutionService.runPendingAutoExecutions(actor);
+    revalidatePath(`/${orgSlug}/settings`);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }

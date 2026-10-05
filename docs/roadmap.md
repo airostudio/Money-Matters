@@ -3108,8 +3108,11 @@ checks); this slice makes it safe and coherent to use. Details: `docs/security.m
   view instead of a form that could only fail. Shared helpers: `Can`, `deniedViewUnless`,
   `createActionsFor`. Sales, Purchases, Money, Forecasting and the other detail pages were
   already guarded in earlier slices (audited, unchanged).
-- Permission denial is a friendly state, not a 500: org-level `error.tsx` reads
-  `PermissionDeniedError.digest`; `PermissionDeniedError`'s message now ends with who to ask.
+- Permission denial is a friendly state, not a crash: every org server action (130) ends in a
+  catch-all redirecting a refused call to `/<org>/access-denied`; page renders that a role may not
+  read hit the org-level `error.tsx`, which reads `PermissionDeniedError.digest` (client-rendered;
+  the HTTP status of that response is still 500 - deferred: a server-rendered 200 for it).
+  `PermissionDeniedError`'s message now ends with who to ask.
 - The org home page no longer calls ledger services for roles without `journal:read` /
   `account:read` (an EMPLOYEE would previously have hit a permission error there).
 - Optimistic concurrency (`StaleEditError`) for **draft invoices and draft bills**.

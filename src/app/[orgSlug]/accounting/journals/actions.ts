@@ -1,5 +1,6 @@
 "use server";
 
+import { rethrowPermissionDenied } from "@/lib/action-errors";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireOrgAndActor } from "@/lib/session";
@@ -91,38 +92,58 @@ async function handleJournalSubmit(
 }
 
 export async function postJournalAction(orgSlug: string, formData: FormData): Promise<void> {
-  await handleJournalSubmit(orgSlug, formData, "post");
+  try {
+    await handleJournalSubmit(orgSlug, formData, "post");
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }
 
 export async function saveDraftAction(orgSlug: string, formData: FormData): Promise<void> {
-  await handleJournalSubmit(orgSlug, formData, "draft");
+  try {
+    await handleJournalSubmit(orgSlug, formData, "draft");
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }
 
 export async function postDraftAction(orgSlug: string, entryId: string, formData?: FormData): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  const returnPath = `/${orgSlug}/accounting/journals/${entryId}`;
   try {
-    await PostingService.postDraft(actor, entryId, postOptionsFromForm(formData));
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const returnPath = `/${orgSlug}/accounting/journals/${entryId}`;
+    try {
+      await PostingService.postDraft(actor, entryId, postOptionsFromForm(formData));
+    } catch (error) {
+      const query = lockFailureQuery(error);
+      if (query) redirect(`${returnPath}?${query}`);
+      throw error;
+    }
+    revalidatePath(returnPath);
+    redirect(returnPath);
   } catch (error) {
-    const query = lockFailureQuery(error);
-    if (query) redirect(`${returnPath}?${query}`);
-    throw error;
+    return rethrowPermissionDenied(error, orgSlug);
   }
-  revalidatePath(returnPath);
-  redirect(returnPath);
 }
 
 export async function deleteDraftAction(orgSlug: string, entryId: string): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  await PostingService.deleteDraft(actor, entryId);
-  revalidatePath(`/${orgSlug}/accounting/journals`);
-  redirect(`/${orgSlug}/accounting/journals`);
+  try {
+    const { actor } = await requireOrgAndActor(orgSlug);
+    await PostingService.deleteDraft(actor, entryId);
+    revalidatePath(`/${orgSlug}/accounting/journals`);
+    redirect(`/${orgSlug}/accounting/journals`);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }
 
 export async function reverseEntryAction(orgSlug: string, entryId: string, formData: FormData): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  const reason = String(formData.get("reason") ?? "").trim() || "No reason given";
-  const result = await PostingService.reverseEntry(actor, entryId, reason);
-  revalidatePath(`/${orgSlug}/accounting/journals/${entryId}`);
-  redirect(`/${orgSlug}/accounting/journals/${result.entryId}`);
+  try {
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const reason = String(formData.get("reason") ?? "").trim() || "No reason given";
+    const result = await PostingService.reverseEntry(actor, entryId, reason);
+    revalidatePath(`/${orgSlug}/accounting/journals/${entryId}`);
+    redirect(`/${orgSlug}/accounting/journals/${result.entryId}`);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }

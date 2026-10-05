@@ -1,5 +1,6 @@
 "use server";
 
+import { rethrowPermissionDenied } from "@/lib/action-errors";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireOrgAndActor } from "@/lib/session";
@@ -50,39 +51,59 @@ async function run(
 }
 
 export async function signOffAction(orgSlug: string, periodKey: string, formData: FormData): Promise<void> {
-  await run(orgSlug, periodKey, "Signed off. This is recorded as a person's sign-off, not a system check.", (actor) =>
-    PeriodCloseService.signOff(actor, periodKey, field(formData, "checkKey"), field(formData, "note") || undefined),
-  );
+  try {
+    await run(orgSlug, periodKey, "Signed off. This is recorded as a person's sign-off, not a system check.", (actor) =>
+      PeriodCloseService.signOff(actor, periodKey, field(formData, "checkKey"), field(formData, "note") || undefined),
+    );
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }
 
 export async function revokeSignOffAction(orgSlug: string, periodKey: string, formData: FormData): Promise<void> {
-  await run(orgSlug, periodKey, "Sign-off revoked.", (actor) =>
-    PeriodCloseService.revokeSignOff(actor, periodKey, field(formData, "checkKey")),
-  );
+  try {
+    await run(orgSlug, periodKey, "Sign-off revoked.", (actor) =>
+      PeriodCloseService.revokeSignOff(actor, periodKey, field(formData, "checkKey")),
+    );
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }
 
 export async function closePeriodAction(orgSlug: string, periodKey: string, formData: FormData): Promise<void> {
-  await run(orgSlug, periodKey, "Period closed.", (actor) =>
-    PeriodCloseService.close(actor, periodKey, {
-      lockLevel: level(formData, "lockLevel"),
-      acknowledgeOutstanding: formData.get("acknowledgeOutstanding") === "on",
-      note: field(formData, "note") || undefined,
-    }),
-  );
+  try {
+    await run(orgSlug, periodKey, "Period closed.", (actor) =>
+      PeriodCloseService.close(actor, periodKey, {
+        lockLevel: level(formData, "lockLevel"),
+        acknowledgeOutstanding: formData.get("acknowledgeOutstanding") === "on",
+        note: field(formData, "note") || undefined,
+      }),
+    );
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }
 
 export async function raiseLockAction(orgSlug: string, periodKey: string, formData: FormData): Promise<void> {
-  await run(orgSlug, periodKey, "Lock level raised.", (actor) =>
-    PeriodLockService.raise(actor, periodKey, level(formData, "lockLevel") ?? "HARD_LOCKED", field(formData, "reason") || undefined),
-  );
+  try {
+    await run(orgSlug, periodKey, "Lock level raised.", (actor) =>
+      PeriodLockService.raise(actor, periodKey, level(formData, "lockLevel") ?? "HARD_LOCKED", field(formData, "reason") || undefined),
+    );
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }
 
 export async function reopenPeriodAction(orgSlug: string, periodKey: string, formData: FormData): Promise<void> {
-  await run(orgSlug, periodKey, "Period reopened. The reason has been recorded in the lock history and audit log.", (actor) =>
-    PeriodLockService.reopen(actor, periodKey, {
-      reason: field(formData, "reason"),
-      toLevel: level(formData, "toLevel") ?? "OPEN",
-      acknowledgement: field(formData, "acknowledgement") || undefined,
-    }),
-  );
+  try {
+    await run(orgSlug, periodKey, "Period reopened. The reason has been recorded in the lock history and audit log.", (actor) =>
+      PeriodLockService.reopen(actor, periodKey, {
+        reason: field(formData, "reason"),
+        toLevel: level(formData, "toLevel") ?? "OPEN",
+        acknowledgement: field(formData, "acknowledgement") || undefined,
+      }),
+    );
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }

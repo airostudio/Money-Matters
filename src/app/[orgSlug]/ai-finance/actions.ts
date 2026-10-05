@@ -1,5 +1,6 @@
 "use server";
 
+import { rethrowPermissionDenied } from "@/lib/action-errors";
 import { z } from "zod";
 import { requireOrgAndActor } from "@/lib/session";
 import { FinancialControllerService, type ConversationTurn } from "@/domain/ai-controller/financial-controller-service";
@@ -37,20 +38,24 @@ export interface AskControllerResult {
  * specialist agent mode to scope the conversation to.
  */
 export async function askControllerAction(orgSlug: string, input: unknown): Promise<AskControllerResult> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  const parsed = AskSchema.safeParse(input);
-  if (!parsed.success) {
-    return { status: "unavailable", reason: "Could not understand that request." };
-  }
+  try {
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const parsed = AskSchema.safeParse(input);
+    if (!parsed.success) {
+      return { status: "unavailable", reason: "Could not understand that request." };
+    }
 
-  const outcome = await FinancialControllerService.ask(
-    actor,
-    parsed.data.question,
-    parsed.data.history as ConversationTurn[],
-    parsed.data.agentMode,
-  );
-  if (outcome.status === "unavailable") return { status: "unavailable", reason: outcome.reason };
-  return { status: "ok", answer: outcome.answer, proposals: outcome.proposals };
+    const outcome = await FinancialControllerService.ask(
+      actor,
+      parsed.data.question,
+      parsed.data.history as ConversationTurn[],
+      parsed.data.agentMode,
+    );
+    if (outcome.status === "unavailable") return { status: "unavailable", reason: outcome.reason };
+    return { status: "ok", answer: outcome.answer, proposals: outcome.proposals };
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }
 
 export interface ConfirmProposalResult {
@@ -70,17 +75,25 @@ export interface ConfirmProposalResult {
  * Purchases/Journal UI would refuse them directly.
  */
 export async function confirmDraftProposalAction(orgSlug: string, proposalId: string): Promise<ConfirmProposalResult> {
-  const { actor } = await requireOrgAndActor(orgSlug);
   try {
-    const result = await AIDraftProposalService.confirm(actor, proposalId);
-    const kind = result.type === "INVOICE" ? "Invoice" : result.type === "BILL" ? "Bill" : "Journal entry";
-    return { status: "ok", message: `${kind} ${result.resultLabel} created as a draft.`, resultEntityId: result.resultEntityId };
-  } catch (err) {
-    return { status: "error", message: err instanceof Error ? err.message : "Could not create this draft." };
+    const { actor } = await requireOrgAndActor(orgSlug);
+    try {
+      const result = await AIDraftProposalService.confirm(actor, proposalId);
+      const kind = result.type === "INVOICE" ? "Invoice" : result.type === "BILL" ? "Bill" : "Journal entry";
+      return { status: "ok", message: `${kind} ${result.resultLabel} created as a draft.`, resultEntityId: result.resultEntityId };
+    } catch (err) {
+      return { status: "error", message: err instanceof Error ? err.message : "Could not create this draft." };
+    }
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
   }
 }
 
 export async function dismissDraftProposalAction(orgSlug: string, proposalId: string): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  await AIDraftProposalService.dismiss(actor, proposalId);
+  try {
+    const { actor } = await requireOrgAndActor(orgSlug);
+    await AIDraftProposalService.dismiss(actor, proposalId);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }

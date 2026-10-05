@@ -1,5 +1,6 @@
 "use server";
 
+import { rethrowPermissionDenied } from "@/lib/action-errors";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireOrgAndActor } from "@/lib/session";
@@ -48,118 +49,150 @@ function parseClaimHeader(formData: FormData, currency: string, employeeUserId: 
 }
 
 export async function createExpenseClaimAction(orgSlug: string, formData: FormData): Promise<void> {
-  const { actor, org } = await requireOrgAndActor(orgSlug);
-  const employeeUserId = String(formData.get("employeeUserId") ?? actor.userId) || actor.userId;
-  const input = parseClaimHeader(formData, org.baseCurrency, employeeUserId);
-
-  let created;
   try {
-    created = await ExpenseClaimService.create(actor, input);
-  } catch (error) {
-    if (error && typeof error === "object" && "digest" in error) throw error;
-    const message = error instanceof Error ? error.message : "Failed to create expense claim.";
-    redirect(`/${orgSlug}/expenses/new?error=${encodeURIComponent(message)}`);
-  }
+    const { actor, org } = await requireOrgAndActor(orgSlug);
+    const employeeUserId = String(formData.get("employeeUserId") ?? actor.userId) || actor.userId;
+    const input = parseClaimHeader(formData, org.baseCurrency, employeeUserId);
 
-  revalidatePath(`/${orgSlug}/expenses`);
-  redirect(`/${orgSlug}/expenses/${created.id}`);
+    let created;
+    try {
+      created = await ExpenseClaimService.create(actor, input);
+    } catch (error) {
+      if (error && typeof error === "object" && "digest" in error) throw error;
+      const message = error instanceof Error ? error.message : "Failed to create expense claim.";
+      redirect(`/${orgSlug}/expenses/new?error=${encodeURIComponent(message)}`);
+    }
+
+    revalidatePath(`/${orgSlug}/expenses`);
+    redirect(`/${orgSlug}/expenses/${created.id}`);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }
 
 export async function updateExpenseClaimAction(orgSlug: string, claimId: string, formData: FormData): Promise<void> {
-  const { actor, org } = await requireOrgAndActor(orgSlug);
-  const returnPath = `/${orgSlug}/expenses/${claimId}`;
-  const existing = await ExpenseClaimService.get(actor, claimId);
-  const employeeUserId = existing?.employeeUserId ?? actor.userId;
-  const input = parseClaimHeader(formData, org.baseCurrency, employeeUserId);
-
   try {
-    await ExpenseClaimService.update(actor, claimId, input);
-  } catch (error) {
-    if (error && typeof error === "object" && "digest" in error) throw error;
-    const message = error instanceof Error ? error.message : "Failed to update expense claim.";
-    redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
-  }
+    const { actor, org } = await requireOrgAndActor(orgSlug);
+    const returnPath = `/${orgSlug}/expenses/${claimId}`;
+    const existing = await ExpenseClaimService.get(actor, claimId);
+    const employeeUserId = existing?.employeeUserId ?? actor.userId;
+    const input = parseClaimHeader(formData, org.baseCurrency, employeeUserId);
 
-  revalidatePath(returnPath);
-  redirect(returnPath);
+    try {
+      await ExpenseClaimService.update(actor, claimId, input);
+    } catch (error) {
+      if (error && typeof error === "object" && "digest" in error) throw error;
+      const message = error instanceof Error ? error.message : "Failed to update expense claim.";
+      redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+    }
+
+    revalidatePath(returnPath);
+    redirect(returnPath);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }
 
 export async function deleteDraftExpenseClaimAction(orgSlug: string, claimId: string): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  await ExpenseClaimService.deleteDraft(actor, claimId);
-  revalidatePath(`/${orgSlug}/expenses`);
-  redirect(`/${orgSlug}/expenses`);
+  try {
+    const { actor } = await requireOrgAndActor(orgSlug);
+    await ExpenseClaimService.deleteDraft(actor, claimId);
+    revalidatePath(`/${orgSlug}/expenses`);
+    redirect(`/${orgSlug}/expenses`);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }
 
 export async function submitExpenseClaimAction(orgSlug: string, claimId: string): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  const returnPath = `/${orgSlug}/expenses/${claimId}`;
   try {
-    await ExpenseClaimService.submit(actor, claimId);
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const returnPath = `/${orgSlug}/expenses/${claimId}`;
+    try {
+      await ExpenseClaimService.submit(actor, claimId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to submit expense claim.";
+      redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+    }
+    revalidatePath(returnPath);
+    redirect(returnPath);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to submit expense claim.";
-    redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+    return rethrowPermissionDenied(error, orgSlug);
   }
-  revalidatePath(returnPath);
-  redirect(returnPath);
 }
 
 export async function approveExpenseClaimAction(orgSlug: string, claimId: string): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  const returnPath = `/${orgSlug}/expenses/${claimId}`;
   try {
-    await ExpenseClaimService.approve(actor, claimId);
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const returnPath = `/${orgSlug}/expenses/${claimId}`;
+    try {
+      await ExpenseClaimService.approve(actor, claimId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to approve expense claim.";
+      redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+    }
+    revalidatePath(returnPath);
+    redirect(returnPath);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to approve expense claim.";
-    redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+    return rethrowPermissionDenied(error, orgSlug);
   }
-  revalidatePath(returnPath);
-  redirect(returnPath);
 }
 
 export async function rejectExpenseClaimAction(orgSlug: string, claimId: string, formData: FormData): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  const reason = String(formData.get("reason") ?? "").trim() || "No reason given";
-  const returnPath = `/${orgSlug}/expenses/${claimId}`;
   try {
-    await ExpenseClaimService.reject(actor, claimId, reason);
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const reason = String(formData.get("reason") ?? "").trim() || "No reason given";
+    const returnPath = `/${orgSlug}/expenses/${claimId}`;
+    try {
+      await ExpenseClaimService.reject(actor, claimId, reason);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to reject expense claim.";
+      redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+    }
+    revalidatePath(returnPath);
+    redirect(returnPath);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to reject expense claim.";
-    redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+    return rethrowPermissionDenied(error, orgSlug);
   }
-  revalidatePath(returnPath);
-  redirect(returnPath);
 }
 
 export async function markReimbursedExpenseClaimAction(orgSlug: string, claimId: string, formData: FormData): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  const returnPath = `/${orgSlug}/expenses/${claimId}`;
   try {
-    await ExpenseClaimService.markReimbursed(actor, claimId, {
-      reimbursementAccountId: String(formData.get("reimbursementAccountId") ?? ""),
-      reimbursementDate: new Date(String(formData.get("reimbursementDate") ?? "")),
-      reference: (formData.get("reference") ? String(formData.get("reference")).trim() : undefined) || undefined,
-    });
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const returnPath = `/${orgSlug}/expenses/${claimId}`;
+    try {
+      await ExpenseClaimService.markReimbursed(actor, claimId, {
+        reimbursementAccountId: String(formData.get("reimbursementAccountId") ?? ""),
+        reimbursementDate: new Date(String(formData.get("reimbursementDate") ?? "")),
+        reference: (formData.get("reference") ? String(formData.get("reference")).trim() : undefined) || undefined,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to mark expense claim reimbursed.";
+      redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+    }
+    revalidatePath(returnPath);
+    redirect(returnPath);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to mark expense claim reimbursed.";
-    redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+    return rethrowPermissionDenied(error, orgSlug);
   }
-  revalidatePath(returnPath);
-  redirect(returnPath);
 }
 
 export async function voidExpenseClaimAction(orgSlug: string, claimId: string, formData: FormData): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  const reason = String(formData.get("reason") ?? "").trim() || "No reason given";
-  const returnPath = `/${orgSlug}/expenses/${claimId}`;
   try {
-    await ExpenseClaimService.voidClaim(actor, claimId, reason);
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const reason = String(formData.get("reason") ?? "").trim() || "No reason given";
+    const returnPath = `/${orgSlug}/expenses/${claimId}`;
+    try {
+      await ExpenseClaimService.voidClaim(actor, claimId, reason);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to void expense claim.";
+      redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+    }
+    revalidatePath(returnPath);
+    redirect(returnPath);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to void expense claim.";
-    redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+    return rethrowPermissionDenied(error, orgSlug);
   }
-  revalidatePath(returnPath);
-  redirect(returnPath);
 }
 
 /**
@@ -169,19 +202,23 @@ export async function voidExpenseClaimAction(orgSlug: string, claimId: string, f
  * draft — never posting or saving anything by itself. Master spec §17.
  */
 export async function captureReceiptAction(orgSlug: string, formData: FormData): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  const file = formData.get("file");
-  if (!(file instanceof File) || file.size === 0) {
-    redirectWithError(`/${orgSlug}/expenses/capture`, new Error("Choose a receipt image or PDF to upload."));
-  }
-
-  let receipt;
   try {
-    const buffer = Buffer.from(await file.arrayBuffer());
-    receipt = await ReceiptService.upload(actor, { fileName: file.name, mimeType: file.type, data: buffer });
-  } catch (error) {
-    redirectWithError(`/${orgSlug}/expenses/capture`, error);
-  }
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const file = formData.get("file");
+    if (!(file instanceof File) || file.size === 0) {
+      redirectWithError(`/${orgSlug}/expenses/capture`, new Error("Choose a receipt image or PDF to upload."));
+    }
 
-  redirect(`/${orgSlug}/expenses/new?receiptId=${receipt.id}`);
+    let receipt;
+    try {
+      const buffer = Buffer.from(await file.arrayBuffer());
+      receipt = await ReceiptService.upload(actor, { fileName: file.name, mimeType: file.type, data: buffer });
+    } catch (error) {
+      redirectWithError(`/${orgSlug}/expenses/capture`, error);
+    }
+
+    redirect(`/${orgSlug}/expenses/new?receiptId=${receipt.id}`);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }

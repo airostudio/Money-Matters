@@ -760,10 +760,15 @@ access and to ask the company owner for more; the nav shows only what they may r
 `isReadOnlyRole(role)` - true when the role holds no permission other than `*:read` - not
 by comparing against the string `READ_ONLY`. A write page opened directly (a bookmark, a
 stale tab) shows a friendly "you can't make changes here" view naming the area and the
-role. A refusal from a service that bubbles up from any page or server action reaches the
+role. Every org server action ends in a catch-all (`rethrowPermissionDenied`,
+`src/lib/action-errors.ts`) that turns a `PermissionDeniedError` from a stale tab or a
+crafted request into a redirect to `/<org>/access-denied`, a friendly page naming the area
+and the viewer's real role (HTTP 200, nothing written). A refusal thrown while *rendering*
+a page (a role opening a page it has no read permission for by typing the URL) reaches the
 org-level `error.tsx`, which recognises `PermissionDeniedError` through its `digest`
 (Next.js hides the message in production but keeps a digest the error carries) and shows
-the same explanation instead of a generic "Application error".
+the same explanation instead of "Application error"; that path is rendered by the browser
+after hydration and the HTTP status of such a response is still 500.
 
 **Hiding is presentation only.** Every hidden action is still refused by the domain
 service (`assertPermission`); `src/tests/integration/organizations/shared-access.test.ts`

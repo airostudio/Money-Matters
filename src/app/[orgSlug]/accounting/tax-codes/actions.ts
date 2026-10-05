@@ -1,5 +1,6 @@
 "use server";
 
+import { rethrowPermissionDenied } from "@/lib/action-errors";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
@@ -16,28 +17,32 @@ const CreateTaxCodeSchema = z.object({
 });
 
 export async function createTaxCodeAction(orgSlug: string, formData: FormData): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
+  try {
+    const { actor } = await requireOrgAndActor(orgSlug);
 
-  const parsed = CreateTaxCodeSchema.safeParse({
-    code: formData.get("code"),
-    name: formData.get("name"),
-    ratePercent: formData.get("ratePercent"),
-    jurisdiction: formData.get("jurisdiction"),
-    payableAccountId: formData.get("payableAccountId") || undefined,
-    receivableAccountId: formData.get("receivableAccountId") || undefined,
-  });
-  if (!parsed.success) return;
+    const parsed = CreateTaxCodeSchema.safeParse({
+      code: formData.get("code"),
+      name: formData.get("name"),
+      ratePercent: formData.get("ratePercent"),
+      jurisdiction: formData.get("jurisdiction"),
+      payableAccountId: formData.get("payableAccountId") || undefined,
+      receivableAccountId: formData.get("receivableAccountId") || undefined,
+    });
+    if (!parsed.success) return;
 
-  await TaxCodeService.create(actor, {
-    code: parsed.data.code,
-    name: parsed.data.name,
-    rate: (parsed.data.ratePercent / 100).toFixed(4),
-    jurisdiction: parsed.data.jurisdiction.toUpperCase(),
-    effectiveFrom: new Date("2000-01-01"),
-    payableAccountId: parsed.data.payableAccountId,
-    receivableAccountId: parsed.data.receivableAccountId,
-  });
+    await TaxCodeService.create(actor, {
+      code: parsed.data.code,
+      name: parsed.data.name,
+      rate: (parsed.data.ratePercent / 100).toFixed(4),
+      jurisdiction: parsed.data.jurisdiction.toUpperCase(),
+      effectiveFrom: new Date("2000-01-01"),
+      payableAccountId: parsed.data.payableAccountId,
+      receivableAccountId: parsed.data.receivableAccountId,
+    });
 
-  revalidatePath(`/${orgSlug}/accounting/tax-codes`);
-  redirect(`/${orgSlug}/accounting/tax-codes`);
+    revalidatePath(`/${orgSlug}/accounting/tax-codes`);
+    redirect(`/${orgSlug}/accounting/tax-codes`);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }

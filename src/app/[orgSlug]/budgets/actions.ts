@@ -1,5 +1,6 @@
 "use server";
 
+import { rethrowPermissionDenied } from "@/lib/action-errors";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireOrgAndActor } from "@/lib/session";
@@ -12,24 +13,28 @@ function redirectWithError(path: string, error: unknown): never {
 }
 
 export async function createBudgetAction(orgSlug: string, formData: FormData): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  const returnPath = `/${orgSlug}/budgets`;
-
-  let created;
   try {
-    created = await BudgetService.create(actor, {
-      name: String(formData.get("name") ?? "").trim(),
-      type: String(formData.get("type") ?? "BASELINE") as "BASELINE" | "REVISED_FORECAST" | "ROLLING_FORECAST",
-      periodStart: new Date(String(formData.get("periodStart") ?? "")),
-      periodEnd: new Date(String(formData.get("periodEnd") ?? "")),
-      notes: String(formData.get("notes") ?? "").trim() || undefined,
-    });
-  } catch (error) {
-    redirectWithError(`/${orgSlug}/budgets/new`, error);
-  }
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const returnPath = `/${orgSlug}/budgets`;
 
-  revalidatePath(returnPath);
-  redirect(`/${orgSlug}/budgets/${created.id}`);
+    let created;
+    try {
+      created = await BudgetService.create(actor, {
+        name: String(formData.get("name") ?? "").trim(),
+        type: String(formData.get("type") ?? "BASELINE") as "BASELINE" | "REVISED_FORECAST" | "ROLLING_FORECAST",
+        periodStart: new Date(String(formData.get("periodStart") ?? "")),
+        periodEnd: new Date(String(formData.get("periodEnd") ?? "")),
+        notes: String(formData.get("notes") ?? "").trim() || undefined,
+      });
+    } catch (error) {
+      redirectWithError(`/${orgSlug}/budgets/new`, error);
+    }
+
+    revalidatePath(returnPath);
+    redirect(`/${orgSlug}/budgets/${created.id}`);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }
 
 /**
@@ -41,84 +46,104 @@ export async function createBudgetAction(orgSlug: string, formData: FormData): P
  * renders the form.
  */
 export async function setAccountLinesAction(orgSlug: string, budgetId: string, formData: FormData): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  const returnPath = `/${orgSlug}/budgets/${budgetId}`;
-
-  const accountId = String(formData.get("accountId") ?? "");
-  const dimensionValueId = String(formData.get("dimensionValueId") ?? "").trim() || undefined;
-  const periodStart = new Date(String(formData.get("periodStart") ?? ""));
-  const periodEnd = new Date(String(formData.get("periodEnd") ?? ""));
-  const columns = monthlyColumns({ from: periodStart, to: periodEnd });
-
-  const months = columns
-    .map((col, i) => ({ month: col.from, amount: String(formData.get(`month-${i}`) ?? "").trim() }))
-    .filter((m) => m.amount !== "");
-
   try {
-    if (!accountId) throw new Error("An account is required.");
-    if (months.length === 0) throw new Error("Enter at least one month's amount.");
-    await BudgetService.setAccountLines(actor, budgetId, { accountId, dimensionValueId, months });
-  } catch (error) {
-    redirectWithError(returnPath, error);
-  }
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const returnPath = `/${orgSlug}/budgets/${budgetId}`;
 
-  revalidatePath(returnPath);
-  redirect(returnPath);
+    const accountId = String(formData.get("accountId") ?? "");
+    const dimensionValueId = String(formData.get("dimensionValueId") ?? "").trim() || undefined;
+    const periodStart = new Date(String(formData.get("periodStart") ?? ""));
+    const periodEnd = new Date(String(formData.get("periodEnd") ?? ""));
+    const columns = monthlyColumns({ from: periodStart, to: periodEnd });
+
+    const months = columns
+      .map((col, i) => ({ month: col.from, amount: String(formData.get(`month-${i}`) ?? "").trim() }))
+      .filter((m) => m.amount !== "");
+
+    try {
+      if (!accountId) throw new Error("An account is required.");
+      if (months.length === 0) throw new Error("Enter at least one month's amount.");
+      await BudgetService.setAccountLines(actor, budgetId, { accountId, dimensionValueId, months });
+    } catch (error) {
+      redirectWithError(returnPath, error);
+    }
+
+    revalidatePath(returnPath);
+    redirect(returnPath);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }
 
 export async function removeLineAction(orgSlug: string, budgetId: string, formData: FormData): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  const returnPath = `/${orgSlug}/budgets/${budgetId}`;
   try {
-    await BudgetService.removeLine(actor, budgetId, String(formData.get("lineId") ?? ""));
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const returnPath = `/${orgSlug}/budgets/${budgetId}`;
+    try {
+      await BudgetService.removeLine(actor, budgetId, String(formData.get("lineId") ?? ""));
+    } catch (error) {
+      redirectWithError(returnPath, error);
+    }
+    revalidatePath(returnPath);
+    redirect(returnPath);
   } catch (error) {
-    redirectWithError(returnPath, error);
+    return rethrowPermissionDenied(error, orgSlug);
   }
-  revalidatePath(returnPath);
-  redirect(returnPath);
 }
 
 export async function activateBudgetAction(orgSlug: string, budgetId: string): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  const returnPath = `/${orgSlug}/budgets/${budgetId}`;
   try {
-    await BudgetService.activate(actor, budgetId);
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const returnPath = `/${orgSlug}/budgets/${budgetId}`;
+    try {
+      await BudgetService.activate(actor, budgetId);
+    } catch (error) {
+      redirectWithError(returnPath, error);
+    }
+    revalidatePath(returnPath);
+    revalidatePath(`/${orgSlug}/budgets`);
+    redirect(returnPath);
   } catch (error) {
-    redirectWithError(returnPath, error);
+    return rethrowPermissionDenied(error, orgSlug);
   }
-  revalidatePath(returnPath);
-  revalidatePath(`/${orgSlug}/budgets`);
-  redirect(returnPath);
 }
 
 export async function archiveBudgetAction(orgSlug: string, budgetId: string): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  const returnPath = `/${orgSlug}/budgets/${budgetId}`;
   try {
-    await BudgetService.archive(actor, budgetId);
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const returnPath = `/${orgSlug}/budgets/${budgetId}`;
+    try {
+      await BudgetService.archive(actor, budgetId);
+    } catch (error) {
+      redirectWithError(returnPath, error);
+    }
+    revalidatePath(returnPath);
+    revalidatePath(`/${orgSlug}/budgets`);
+    redirect(returnPath);
   } catch (error) {
-    redirectWithError(returnPath, error);
+    return rethrowPermissionDenied(error, orgSlug);
   }
-  revalidatePath(returnPath);
-  revalidatePath(`/${orgSlug}/budgets`);
-  redirect(returnPath);
 }
 
 export async function createRollingForecastAction(orgSlug: string, sourceBudgetId: string, formData: FormData): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  const returnPath = `/${orgSlug}/budgets/${sourceBudgetId}/rolling-forecast`;
-
-  let created;
   try {
-    created = await BudgetService.createRollingForecast(actor, {
-      sourceBudgetId,
-      name: String(formData.get("name") ?? "").trim(),
-      carryForwardAfterDate: new Date(String(formData.get("carryForwardAfterDate") ?? "")),
-    });
-  } catch (error) {
-    redirectWithError(returnPath, error);
-  }
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const returnPath = `/${orgSlug}/budgets/${sourceBudgetId}/rolling-forecast`;
 
-  revalidatePath(`/${orgSlug}/budgets`);
-  redirect(`/${orgSlug}/budgets/${created.id}`);
+    let created;
+    try {
+      created = await BudgetService.createRollingForecast(actor, {
+        sourceBudgetId,
+        name: String(formData.get("name") ?? "").trim(),
+        carryForwardAfterDate: new Date(String(formData.get("carryForwardAfterDate") ?? "")),
+      });
+    } catch (error) {
+      redirectWithError(returnPath, error);
+    }
+
+    revalidatePath(`/${orgSlug}/budgets`);
+    redirect(`/${orgSlug}/budgets/${created.id}`);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }
