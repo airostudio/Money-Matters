@@ -1,5 +1,7 @@
 import "server-only";
+import * as React from "react";
 import { getServerSession } from "next-auth";
+import { UserService } from "@/domain/auth/user-service";
 import { authOptions } from "./auth";
 import { OrganizationService } from "@/domain/organizations/organization-service";
 import type { Actor } from "@/domain/permissions/permission-service";
@@ -10,15 +12,29 @@ export interface CurrentUser {
   name: string;
 }
 
-export async function getCurrentUser(): Promise<CurrentUser | null> {
+/**
+ * React's per-request memoiser where it exists (server components/actions),
+ * a pass-through elsewhere (scripts, unit tests). A layout and its page both
+ * resolving the current user then cost ONE database lookup, not two — see the
+ * connection-pool note in src/db/client.ts.
+ */
+const memoizePerRequest: <T extends () => Promise<unknown>>(fn: T) => T =
+  (React as unknown as { cache?: <T>(fn: T) => T }).cache ?? ((fn) => fn);
+
+async function resolveCurrentUser(): Promise<CurrentUser | null> {
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) return null;
-  return {
-    id: session.user.id,
-    email: session.user.email ?? "",
-    name: session.user.name ?? "",
-  };
+
+  // JWT sessions are self-contained, so on their own they would keep working
+  // after a platform admin suspends the account. Every request therefore
+  // re-checks the user row (one primary-key lookup, deduped per request
+  // above): a suspended or deleted user resolves to "not signed in" on the
+  // very next request, and the email/name come from the database rather than
+  // from the token. See the "Suspended users" section of the security doc.
+  return UserService.getActiveIdentity(session.user.id);
 }
+
+export const getCurrentUser: () => Promise<CurrentUser | null> = memoizePerRequest(resolveCurrentUser);
 
 /** Resolves the authenticated user's Actor for a specific organization, or null if not a member. */
 export async function getActorForOrganization(organizationId: string): Promise<Actor | null> {

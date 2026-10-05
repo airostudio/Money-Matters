@@ -11,12 +11,14 @@ export function Topbar({
   role,
   userName,
   userEmail,
+  showAdminLink = false,
 }: {
   orgSlug: string;
   orgName: string;
   role: MembershipRole;
   userName: string;
   userEmail: string;
+  showAdminLink?: boolean;
 }) {
   return (
     <header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-background px-4">
@@ -29,7 +31,7 @@ export function Topbar({
             <Plus /> New journal entry
           </Link>
         </Button>
-        <UserMenu name={userName} email={userEmail} />
+        <UserMenu name={userName} email={userEmail} showAdminLink={showAdminLink} />
       </div>
     </header>
   );

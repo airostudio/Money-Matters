@@ -23,12 +23,22 @@ import {
 } from "./actions";
 import { MemberRoleSelect } from "@/components/shell/member-role-select";
 
-export default async function SettingsPage({ params }: { params: { orgSlug: string } }) {
+export default async function SettingsPage({
+  params,
+  searchParams,
+}: {
+  params: { orgSlug: string };
+  searchParams: { memberError?: string };
+}) {
   const { org, actor } = await requireOrgAndActor(params.orgSlug);
   const canManageMembers = roleHasPermission(actor.role, "membership:manage");
   const canManageOrganization = roleHasPermission(actor.role, "organization:manage");
 
-  const members = canManageMembers ? await OrganizationService.listMembers(actor) : [];
+  const members = canManageMembers
+    ? (await OrganizationService.listMembers(actor)).filter((m) => m.isActive)
+    : [];
+  const seats = canManageMembers ? await OrganizationService.getSeatUsage(org.id) : null;
+  const memberError = typeof searchParams.memberError === "string" ? searchParams.memberError.slice(0, 600) : null;
   const autoApprovedActions = await AutoApprovedActionsService.list(org.id);
   const enabledActionTypes = new Set(autoApprovedActions.map((a) => a.actionType));
   const autonomyLevel = org.aiAutonomyLevel as 0 | 1 | 2 | 3 | 4;
@@ -176,7 +186,18 @@ export default async function SettingsPage({ params }: { params: { orgSlug: stri
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Team</CardTitle>
-              <CardDescription>Everyone with access to {org.name}.</CardDescription>
+              <CardDescription>
+                Everyone with access to {org.name}.
+                {seats && (
+                  <>
+                    {" "}
+                    <span className="font-medium text-foreground" data-testid="seat-usage">
+                      Seats: {seats.seatsUsed} of {seats.seatLimit} used
+                    </span>
+                    .
+                  </>
+                )}
+              </CardDescription>
             </CardHeader>
             <CardContent className="p-0">
               <div className="divide-y divide-border">
@@ -217,7 +238,20 @@ export default async function SettingsPage({ params }: { params: { orgSlug: stri
               <CardTitle className="text-base">Invite a teammate</CardTitle>
               <CardDescription>They must already have a Money Matters account.</CardDescription>
             </CardHeader>
+            {memberError && (
+              <p role="alert" className="mx-6 mb-4 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                {memberError}
+              </p>
+            )}
+            {seats?.isFull && (
+              <p className="mx-6 mb-4 rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground" data-testid="seat-full">
+                This account is at its seat limit ({seats.seatsUsed} of {seats.seatLimit} seats used). Additional
+                seats will be available as a paid add-on. To request more seats, contact the platform administrator.
+                Removing a member frees a seat.
+              </p>
+            )}
             <form action={boundInvite}>
+              <fieldset disabled={seats?.isFull} className="contents">
               <CardContent className="flex flex-col gap-4 sm:flex-row sm:items-end">
                 <div className="flex-1 space-y-2">
                   <Label htmlFor="email">Email</Label>
@@ -240,6 +274,7 @@ export default async function SettingsPage({ params }: { params: { orgSlug: stri
                 </div>
                 <Button type="submit">Invite</Button>
               </CardContent>
+              </fieldset>
             </form>
           </Card>
         </>

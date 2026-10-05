@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { getCurrentUser } from "@/lib/session";
+import { isPlatformAdminUser } from "@/lib/platform-admin";
 import { OrganizationService } from "@/domain/organizations/organization-service";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -17,7 +18,8 @@ export default async function AppLandingPage() {
   const memberships = await OrganizationService.listMembershipsForUser(user.id);
 
   if (memberships.length === 0) {
-    redirect("/register");
+    // A platform admin need not belong to any organization.
+    redirect(isPlatformAdminUser(user) ? "/admin" : "/register");
   }
 
   if (memberships.length === 1) {

@@ -1,15 +1,37 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 import { z } from "zod";
 import { requireOrgAndActor } from "@/lib/session";
-import { OrganizationService } from "@/domain/organizations/organization-service";
+import {
+  AlreadyMemberError,
+  LastOwnerError,
+  OrganizationService,
+  SeatLimitReachedError,
+  UserNotFoundError,
+} from "@/domain/organizations/organization-service";
 import { membershipRoleEnum } from "@/db/schema";
 import { AutonomySettingsService, InvalidAutonomyLevelError } from "@/domain/ai-controller/autonomy";
 import { AutoApprovedActionsService, InvalidAutoApprovedActionTypeError } from "@/domain/ai-controller/auto-execution-policy";
 import { AutoExecutionService } from "@/domain/ai-controller/auto-execution-service";
 
 const roleValues = membershipRoleEnum.enumValues;
+
+/**
+ * Plain `<form action>`s can't render a returned error, so a refusal the user
+ * can act on (seat limit reached, unknown email, last owner) is surfaced via
+ * a `memberError` query param the settings page renders as a banner.
+ */
+const MEMBER_ERRORS = [SeatLimitReachedError, UserNotFoundError, AlreadyMemberError, LastOwnerError];
+
+function memberErrorMessage(error: unknown): string | null {
+  return MEMBER_ERRORS.some((E) => error instanceof E) ? (error as Error).message : null;
+}
+
+function failWith(orgSlug: string, message: string): never {
+  redirect(`/${orgSlug}/settings?memberError=${encodeURIComponent(message)}`);
+}
 
 const InviteSchema = z.object({
   email: z.string().trim().email(),
@@ -25,11 +47,17 @@ export async function inviteMemberAction(orgSlug: string, formData: FormData): P
   });
   if (!parsed.success) return;
 
-  await OrganizationService.addMemberByEmail(
-    actor,
-    parsed.data.email,
-    parsed.data.role as (typeof roleValues)[number],
-  );
+  try {
+    await OrganizationService.addMemberByEmail(
+      actor,
+      parsed.data.email,
+      parsed.data.role as (typeof roleValues)[number],
+    );
+  } catch (error) {
+    const message = memberErrorMessage(error);
+    if (message) failWith(orgSlug, message);
+    throw error;
+  }
   revalidatePath(`/${orgSlug}/settings`);
 }
 
@@ -41,7 +69,13 @@ export async function updateMemberRoleAction(orgSlug: string, formData: FormData
   if (typeof membershipId !== "string" || typeof role !== "string") return;
   if (!roleValues.includes(role as (typeof roleValues)[number])) return;
 
-  await OrganizationService.updateMemberRole(actor, membershipId, role as (typeof roleValues)[number]);
+  try {
+    await OrganizationService.updateMemberRole(actor, membershipId, role as (typeof roleValues)[number]);
+  } catch (error) {
+    const message = memberErrorMessage(error);
+    if (message) failWith(orgSlug, message);
+    throw error;
+  }
   revalidatePath(`/${orgSlug}/settings`);
 }
 
@@ -51,7 +85,13 @@ export async function removeMemberAction(orgSlug: string, formData: FormData): P
   const membershipId = formData.get("membershipId");
   if (typeof membershipId !== "string") return;
 
-  await OrganizationService.removeMember(actor, membershipId);
+  try {
+    await OrganizationService.removeMember(actor, membershipId);
+  } catch (error) {
+    const message = memberErrorMessage(error);
+    if (message) failWith(orgSlug, message);
+    throw error;
+  }
   revalidatePath(`/${orgSlug}/settings`);
 }
 

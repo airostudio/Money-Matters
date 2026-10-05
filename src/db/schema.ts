@@ -15,10 +15,11 @@ import {
   jsonb,
   uniqueIndex,
   index,
+  check,
   customType,
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 
 /**
  * Raw binary storage for uploaded documents (receipts/invoices) —
@@ -99,6 +100,14 @@ export const approvalStatusEnum = pgEnum("approval_status", [
   "APPROVED",
   "REJECTED",
 ]);
+
+/**
+ * A label only — no billing, pricing or entitlement logic hangs off it yet
+ * (docs/roadmap.md "Platform admin & seat limit"). `EXTENDED` is the slot a
+ * future paid extra-seats add-on will occupy; `COMPLIMENTARY` marks an
+ * account the platform operator has granted extra capacity at no charge.
+ */
+export const planTierEnum = pgEnum("plan_tier", ["STANDARD", "EXTENDED", "COMPLIMENTARY"]);
 
 export const auditActorTypeEnum = pgEnum("audit_actor_type", ["HUMAN", "AI", "SYSTEM"]);
 
@@ -307,10 +316,22 @@ export const users = pgTable("users", {
   email: text("email").notNull(),
   name: text("name").notNull(),
   passwordHash: text("password_hash"),
+  /**
+   * Set by a platform admin to suspend the account: the user cannot sign in
+   * and `getCurrentUser()` (src/lib/session.ts) stops resolving any
+   * already-issued JWT session on the very next request. NULL = active.
+   */
+  disabledAt: timestamp("disabled_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   emailUnique: uniqueIndex("users_email_unique").on(table.email),
+  // There is no email-verification step, so a case-variant look-alike of a
+  // privileged address (the platform admin's) must be impossible at the
+  // database level, not merely discouraged in application code: emails are
+  // stored normalised (CHECK) and unique case-insensitively (index).
+  emailLowerUnique: uniqueIndex("users_email_lower_unique").on(sql`lower(${table.email})`),
+  emailNormalised: check("users_email_normalised", sql`${table.email} = lower(btrim(${table.email}))`),
 }));
 
 export const organizations = pgTable("organizations", {
@@ -331,10 +352,19 @@ export const organizations = pgTable("organizations", {
    * accepted and ignored.
    */
   aiAutonomyLevel: integer("ai_autonomy_level").notNull().default(0),
+  /**
+   * Maximum number of ACTIVE memberships (a "seat" = one active
+   * organization_memberships row). Default 2: an account can be shared by two
+   * people; more is a future paid add-on. Enforced in the service layer under
+   * a row lock on this row — see src/domain/organizations/membership-rules.ts.
+   */
+  seatLimit: integer("seat_limit").notNull().default(2),
+  planTier: planTierEnum("plan_tier").notNull().default("STANDARD"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   slugUnique: uniqueIndex("organizations_slug_unique").on(table.slug),
+  seatLimitPositive: check("organizations_seat_limit_positive", sql`${table.seatLimit} >= 1`),
 }));
 
 export const organizationMemberships = pgTable("organization_memberships", {
@@ -355,6 +385,32 @@ export const organizationMemberships = pgTable("organization_memberships", {
     table.userId,
   ),
   userIdx: index("org_membership_user_idx").on(table.userId),
+}));
+
+/**
+ * Platform-level (NOT tenant-scoped) append-only audit trail of everything a
+ * platform admin does. Deliberately has no `organization_id` column: it is not
+ * a tenant table and must not be mistaken for one by the tenant-isolation
+ * audit in src/db/migrate.ts. `target_organization` is a plain reference (no
+ * FK) so the row outlives anything it describes. mm_app is granted
+ * SELECT + INSERT only (drizzle/0035_*.sql).
+ */
+export const platformAdminAuditLogs = pgTable("platform_admin_audit_logs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  adminUserId: uuid("admin_user_id").notNull(),
+  adminEmail: text("admin_email").notNull(),
+  action: text("action").notNull(),
+  targetType: text("target_type").notNull(),
+  targetId: text("target_id").notNull(),
+  targetOrganization: uuid("target_organization"),
+  before: jsonb("before"),
+  after: jsonb("after"),
+  metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  createdAtIdx: index("platform_admin_audit_created_at_idx").on(table.createdAt),
+  targetOrgIdx: index("platform_admin_audit_target_org_idx").on(table.targetOrganization, table.createdAt),
+  actionIdx: index("platform_admin_audit_action_idx").on(table.action, table.createdAt),
 }));
 
 // ---------------------------------------------------------------------------

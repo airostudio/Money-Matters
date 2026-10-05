@@ -11,6 +11,14 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // The platform admin section must 404 for signed-out visitors too (not
+  // redirect to /login), so its existence isn't revealed. Authorisation is
+  // NOT done here — every admin page, route handler and server action calls
+  // requirePlatformAdmin() itself (src/lib/platform-admin.ts).
+  if (pathname === "/admin" || pathname.startsWith("/admin/")) {
+    return NextResponse.next();
+  }
+
   const token = await getToken({ req: request, secret: process.env.NEXTAUTH_SECRET });
   if (!token) {
     const loginUrl = new URL("/login", request.url);

@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/db/client";
 import { withTenant } from "@/db/tenant";
 import { organizationMemberships, organizations, users } from "@/db/schema";
@@ -6,6 +6,28 @@ import { AccountService } from "@/domain/accounts/account-service";
 import { AuditService } from "@/domain/audit/audit-service";
 import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
 import type { MembershipRole } from "@/domain/permissions/roles";
+import { normalizeEmail } from "@/domain/auth/email";
+import {
+  OrganizationRecordNotFoundError,
+  addMembership,
+  changeMembershipRole,
+  deactivateMembership,
+} from "./membership-rules";
+
+export {
+  AlreadyMemberError,
+  InvalidRoleError,
+  LastOwnerError,
+  MembershipNotFoundError,
+  SeatLimitReachedError,
+} from "./membership-rules";
+
+/**
+ * Top-level URL segments that exist as real routes. An organization slug equal
+ * to one of these would be unreachable (the static route wins over `[orgSlug]`)
+ * — and "admin" in particular must never be claimable by a customer.
+ */
+const RESERVED_SLUGS = new Set(["admin", "app", "api", "login", "register", "_next"]);
 
 export class SlugTakenError extends Error {
   constructor(slug: string) {
@@ -18,13 +40,6 @@ export class UserNotFoundError extends Error {
   constructor(email: string) {
     super(`No user with email "${email}" exists yet — they must sign up first.`);
     this.name = "UserNotFoundError";
-  }
-}
-
-export class MembershipNotFoundError extends Error {
-  constructor(membershipId: string) {
-    super(`Membership ${membershipId} was not found in this organization.`);
-    this.name = "MembershipNotFoundError";
   }
 }
 
@@ -63,6 +78,8 @@ export const OrganizationService = {
    * surface immediately during onboarding, not silently later.
    */
   async createWithOwner(ownerUserId: string, input: CreateOrganizationInput) {
+    if (RESERVED_SLUGS.has(input.slug)) throw new SlugTakenError(input.slug);
+
     const org = await db.transaction(async (tx) => {
       const [existing] = await tx
         .select({ id: organizations.id })
@@ -163,20 +180,22 @@ export const OrganizationService = {
 
   async addMemberByEmail(actor: Actor, email: string, role: MembershipRole) {
     assertPermission(actor, "membership:manage");
-    const [user] = await db.select().from(users).where(eq(users.email, email));
-    if (!user) throw new UserNotFoundError(email);
+    const normalized = normalizeEmail(email);
 
     return withTenant(actor.organizationId, async (tx) => {
-      const [membership] = await tx
-        .insert(organizationMemberships)
-        .values({ organizationId: actor.organizationId, userId: user.id, role })
-        .returning();
+      const [user] = await tx.select().from(users).where(eq(users.email, normalized));
+      if (!user) throw new UserNotFoundError(normalized);
+
+      // Seat limit + duplicate checks run under a row lock on the organization
+      // (membership-rules.ts), so concurrent adds cannot overshoot the limit.
+      const { membership, reactivated } = await addMembership(tx, actor.organizationId, user.id, role);
 
       await AuditService.record(tx, actor, {
         action: "membership.created",
         entityType: "OrganizationMembership",
-        entityId: membership!.id,
+        entityId: membership.id,
         after: { userId: user.id, role },
+        metadata: reactivated ? { reactivated: true } : undefined,
       });
 
       return membership;
@@ -186,53 +205,24 @@ export const OrganizationService = {
   async updateMemberRole(actor: Actor, membershipId: string, role: MembershipRole) {
     assertPermission(actor, "membership:manage");
     return withTenant(actor.organizationId, async (tx) => {
-      const [existing] = await tx
-        .select()
-        .from(organizationMemberships)
-        .where(
-          and(
-            eq(organizationMemberships.id, membershipId),
-            eq(organizationMemberships.organizationId, actor.organizationId),
-          ),
-        );
-      if (!existing) throw new MembershipNotFoundError(membershipId);
-
-      const [updated] = await tx
-        .update(organizationMemberships)
-        .set({ role, updatedAt: new Date() })
-        .where(eq(organizationMemberships.id, membershipId))
-        .returning();
+      const { before, after } = await changeMembershipRole(tx, actor.organizationId, membershipId, role);
 
       await AuditService.record(tx, actor, {
         action: "membership.role_changed",
         entityType: "OrganizationMembership",
         entityId: membershipId,
-        before: { role: existing.role },
-        after: { role },
+        before: { role: before.role },
+        after: { role: after.role },
       });
 
-      return updated;
+      return after;
     });
   },
 
   async removeMember(actor: Actor, membershipId: string) {
     assertPermission(actor, "membership:manage");
     return withTenant(actor.organizationId, async (tx) => {
-      const [existing] = await tx
-        .select()
-        .from(organizationMemberships)
-        .where(
-          and(
-            eq(organizationMemberships.id, membershipId),
-            eq(organizationMemberships.organizationId, actor.organizationId),
-          ),
-        );
-      if (!existing) throw new MembershipNotFoundError(membershipId);
-
-      await tx
-        .update(organizationMemberships)
-        .set({ isActive: false, updatedAt: new Date() })
-        .where(eq(organizationMemberships.id, membershipId));
+      await deactivateMembership(tx, actor.organizationId, membershipId);
 
       await AuditService.record(tx, actor, {
         action: "membership.removed",
@@ -242,5 +232,20 @@ export const OrganizationService = {
         after: { isActive: false },
       });
     });
+  },
+
+  /** Seats used vs allowed — what the settings page shows next to the add-member control. */
+  async getSeatUsage(organizationId: string) {
+    const [org] = await db
+      .select({ seatLimit: organizations.seatLimit, planTier: organizations.planTier })
+      .from(organizations)
+      .where(eq(organizations.id, organizationId));
+    if (!org) throw new OrganizationRecordNotFoundError(organizationId);
+    const [row] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(organizationMemberships)
+      .where(and(eq(organizationMemberships.organizationId, organizationId), eq(organizationMemberships.isActive, true)));
+    const seatsUsed = row?.n ?? 0;
+    return { seatsUsed, seatLimit: org.seatLimit, planTier: org.planTier, isFull: seatsUsed >= org.seatLimit };
   },
 };

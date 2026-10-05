@@ -1,5 +1,6 @@
 import { notFound, redirect } from "next/navigation";
 import { getCurrentUser } from "@/lib/session";
+import { isPlatformAdminUser } from "@/lib/platform-admin";
 import { OrganizationService } from "@/domain/organizations/organization-service";
 import { DashboardShell } from "@/components/shell/dashboard-shell";
 
@@ -38,6 +39,7 @@ export default async function OrgLayout({
       role={membership.role}
       userName={user.name}
       userEmail={user.email}
+      showAdminLink={isPlatformAdminUser(user)}
     >
       {children}
     </DashboardShell>

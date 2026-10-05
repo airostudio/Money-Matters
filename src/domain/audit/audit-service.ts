@@ -29,12 +29,12 @@ const REDACTED_FIELDS = new Set([
 ]);
 const REDACTED_PLACEHOLDER = "[redacted]";
 
-function redact(value: unknown): unknown {
+export function redactSensitive(value: unknown): unknown {
   if (value === null || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map(redact);
+  if (Array.isArray(value)) return value.map(redactSensitive);
   const out: Record<string, unknown> = {};
   for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
-    out[key] = REDACTED_FIELDS.has(key) ? REDACTED_PLACEHOLDER : redact(val);
+    out[key] = REDACTED_FIELDS.has(key) ? REDACTED_PLACEHOLDER : redactSensitive(val);
   }
   return out;
 }
@@ -53,9 +53,37 @@ export const AuditService = {
       action: params.action,
       entityType: params.entityType,
       entityId: params.entityId,
-      before: params.before !== undefined ? (redact(params.before) as object) : null,
-      after: params.after !== undefined ? (redact(params.after) as object) : null,
+      before: params.before !== undefined ? (redactSensitive(params.before) as object) : null,
+      after: params.after !== undefined ? (redactSensitive(params.after) as object) : null,
       metadata: params.metadata ?? null,
+    });
+  },
+
+  /**
+   * An entry in an organization's own audit log written by the PLATFORM (a
+   * platform admin changed its seat limit, a member's role, ...) so customers
+   * can see their account was changed by the platform. Recorded as a SYSTEM
+   * actor with no user id: the customer sees "the platform", not the admin's
+   * personal identity. `metadata.platformAdmin = true` marks it, and
+   * `platformAuditId` links the matching platform_admin_audit_logs row.
+   * Must run inside the same `withTenant(organizationId)` transaction as the
+   * change, like `record`.
+   */
+  async recordPlatformAction(
+    tx: TenantDb,
+    organizationId: string,
+    params: RecordAuditParams & { platformAuditId: string },
+  ): Promise<void> {
+    await tx.insert(auditLogs).values({
+      organizationId,
+      actorUserId: null,
+      actorType: "SYSTEM",
+      action: params.action,
+      entityType: params.entityType,
+      entityId: params.entityId,
+      before: params.before !== undefined ? (redactSensitive(params.before) as object) : null,
+      after: params.after !== undefined ? (redactSensitive(params.after) as object) : null,
+      metadata: { ...(params.metadata ?? {}), platformAdmin: true, platformAuditId: params.platformAuditId },
     });
   },
 };

@@ -1,11 +1,13 @@
 import { Pool } from "pg";
 import { closeDatabase, db } from "@/db/client";
-import { users } from "@/db/schema";
+import { eq } from "drizzle-orm";
+import { organizations, users } from "@/db/schema";
 import { OrganizationService } from "@/domain/organizations/organization-service";
 import type { Actor } from "@/domain/permissions/permission-service";
 import type { MembershipRole } from "@/domain/permissions/roles";
 
 const TENANT_TABLES = [
+  "platform_admin_audit_logs",
   "scenarios",
   "cash_forecast_settings",
   "budget_lines",
@@ -106,6 +108,7 @@ export async function createTestUser(namePrefix = "Test User"): Promise<{ id: st
 /** Creates a fresh organization with an OWNER user and returns a ready-to-use Actor. */
 export async function createTestOrg(
   slugPrefix = "test-org",
+  options: { seatLimit?: number } = {},
 ): Promise<{ organizationId: string; owner: Actor; baseCurrency: string }> {
   const user = await createTestUser("Owner");
   const org = await OrganizationService.createWithOwner(user.id, {
@@ -113,6 +116,14 @@ export async function createTestOrg(
     name: `${slugPrefix} ${testUserCounter}`,
     baseCurrency: "AUD",
   });
+
+  // Real organizations default to 2 seats (see the seat-limit tests); most
+  // fixtures need several members (creator, approver, reviewer, ...), so
+  // they get headroom unless a test asks for a specific limit.
+  await db
+    .update(organizations)
+    .set({ seatLimit: options.seatLimit ?? 50 })
+    .where(eq(organizations.id, org.id));
 
   return {
     organizationId: org.id,
