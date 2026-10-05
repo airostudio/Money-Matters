@@ -204,6 +204,9 @@ describe("Tenant isolation", () => {
       "budget_lines",
       "scenarios",
       "cash_forecast_settings",
+      "period_closes",
+      "close_signoffs",
+      "period_lock_events",
     ];
 
     const rows = await db.execute<{

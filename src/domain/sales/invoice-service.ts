@@ -11,7 +11,7 @@ import { withTenant, type TenantDb } from "@/db/tenant";
 import { Money } from "@/domain/money/money";
 import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
 import { AuditService } from "@/domain/audit/audit-service";
-import { PostingService } from "@/domain/ledger/posting-service";
+import { PostingService, type PostOptions } from "@/domain/ledger/posting-service";
 import type { JournalLineDraft } from "@/domain/ledger/types";
 import {
   InvalidContactForInvoiceError,
@@ -333,7 +333,7 @@ export const InvoiceService = {
    * for free rather than re-implementing any of them. Never posts directly
    * to `journal_lines`.
    */
-  async approveAndPost(actor: Actor, invoiceId: string) {
+  async approveAndPost(actor: Actor, invoiceId: string, postOptions?: PostOptions) {
     assertPermission(actor, "customer_invoice:post");
     return withTenant(actor.organizationId, async (tx) => {
       const invoice = await loadInvoiceOr404(tx, actor.organizationId, invoiceId);
@@ -436,7 +436,7 @@ export const InvoiceService = {
         memo: `Invoice ${invoice.invoiceNumber}`,
         sourceType: "MANUAL",
         lines: journalLines,
-      });
+      }, postOptions);
 
       if (movementIds.length > 0) {
         await InventoryService.linkMovementsToJournalEntry(tx, movementIds, posted.entryId);

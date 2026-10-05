@@ -13,7 +13,7 @@ import { withTenant, type TenantDb } from "@/db/tenant";
 import { Money } from "@/domain/money/money";
 import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
 import { AuditService } from "@/domain/audit/audit-service";
-import { PostingService } from "@/domain/ledger/posting-service";
+import { PostingService, type PostOptions } from "@/domain/ledger/posting-service";
 import type { JournalLineDraft } from "@/domain/ledger/types";
 import {
   BillNotFoundError,
@@ -284,7 +284,7 @@ export const SupplierCreditService = {
    * (and each tax code's input-credit account) and debits Accounts Payable,
    * via `PostingService.postJournal`, never a direct `journal_lines` write.
    */
-  async approveAndPost(actor: Actor, creditId: string) {
+  async approveAndPost(actor: Actor, creditId: string, postOptions?: PostOptions) {
     assertPermission(actor, "supplier_credit:post");
     return withTenant(actor.organizationId, async (tx) => {
       const credit = await loadCreditOr404(tx, actor.organizationId, creditId);
@@ -340,7 +340,7 @@ export const SupplierCreditService = {
         memo: `Supplier credit ${credit.creditNoteNumber}`,
         sourceType: "MANUAL",
         lines: journalLines,
-      });
+      }, postOptions);
 
       const [updated] = await tx
         .update(supplierCreditNotes)

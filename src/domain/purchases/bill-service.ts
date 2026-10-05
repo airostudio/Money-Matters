@@ -11,7 +11,7 @@ import { withTenant, type TenantDb } from "@/db/tenant";
 import { Money } from "@/domain/money/money";
 import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
 import { AuditService } from "@/domain/audit/audit-service";
-import { PostingService } from "@/domain/ledger/posting-service";
+import { PostingService, type PostOptions } from "@/domain/ledger/posting-service";
 import type { JournalLineDraft } from "@/domain/ledger/types";
 import {
   BillAlreadyVoidError,
@@ -359,7 +359,7 @@ export const BillService = {
    * (balance, period-lock, immutability) for free rather than
    * re-implementing any of them. Never posts directly to `journal_lines`.
    */
-  async approveAndPost(actor: Actor, billId: string) {
+  async approveAndPost(actor: Actor, billId: string, postOptions?: PostOptions) {
     assertPermission(actor, "supplier_bill:post");
     return withTenant(actor.organizationId, async (tx) => {
       const bill = await loadBillOr404(tx, actor.organizationId, billId);
@@ -424,7 +424,7 @@ export const BillService = {
         memo: `Bill ${bill.billNumber}`,
         sourceType: "MANUAL",
         lines: journalLines,
-      });
+      }, postOptions);
 
       // Phase 7 Slice 2 (Inventory): every line buying a TRACKED_INVENTORY
       // product increases its quantity and recomputes its weighted-average
