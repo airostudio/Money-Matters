@@ -114,6 +114,11 @@ export const PERMISSIONS = [
   "client_request:read",
   "client_request:respond",
   "client_request:manage",
+  // Phase 10 Slice 1 (public developer API, master spec s.54). Creating and
+  // revoking API keys is held ONLY by OWNER / ADMINISTRATOR (they receive every
+  // permission; no other role lists it). An API key can itself never carry this
+  // permission - it is not reachable from any API scope (src/domain/api/scopes.ts).
+  "api_key:manage",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];

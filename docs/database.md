@@ -811,6 +811,33 @@ tables (of 103)". New enums: `practice_role`, `practice_member_status`,
 `practice_link_status`, task/priority/category/frequency enums, `workpaper_*`, and the
 three `client_request_*` enums. New permissions: `client_request:read|respond|manage`.
 
+## 2r. Phase 10 Slice 1: the public API tables (migrations `0042`, `0043`)
+
+Four tables and one enum value. Two are ordinary tenant tables; two are deliberately **not** tenant tables because API authentication
+runs before the organization is known. Design and threat analysis: `docs/security.md` section 15.
+
+**Tenant-scoped** (`organization_id`, RLS enabled + FORCEd, the usual single-variable policy, `withTenant`):
+
+- **`api_keys`** — the management record of a key: `name`, non-secret `prefix`, `scopes text[]`, `created_by_user_id`, `created_at`,
+  optional `expires_at`, `revoked_at` / `revoked_by_user_id`, optional `rate_limit_per_minute`. Never the secret or its hash. `mm_app` has
+  `SELECT, INSERT` and `UPDATE (revoked_at, revoked_by_user_id)` only. `UNIQUE (id, organization_id)` is the target of the index's composite FK.
+- **`api_idempotency_keys`** — replay records for API POSTs: `api_key_id`, `idempotency_key`, `request_hash` (SHA-256 of method + path +
+  canonical body), `response_status`, `response_body` (jsonb), `created_at`. `UNIQUE (organization_id, api_key_id, idempotency_key)` is what makes
+  two simultaneous identical requests serialise. Inserted first, in the same transaction as the work; retained 24 hours; purged lazily and on demand.
+
+**Not tenant-scoped (grant-bounded; no financial data):**
+
+- **`api_key_index`** — `id` (= `api_keys.id`), `organization_id`, unique `prefix`, `secret_hash` (SHA-256 hex), `created_by_user_id`, `scopes`,
+  `expires_at`, `revoked_at`, `rate_limit_per_minute`, `last_used_at`. The authentication lookup (prefix -> organization). It is the only table
+  in `RLS_EXEMPT_TABLES` besides `organization_memberships`. `mm_app`: `SELECT, INSERT`, `UPDATE (revoked_at, last_used_at)`; no `DELETE`/`TRUNCATE`.
+  Composite FK `(id, organization_id) -> api_keys(id, organization_id)` ON DELETE CASCADE.
+- **`api_rate_windows`** — `key_id` (PK, FK to the index), `window_start`, `request_count`: one fixed-window counter row per key, no organization
+  column. `mm_app`: `SELECT, INSERT, UPDATE`.
+
+`audit_actor_type` gained the value `API` (`ALTER TYPE ... ADD VALUE` in `0042`; nothing in the same migration uses it). New permission `api_key:manage`.
+The isolation audit reports "72 organization-scoped and 8 user-scoped and 18 practice-scoped tables (of 107)".
+
+
 ## 3. Row-Level Security
 
 Every tenant table gets an RLS policy of the shape:

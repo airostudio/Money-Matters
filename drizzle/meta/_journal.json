@@ -295,6 +295,20 @@
       "when": 1791437338243,
       "tag": "0041_practice_slice5_row_level_security",
       "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1791437338244,
+      "tag": "0042_public_api_slice1_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1791437338245,
+      "tag": "0043_public_api_slice1_row_level_security",
+      "breakpoints": true
     }
   ]
 }

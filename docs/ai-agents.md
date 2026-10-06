@@ -702,6 +702,22 @@ an end-to-end run with a mocked Anthropic SDK captures every payload sent to the
 the answer and asserts the same; an attempted `sign_off_workpaper` is an unknown tool and
 the workpaper stays a draft.
 
+## 0j. The public API is not an AI surface: API keys are outside the controller's reach (Phase 10 Slice 1)
+
+Phase 10 Slice 1 adds API keys for server integrations (`docs/api.md`, `docs/security.md` section 15). The AI Financial Controller
+has **no tool that touches them**, in either direction:
+
+- No read tool, no write tool (`prepare_*`), no specialist mode and no auto-execution allowlist entry mentions API keys, scopes or the
+  API. `ApiKeyService` requires a `HUMAN` actor *and* `api_key:manage` (OWNER/ADMINISTRATOR), so an `AI`-typed actor is refused even if it
+  carried the OWNER role, and a test pins the only modules that import the key service (the settings page and its actions).
+- The converse also holds: an API key is itself a non-human actor (`type: "API"`), refused by every human-only check the AI is refused by
+  (period close/reopen, lock overrides, sign-offs), and its effective permissions are a strict whitelist that excludes everything in the
+  §3b "never auto-executable" list (supplier payments, payment runs, payroll, tax, period close). Its writes are DRAFT-only, mirroring the
+  AI "prepare, a human confirms" rule: an integration prepares a draft invoice or bill, a person posts it.
+- `src/tests/unit/api/ai-boundary.test.ts` asserts the controller tool registry (read and write), the specialist agent modes and the
+  auto-execution allowlist contain nothing API-key related and that the AI source tree never imports the API modules.
+
+
 ## 1. Why this belongs in the Phase 1 docs
 
 The single most important constraint on the AI layer is: **it must never see

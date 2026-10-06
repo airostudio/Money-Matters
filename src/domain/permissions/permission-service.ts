@@ -1,6 +1,10 @@
 import { roleHasPermission, type MembershipRole, type Permission } from "./roles";
 
-export type ActorType = "HUMAN" | "AI" | "SYSTEM";
+/**
+ * `API` is a request authenticated by an API key (Phase 10 Slice 1). Like `AI` and `SYSTEM` it is NOT human, so
+ * every human-only check (`type === "HUMAN"`: period close/reopen/override, sign-offs, ...) refuses it.
+ */
+export type ActorType = "HUMAN" | "AI" | "SYSTEM" | "API";
 
 /**
  * The acting party for a domain-service call: a specific user, in a
@@ -15,6 +19,15 @@ export interface Actor {
   role: MembershipRole;
   /** Defaults to HUMAN. Phase 6 AI agents pass "AI" so AuditService records it. */
   type?: ActorType;
+  /**
+   * When set, a NARROWING of `role`: the actor may use only the permissions in this set (and, as always, only
+   * those its role also holds). Set for API-key actors to the key's scope-derived permissions already
+   * intersected with the creator's current role. `assertPermission` consults it in addition to the role - it
+   * can only ever remove power, never add it.
+   */
+  grantedPermissions?: ReadonlySet<Permission>;
+  /** Present for an `API` actor: which key acted. Recorded in the audit metadata by `AuditService.record`. Never the secret. */
+  apiKey?: { id: string; prefix: string };
 }
 
 /**
@@ -62,6 +75,9 @@ export class OrganizationMismatchError extends Error {
 /** Throws PermissionDeniedError if the actor's role lacks `permission`. */
 export function assertPermission(actor: Actor, permission: Permission): void {
   if (!roleHasPermission(actor.role, permission)) {
+    throw new PermissionDeniedError(permission, actor.role);
+  }
+  if (actor.grantedPermissions && !actor.grantedPermissions.has(permission)) {
     throw new PermissionDeniedError(permission, actor.role);
   }
 }

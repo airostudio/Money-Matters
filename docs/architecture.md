@@ -165,3 +165,25 @@ everything else in the master spec's sections 10-87 are **out of scope for
 this session** and tracked in `docs/roadmap.md`. Phase 1's job is to prove
 the ledger, tenancy, permissions and audit trail are correct, because every
 later feature posts through them.
+## 11. Public API: the per-request database budget (Phase 10 Slice 1)
+
+The Supabase session pooler caps the whole project at about 15 clients and `DATABASE_POOL_MAX` defaults to 3, so an API request must cost a
+small, **fixed** number of **sequential** statements and hold **at most one pooled connection at a time** (no `Promise.all`, no nested
+`withTenant`). The budget, measured at the driver (every statement, including `BEGIN`/`set_config`/`COMMIT`) by
+`src/tests/integration/api/api-query-budget.test.ts` against the real database:
+
+| Request | Statements | Notes |
+|---|---|---|
+| malformed / missing key | 0 | rejected on shape, before any query; repeat offenders from one address are cut off in memory |
+| unknown prefix | 1 | the lookup |
+| `GET /me`, 403 insufficient scope, 429 rate limited | 2 | (1) key lookup joined to the creator's membership and `users.disabled_at`; (2) one atomic rate-limit upsert (which also stamps `last_used_at` at most once a minute) |
+| any read (`/customers`, `/accounts`, `/invoices`, `/journals`, reports) | 6 to 9 | the 2 above + ONE `withTenant` (`BEGIN`, `set_config`, 1-3 set-based queries, `COMMIT`); independent of the number of rows or lines |
+| `POST /invoices` with `Idempotency-Key` | 20 | the 2 above + ONE `withTenant` containing the idempotency claim, the same creation code as the UI, the reload for the response and the idempotency completion; independent of the number of lines |
+| replay of a completed POST | 9 | claim conflict + read + commit; nothing is created |
+| validation failure | 2 | rejected before any tenant transaction |
+
+Order: authenticate (cheap checks first) -> rate-limit **before** any expensive work -> permission/scope checks (no database) -> strict body
+validation (no database) -> exactly one `withTenant`. Tests assert `withTenant` is entered at most once per request and never nested, and
+a structural test forbids `Promise.all`/`allSettled`/`race` and any private `pg` connection in `src/domain/api` and `src/app/api/v1`.
+Only `api-auth.ts` and `rate-limit.ts` use the non-tenant `db` handle, for the two authentication statements.
+

@@ -793,3 +793,126 @@ a read-only member occupies a seat like any other. When it is full, the Team car
 and removing someone frees a seat. More seats are raised by the **platform
 administrator** from `/admin/organizations/<id>` (see 10.6) - the owner cannot raise it
 themselves.
+
+## 15. Public developer API (Phase 10 Slice 1): API keys, effective permissions, the lookup index
+
+An API key is a **new authentication path into tenant data** that bypasses the browser session and the app shell. Everything
+the rest of this document guarantees has to hold on it. Developer-facing description: `docs/api.md`.
+
+### 15.1 The key and its secret
+
+- Format `mm_live_<prefix>_<secret>`. The 8-character **prefix** (`[a-z0-9]`) is not secret: it is displayed in the key list, named
+  in audit rows and used to find the key with one indexed query. The **secret** is 32 bytes (256 bits) from the OS CSPRNG, as 43
+  base64url characters.
+- Shown to the creator **exactly once**, in the response to the create action (`useFormState`), held only in that form's client state.
+  Never in a URL, redirect, cookie, log, audit row or database.
+- Stored only as a **SHA-256 hex digest of the whole key**. A slow password hash (bcrypt/scrypt) is deliberately *not* used: those
+  exist to make guessing a *low-entropy* secret expensive; here the secret is 256 bits of uniform randomness, so there is nothing to
+  guess or run a dictionary against — brute force is infeasible at any hash speed — and a slow hash would only make every
+  request slower and give an attacker a pre-authentication CPU-exhaustion lever. Comparison is constant-time
+  (`timingSafeEqual` on equal-length buffers).
+- Never returned by any list/get (the list selects explicit columns; a structural test asserts the query never mentions the hash),
+  never in audit `before`/`after` (`secretHash`, `secret_hash`, `apiKey`, `api_key`, `authorization` were added to
+  `AuditService`'s `REDACTED_FIELDS`, on top of the audit rows simply never containing it), never logged (the API logs only the
+  request id, route and the first line of an unexpected error; a structural test forbids logging headers, bodies or keys).
+- Accepted **only** via `Authorization: Bearer <key>`. Not the query string (a URL ends up in logs, referrers and history), not a cookie.
+
+### 15.2 Effective permissions = key scopes ∩ the creator's CURRENT role ∩ the API whitelist
+
+Computed on **every request**, never stored:
+
+1. The key's scopes (a closed set of ten, `src/domain/api/scopes.ts`) map to **existing** permissions — there is no parallel
+   permission system. `*:write` is draft-creation only.
+2. The result is intersected with the permissions the key creator's **current** role holds, read in the same query that finds
+   the key. Demoting the creator shrinks the key on the next request; removing them (`organization_memberships.is_active`) or
+   suspending them (`users.disabled_at`, the same flag the session layer checks) kills it (`401 api_key_owner_inactive`), and
+   reinstating them revives it. A key can never do more than its creator could, and never more than its scopes.
+3. The result is intersected with `API_ALLOWED_PERMISSIONS`, an explicit whitelist of eleven permissions (contact, account,
+   customer-invoice and supplier-bill read/manage-as-draft, customer/supplier payment read, journal read, financial report read). A test pins
+   the exact contents so adding to it is a deliberate, reviewed change.
+
+The result becomes the `Actor` the domain services receive: `type: "API"`, `role` = the creator's current role, and
+`grantedPermissions` = the effective set. `assertPermission` consults `grantedPermissions` **in addition to** the role check, so
+services enforce permissions for an API caller exactly as they do for a human, and the extra field can only ever remove power.
+
+### 15.3 Human-only and critical actions are unreachable — structurally
+
+- `ActorType` gained `"API"` (and the `audit_actor_type` enum the value `API`). Every human-only check in the codebase asks "is this
+  actor a HUMAN?" (`assertHumanWith` for period close/reopen/sign-offs, `evaluatePosting` / `evaluateLockChange` for overrides), so an
+  API actor is refused **even with the OWNER role and a granted permission** — a test runs those checks with an API owner.
+- No scope maps to a human-only or critical permission, and `API_ALLOWED_PERMISSIONS` excludes them: period close/reopen/lock overrides and
+  sign-offs, member/role/seat management (`membership:manage`), AI autonomy settings (`organization:manage`), payment-run
+  approval, payroll (`payrun:*`, `employee:*` — v1 has no payroll or employee endpoint), practice and consolidation, platform admin,
+  `*:post|void|approve|reverse` and `api_key:manage`. `isForbiddenForApi` classifies every permission by action and resource and a test
+  walks the whole `PERMISSIONS` list; another test asserts the union of everything any scope can grant equals the whitelist.
+- `api_key:manage` exists only on OWNER and ADMINISTRATOR (they hold every permission), and `ApiKeyService` additionally requires a
+  `HUMAN` actor: an AI, system or API actor is refused. No AI controller tool, specialist mode or auto-execution entry mentions
+  keys (`src/tests/unit/api/ai-boundary.test.ts`), and a test pins the only modules that import the key service.
+- **Writes are draft-only.** The only write endpoints create customers/suppliers and DRAFT invoices/bills through
+  `ContactService.createIn`, `InvoiceService.createIn`, `BillService.createIn` (the existing creation code, now callable inside a
+  caller-owned transaction), so validation, tax calculation, permission checks and audit are the human path's. There is no
+  post/approve/void/pay/delete route and no `PUT`/`PATCH`/`DELETE` method (middleware answers `405`).
+- A draft dated in a **locked period** is refused for every lock level (`evaluatePosting` with actor type `API`, which only allows
+  OPEN): an integration has no override. Stricter than the UI by design; nothing is persisted.
+
+### 15.4 The key-lookup index and why it does not weaken tenant isolation
+
+Authentication must find a key **before** it knows the organization (the key identifies it), so it cannot run under
+`withTenant`. The design:
+
+- **`api_keys`** — the management record (name, prefix, scopes, creator, expiry, revocation). An ordinary tenant table: RLS enabled and
+  FORCEd, the usual single-variable `app.current_org_id` policy, `mm_app` granted `SELECT, INSERT` plus `UPDATE (revoked_at,
+  revoked_by_user_id)` only — no `DELETE`, no editing a key's scopes or name. It never holds the secret or its hash.
+- **`api_key_index`** — a narrow, non-tenant projection used only by authentication: `prefix → organization, key id, secret hash,
+  creator, scopes, expiry, revocation, rate limit, last used`. It holds **no financial or personal data**, only authentication
+  facts, and it is the **only** RLS-exempt table added (next to `organization_memberships`, `src/db/isolation-audit.ts`
+  `RLS_EXEMPT_TABLES`). Its exposure is bounded by grants, not policies: `mm_app` has `SELECT, INSERT` and `UPDATE (revoked_at,
+  last_used_at)` — **no `DELETE`/`TRUNCATE`, and the hash, prefix, organization, creator, scopes, expiry and limit can never be
+  rewritten**. A composite foreign key `(id, organization_id) → api_keys(id, organization_id)` means an index row for a key that
+  does not exist in that organization cannot be inserted — and creating the `api_keys` row for another organization is blocked by its RLS
+  `WITH CHECK` — so a transaction scoped to organization A cannot mint a working key for organization B.
+  `src/tests/integration/api/api-isolation.test.ts` proves each of these as the real restricted role.
+- Reading it does not reach tenant data: what it returns is the organization **id** and a SHA-256 of a 256-bit secret. Seeing the hash
+  of someone's key does not let you present the key. Its trust level is the same as `organization_memberships`, which is already
+  readable and writable by the application without a tenant context.
+- After the lookup, **everything runs in one `withTenant(<the key's organization>)`** as `mm_app`. No RLS policy was changed, no
+  bypass, no privileged connection: a cross-organization id is a `404` (tested for every endpoint), and lists never show another
+  organization's rows. Cursors are HMAC-signed and bound to organization, endpoint and filters, so a tampered or transplanted cursor
+  is `400` — and even a forged one could only address the caller's own rows, because RLS still applies.
+- `api_rate_windows` (one counter row per key, `SELECT, INSERT, UPDATE` only) has no organization column and holds only counters.
+
+### 15.5 Rate limiting, abuse protection and the per-instance caveat
+
+- **Per key, in Postgres, no Redis:** `api_rate_windows` holds one row per key; one atomic
+  `INSERT … ON CONFLICT DO UPDATE … RETURNING` per request advances a fixed 60-second window using the *database* clock (so every app
+  instance agrees). Default 60 requests/minute, per-key override 10–600 (clamped). `429` carries `Retry-After`; every response carries
+  `X-RateLimit-Limit/Remaining/Reset`. The same statement stamps `last_used_at` at most once a minute, so reads do not become writes.
+  A fixed window permits a burst of up to 2× across a boundary — accepted for a single-statement counter; it protects the database from
+  a runaway integration, it is not a billing meter.
+- **A wrong secret never consumes the real key's quota** (the counter is only touched after the hash verifies), so an attacker who
+  knows a prefix cannot lock the owner out by spraying bad secrets.
+- **Invalid keys cannot hammer the database:** a malformed `Authorization` value is rejected with no query; an unknown prefix costs one
+  query. On top, a small **per-IP, in-memory** throttle cuts off an address after 20 failures in a minute (`429`), before any query.
+  It is per server instance, resets on a cold start and trusts a proxy header, so it is **not** a security boundary — the boundary is
+  the 256-bit secret — but it stops the realistic cases (a misconfigured retry loop, a naive scanner) on the instance receiving
+  them, which is where the database cost would otherwise land. Failures are the only thing counted and a success clears the address.
+
+### 15.6 No cookies, no CORS, no session
+
+`src/middleware.ts` lets `/api/v1/*` through **without** the NextAuth redirect and **removes the `Cookie` header** from the request the
+route sees, so a browser session cookie has nothing to ride on (CSRF cannot reach the API) and the route handlers neither read nor set
+cookies. No `Access-Control-*` header is ever sent and `OPTIONS` is refused, so browser use is unsupported by design; keys belong on
+servers. Responses are `Cache-Control: no-store`. The organization slug `api` stays reserved. Structural tests assert the API modules
+import no session/cookie code and contain no CORS headers.
+
+### 15.7 Auditing
+
+Every API-originated write is audited by the same domain services as a human's, in the same transaction. `AuditService.record` adds,
+for an `API` actor, `metadata = { viaApiKey: true, apiKeyId, apiKeyPrefix, apiKeyCreatedBy }` to **every** row the request writes
+(including rows services write on their own), and `actor_type = 'API'` with the creator's user id. Key creation and revocation are
+audited (`api_key.created`, `api_key.revoked`) with id, prefix, name and scopes — never the secret or its hash.
+
+### 15.8 What is not covered
+
+OAuth 2.0 for third-party apps (the auth layer is credential-agnostic by design); per-key IP allow-lists; a distributed (cross-instance)
+failure throttle; automatic rotation. Webhooks and the integration framework are later Phase 10 slices.

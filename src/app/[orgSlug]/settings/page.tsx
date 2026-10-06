@@ -35,6 +35,7 @@ export default async function SettingsPage({
   const { org, actor } = await requireOrgAndActor(params.orgSlug);
   const canManageMembers = roleHasPermission(actor.role, "membership:manage");
   const canManageOrganization = roleHasPermission(actor.role, "organization:manage");
+  const canManageApiKeys = roleHasPermission(actor.role, "api_key:manage");
 
   const members = canManageMembers
     ? (await OrganizationService.listMembers(actor)).filter((m) => m.isActive)
@@ -93,6 +94,20 @@ export default async function SettingsPage({
               Approve or revoke an accounting practice that wants to work on {org.name}&apos;s books, and see what to do to give its staff access.{" "}
               <Link href={`/${org.slug}/settings/accountant`} className="text-primary underline">
                 Manage accountant access
+              </Link>
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      )}
+
+      {canManageApiKeys && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">API access</CardTitle>
+            <CardDescription>
+              Create API keys for approved server integrations. Keys can read your data and create draft invoices, bills, customers and suppliers - never post, approve or pay anything.{" "}
+              <Link href={`/${org.slug}/settings/api`} className="text-primary underline">
+                Manage API keys
               </Link>
             </CardDescription>
           </CardHeader>

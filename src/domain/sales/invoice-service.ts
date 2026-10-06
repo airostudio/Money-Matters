@@ -302,6 +302,16 @@ export const InvoiceService = {
     return withTenant(actor.organizationId, (tx) => persistInvoiceWithLines(tx, actor, input));
   },
 
+  /**
+   * `create` inside a transaction the CALLER already opened with `withTenant(actor.organizationId, ...)`. Same
+   * permission check, validation, tax calculation and audit; the only difference is that the caller owns the
+   * transaction - the public API uses it so the idempotency record and the invoice commit atomically.
+   */
+  async createIn(tx: TenantDb, actor: Actor, input: CreateInvoiceInput) {
+    assertPermission(actor, "customer_invoice:manage");
+    return persistInvoiceWithLines(tx, actor, input);
+  },
+
   async update(actor: Actor, invoiceId: string, input: UpdateInvoiceInput) {
     assertPermission(actor, "customer_invoice:manage");
     return withTenant(actor.organizationId, async (tx) => {

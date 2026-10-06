@@ -7,6 +7,10 @@ import type { Actor } from "@/domain/permissions/permission-service";
 import type { MembershipRole } from "@/domain/permissions/roles";
 
 const TENANT_TABLES = [
+  "api_idempotency_keys",
+  "api_rate_windows",
+  "api_key_index",
+  "api_keys",
   "workpaper_signoffs",
   "workpaper_review_notes",
   "workpaper_adjustments",

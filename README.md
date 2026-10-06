@@ -167,6 +167,24 @@ Business | Accountant toggle changes terminology and shows the Practice entry
 points (presentation only), and the AI Financial Controller gains read-only
 `practice_overview` and `workpaper_status` tools. See `docs/security.md` §13
 and `docs/roadmap.md`.
+
+Phase 10 Slice 1 adds the **public developer API foundation**: versioned REST
+endpoints under `/api/v1` for approved server-to-server integrations, authenticated
+by **API keys** (Settings -> API access; Owner/Administrator only). A key reads
+customers, suppliers, accounts, invoices, bills, payments, journal entries and the P&L,
+balance sheet and trial balance, and can create **draft** invoices, bills, customers
+and suppliers - it can never post, approve, void, pay or delete anything, and it
+cannot reach payroll, period close, team/role management, AI settings or key
+management. A key's power is its scopes **intersected with its creator's current
+role**, re-evaluated on every request (demote or remove the creator and the key
+shrinks or dies at once). Every request runs inside `withTenant(<the key's
+organization>)` as the restricted database role - no RLS change. Cursor
+pagination, `Idempotency-Key` (required for invoice/bill creation; two simultaneous
+identical POSTs create one invoice), per-key rate limits with `X-RateLimit-*` /
+`Retry-After`, RFC 7807 errors, and a generated OpenAPI 3.1 document at
+`/api/v1/openapi.json`. OAuth, webhooks and the automation centre are later Phase 10
+slices. See [`docs/api.md`](docs/api.md), `docs/security.md` section 15 and
+`docs/roadmap.md`.
 See
 [`docs/roadmap.md`](docs/roadmap.md) for exactly what's built
 vs. explicitly deferred in each phase (a customer portal, AI-drafted
@@ -378,7 +396,8 @@ application code forgets a filter — see
 - [`docs/architecture.md`](docs/architecture.md) — system architecture
 - [`docs/accounting-engine.md`](docs/accounting-engine.md) — the double-entry posting engine's invariants
 - [`docs/database.md`](docs/database.md) — schema conventions, RLS, a Drizzle/Postgres pitfall worth reading before touching money-bearing queries
-- [`docs/security.md`](docs/security.md) — tenant isolation, auth, threat model
+- [`docs/security.md`](docs/security.md) — tenant isolation, auth, threat model (section 15: API keys)
+- [`docs/api.md`](docs/api.md) — the public developer API (v1): authentication, scopes, pagination, idempotency, errors, endpoints
 - [`docs/ai-agents.md`](docs/ai-agents.md) — the AI layer's architecture: the AI Financial Controller foundation (Phase 6 Slice 1), the autonomy-level gate, prepare/confirm write tools, and specialist-agent modes (Phase 6 Slice 2), and the full 0-4 autonomy dial with whitelisted auto-execution, undo, and an emergency stop (Phase 6 Slice 3). Payroll/Tax specialist agents are not yet built — see that doc and `docs/roadmap.md` for why
 - [`docs/roadmap.md`](docs/roadmap.md) — phase-by-phase status
 - [`docs/decisions/`](docs/decisions/) — ADRs for the non-obvious technical calls

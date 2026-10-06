@@ -137,6 +137,7 @@ export const PERMISSION_AREAS: Record<string, string> = {
   close_checklist: "Month-end checklist",
   consolidation: "Consolidation",
   client_request: "Accountant requests",
+  api_key: "API access",
 };
 
 function areaOf(permission: Permission): string {

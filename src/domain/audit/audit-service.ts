@@ -26,6 +26,13 @@ const REDACTED_FIELDS = new Set([
   "tfn",
   "bankAccountNumber",
   "bankBsb",
+  // Phase 10 Slice 1: an API key's secret material must never reach an audit row (it is shown to the user once
+  // and stored only as a hash in a non-audited table; these names are a belt-and-braces net for a future caller).
+  "secretHash",
+  "secret_hash",
+  "apiKey",
+  "api_key",
+  "authorization",
 ]);
 const REDACTED_PLACEHOLDER = "[redacted]";
 
@@ -44,8 +51,19 @@ export function redactSensitive(value: unknown): unknown {
  * inside the same transaction as the mutation it documents, so a failed
  * audit write rolls back the mutation too — see docs/architecture.md §6.
  */
+/**
+ * What an API-originated audit row records about the key that acted: its id and non-secret prefix (and the user
+ * who created it, who is the row's `actorUserId`). Merged into EVERY audit row an API actor writes - including
+ * the ones domain services write on their own - so no service needs to know the call came from the API.
+ */
+function apiKeyMetadata(actor: Actor): Record<string, unknown> | null {
+  if (actor.type !== "API" || !actor.apiKey) return null;
+  return { viaApiKey: true, apiKeyId: actor.apiKey.id, apiKeyPrefix: actor.apiKey.prefix, apiKeyCreatedBy: actor.userId };
+}
+
 export const AuditService = {
   async record(tx: TenantDb, actor: Actor, params: RecordAuditParams): Promise<void> {
+    const viaKey = apiKeyMetadata(actor);
     await tx.insert(auditLogs).values({
       organizationId: actor.organizationId,
       actorUserId: actor.type === "SYSTEM" ? null : actor.userId,
@@ -55,7 +73,7 @@ export const AuditService = {
       entityId: params.entityId,
       before: params.before !== undefined ? (redactSensitive(params.before) as object) : null,
       after: params.after !== undefined ? (redactSensitive(params.after) as object) : null,
-      metadata: params.metadata ?? null,
+      metadata: viaKey ? { ...(params.metadata ?? {}), ...viaKey } : (params.metadata ?? null),
     });
   },
 

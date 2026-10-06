@@ -11,8 +11,18 @@ import type { Pool } from "pg";
  * established. Isolation for it is enforced in the application layer (a
  * session only ever reads its own memberships) and covered by
  * src/tests/integration/tenant-isolation.test.ts.
+ *
+ * `api_key_index` (Phase 10 Slice 1) is the same shape of problem: the public
+ * API authenticates a key BEFORE it knows the organization (the key is what
+ * identifies it), so the prefix -> organization lookup cannot be keyed on
+ * `app.current_org_id`. It is bounded by column-level GRANTs instead (SELECT +
+ * INSERT, UPDATE of only revoked_at/last_used_at, no DELETE), holds no
+ * financial data, and a composite foreign key to the RLS-protected `api_keys`
+ * stops a row for another organization's key being forged. See
+ * docs/security.md section 15 and
+ * src/tests/integration/api/api-key-index-grants.test.ts.
  */
-export const RLS_EXEMPT_TABLES = new Set(["organization_memberships"]);
+export const RLS_EXEMPT_TABLES = new Set(["organization_memberships", "api_key_index"]);
 
 /**
  * The practice (accounting firm) scoping model, Phase 9 Slice 5 (docs/security.md

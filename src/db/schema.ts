@@ -132,7 +132,12 @@ export const approvalStatusEnum = pgEnum("approval_status", [
  */
 export const planTierEnum = pgEnum("plan_tier", ["STANDARD", "EXTENDED", "COMPLIMENTARY"]);
 
-export const auditActorTypeEnum = pgEnum("audit_actor_type", ["HUMAN", "AI", "SYSTEM"]);
+/**
+ * `API` (Phase 10 Slice 1) marks a write made through the public developer API with an API key. It is a
+ * distinct, NON-human actor type on purpose: every human-only check in the codebase asks "is this actor a
+ * HUMAN?" and so refuses an API actor structurally (docs/security.md section 15).
+ */
+export const auditActorTypeEnum = pgEnum("audit_actor_type", ["HUMAN", "AI", "SYSTEM", "API"]);
 
 /**
  * Phase 3 Slice 1 (Sales — customer invoicing & AR core). `DRAFT` has no
@@ -4799,4 +4804,109 @@ export const periodLockEvents = pgTable("period_lock_events", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   orgPeriodIdx: index("period_lock_events_org_period_idx").on(table.organizationId, table.fiscalPeriodId, table.createdAt),
+}));
+
+
+// ---------------------------------------------------------------------------
+// Public developer API (Phase 10 Slice 1) - docs/security.md section 15
+// ---------------------------------------------------------------------------
+
+/**
+ * An API key for a server-to-server integration: the MANAGEMENT record (name, scopes, who made it, whether it is
+ * revoked). A normal tenant table: RLS-protected on `organization_id`, written only inside `withTenant`. It never
+ * holds the secret or its hash - those live only in `api_key_index`, the narrow non-tenant lookup the
+ * authentication path needs BEFORE the organization is known. The key's power is never stored here: it is computed
+ * on every request as `scopes` intersected with the creator's CURRENT role permissions.
+ */
+export const apiKeys = pgTable("api_keys", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  /** Non-secret display/lookup prefix, e.g. "k3x9p2ab" (the key reads `mm_live_<prefix>_<secret>`). */
+  prefix: text("prefix").notNull(),
+  scopes: text("scopes").array().notNull(),
+  createdByUserId: uuid("created_by_user_id")
+    .notNull()
+    .references(() => users.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  revokedByUserId: uuid("revoked_by_user_id").references(() => users.id),
+  /** Requests per minute override; NULL = the platform default. Bounded by the service, see src/domain/api/rate-limit.ts. */
+  rateLimitPerMinute: integer("rate_limit_per_minute"),
+}, (table) => ({
+  orgCreatedIdx: index("api_keys_org_created_idx").on(table.organizationId, table.createdAt),
+  idOrgUnique: uniqueIndex("api_keys_id_org_unique").on(table.id, table.organizationId),
+}));
+
+/**
+ * The authentication LOOKUP index: prefix -> (organization, key id, secret hash, creator, validity). NOT a tenant
+ * table (no RLS) because the request's organization is exactly what it discovers - see docs/security.md section 15
+ * for why this does not weaken tenant isolation: it holds no financial data, only SHA-256 hashes of 256-bit random
+ * secrets; mm_app can read/insert it but never delete, and may only UPDATE `revoked_at` / `last_used_at`; and the
+ * composite foreign key (id, organization_id) -> api_keys makes an index row for another organization's key
+ * impossible to forge from inside a tenant transaction (the matching api_keys row is RLS-protected). It is
+ * listed in RLS_EXEMPT_TABLES (src/db/isolation-audit.ts) next to organization_memberships.
+ */
+export const apiKeyIndex = pgTable("api_key_index", {
+  id: uuid("id").primaryKey(),
+  organizationId: uuid("organization_id").notNull(),
+  prefix: text("prefix").notNull(),
+  /** Hex SHA-256 of the full key string. A 256-bit random token needs no slow hash (docs/security.md section 15). */
+  secretHash: text("secret_hash").notNull(),
+  createdByUserId: uuid("created_by_user_id").notNull(),
+  scopes: text("scopes").array().notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  rateLimitPerMinute: integer("rate_limit_per_minute"),
+  /** Throttled to at most one write a minute per key (it is updated inside the rate-limit statement). */
+  lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  prefixUnique: uniqueIndex("api_key_index_prefix_unique").on(table.prefix),
+  keyFk: foreignKey({
+    columns: [table.id, table.organizationId],
+    foreignColumns: [apiKeys.id, apiKeys.organizationId],
+    name: "api_key_index_key_org_fk",
+  }).onDelete("cascade"),
+}));
+
+/**
+ * One fixed-window request counter per key (one row per key, so the table never grows past the number of keys and
+ * needs no cleanup). Updated by a single atomic upsert per request. Has no organization column on purpose: it is
+ * keyed by the key id alone and holds only counters.
+ */
+export const apiRateWindows = pgTable("api_rate_windows", {
+  keyId: uuid("key_id")
+    .primaryKey()
+    .references(() => apiKeyIndex.id, { onDelete: "cascade" }),
+  windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+  requestCount: integer("request_count").notNull(),
+});
+
+/**
+ * Idempotency records for API POSTs. Tenant table (RLS). The row is inserted FIRST inside the same transaction as
+ * the work it protects, so the unique (organization, key, idempotency key) index makes two simultaneous identical
+ * requests serialise (the second waits for the first to commit, then replays its stored response) - and a failed
+ * request rolls the row back with the work, so nothing is ever half-recorded. Retained 24 hours.
+ */
+export const apiIdempotencyKeys = pgTable("api_idempotency_keys", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  apiKeyId: uuid("api_key_id")
+    .notNull()
+    .references(() => apiKeys.id, { onDelete: "cascade" }),
+  idempotencyKey: text("idempotency_key").notNull(),
+  /** SHA-256 of the canonical (method, path, body) - a reuse with a different body is refused. */
+  requestHash: text("request_hash").notNull(),
+  responseStatus: integer("response_status"),
+  responseBody: jsonb("response_body"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  keyUnique: uniqueIndex("api_idempotency_org_key_unique").on(table.organizationId, table.apiKeyId, table.idempotencyKey),
+  createdIdx: index("api_idempotency_created_idx").on(table.organizationId, table.createdAt),
 }));

@@ -328,6 +328,12 @@ export const BillService = {
     return withTenant(actor.organizationId, (tx) => persistBillWithLines(tx, actor, input));
   },
 
+  /** `create` inside a transaction the caller already opened with `withTenant` - see `InvoiceService.createIn`. */
+  async createIn(tx: TenantDb, actor: Actor, input: CreateBillInput) {
+    assertPermission(actor, "supplier_bill:manage");
+    return persistBillWithLines(tx, actor, input);
+  },
+
   async update(actor: Actor, billId: string, input: UpdateBillInput) {
     assertPermission(actor, "supplier_bill:manage");
     return withTenant(actor.organizationId, async (tx) => {

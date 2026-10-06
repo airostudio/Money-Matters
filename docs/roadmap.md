@@ -3125,11 +3125,68 @@ checks); this slice makes it safe and coherent to use. Details: `docs/security.m
 - **Pending invites for emails that have not registered yet, and any email sending, are a
   candidate follow-up awaiting the owner's decision - deliberately not built.**
 
-## Phase 10 — Platform (not started)
+## Phase 10 Slice 1 — Public API foundation — complete
 
-(With Phase 9 complete, the remaining roadmap is Phase 8's later slices — BAS/GST, STP lodgement, awards — and this phase.)
+Master spec §54: "a versioned public API ... OAuth, scopes, rate limits, API keys for approved server integrations,
+webhook subscriptions, idempotency keys, pagination, predictable error model". This slice delivers the
+**server-to-server API with API keys**; OAuth, webhooks, the integration framework and the automation centre are later
+slices. Developer guide: `docs/api.md`. Security design: `docs/security.md` section 15.
 
-Public API, webhooks, integration marketplace, advanced automation centre.
+**Built**
+- **Keys.** `mm_live_<prefix>_<256-bit secret>`, shown once, stored only as a SHA-256 hash (rationale: a 256-bit random secret needs no
+  slow hash), constant-time compare, never logged/audited/returned. Tenant table `api_keys` (RLS, FORCEd, column-restricted grants) +
+  a narrow non-tenant lookup `api_key_index` (grant-bounded, composite FK to `api_keys`; the only new RLS-exempt table) so the key
+  can be found *before* the organization is known, after which everything runs in one `withTenant`. Management UI at
+  Settings -> API access (create with scopes/expiry/rate limit, list with last used/status, revoke), audited, gated on the new
+  permission `api_key:manage` (OWNER/ADMINISTRATOR only) and on a HUMAN actor.
+- **Scopes** — ten, closed, documented (`contacts|invoices|bills :read|write`, `accounts|payments|journals|reports :read`);
+  `*:write` = draft creation only. **Effective permissions = scopes ∩ the creator's current role ∩ an explicit API whitelist**,
+  re-evaluated on every request in the same single lookup query (creator removed/suspended -> key dead; demoted -> shrinks).
+- **Human-only actions unreachable structurally**: new actor type `API` (non-human, so `assertHumanWith`/`evaluatePosting`/
+  `evaluateLockChange` refuse it), `assertPermission` narrowed by `grantedPermissions`, no scope can map to a human-only/critical permission
+  (tests walk every permission), no payroll/employee/practice/consolidation/admin endpoint, no PUT/PATCH/DELETE, no post/approve/void/pay.
+- **Endpoints** (`/api/v1`): `me`, `openapi.json`, customers, suppliers, accounts, invoices, bills (GET list/get, POST draft create for
+  customers/suppliers/invoices/bills), payments and supplier-payments (read), journals (read), P&L / balance sheet / trial balance.
+  Money = `{amount: "decimal string", currency}`, dates `YYYY-MM-DD`, timestamps RFC 3339, explicit snake_case DTOs, strict zod
+  validation (unknown fields rejected), the API never accepts totals or tax - computed by the existing `InvoiceService`/`BillService` code.
+  Drafts dated in a locked period are refused (`409 period_locked`, any lock level) with nothing persisted.
+- **Cursor pagination** (keyset on `created_at, id`, HMAC-signed, bound to org/endpoint/filters, stable under concurrent inserts).
+- **Idempotency**: record inserted first in the same transaction as the work under a unique index, so two simultaneous identical
+  POSTs create exactly one invoice (proved against the real database, including more concurrent requests than the pool), replay with
+  `Idempotent-Replayed: true`, `422 idempotency_key_reuse`, bounded wait then `409 idempotency_in_progress`, per-key scope, 24 h retention
+  with lazy + on-demand purge. Required for invoice/bill creation.
+- **Rate limiting** without Redis: one atomic Postgres upsert per request (fixed window, default 60/min, per-key 10-600), `429` +
+  `Retry-After` + `X-RateLimit-*`; `last_used_at` throttled to once a minute inside the same statement; malformed keys cost zero queries,
+  best-effort per-IP failure throttle in memory (documented as per-instance).
+- **Predictable errors**: RFC 7807 `application/problem+json`, stable `code`, `requestId`, field errors; one tested mapping table; no stack/SQL/
+  foreign-tenant ids ever returned; not-found and cross-tenant are both 404.
+- **Per-request query budget** measured and asserted: authentication = 2 statements; a read = 2 + one tenant transaction; a draft invoice create =
+  one tenant transaction with a statement count independent of the number of lines (`docs/architecture.md` section 11).
+- **OpenAPI 3.1** generated from the same zod schemas as the validation (so it cannot drift), a test fails if a route file, registry entry or OpenAPI
+  operation exists without the others, and every response is checked against its documented schema.
+- No cookies, no CORS (middleware strips the `Cookie` header on `/api/v1`, answers non-GET/HEAD/POST with 405), `/api/v1/*` bypasses the NextAuth
+  redirect. The `api` org slug stays reserved. API-originated audit rows carry the key id, prefix and creator on every row.
+- AI boundary: no controller tool (read or write), specialist mode or auto-execution entry touches API keys (tested).
+
+**Deliberately deferred (and why)**
+- **OAuth 2.0** authorization server / bearer tokens for third-party apps - a large, security-critical feature of its own (consent, client
+  registration, refresh/rotation). The authentication layer resolves a credential to an `ApiPrincipal`; nothing downstream is
+  key-specific, so OAuth tokens can be added without touching endpoints, scopes or rate limiting.
+- **Webhooks and the event outbox** - Phase 10 Slice 2. **Integration framework and automation centre** - Slice 3.
+- `PUT`/`PATCH`/`DELETE`, and posting/approving/voiding/paying via API (integrations prepare drafts, people decide).
+- **Draft journal entries via API**: `PostingService.createDraft` is gated on the *posting* permission (`journal:post`); granting it would
+  put a posting permission into a key's effective set. Needs its own permission split first.
+- Payroll, employee, practice, consolidation and platform-admin endpoints.
+- Per-key IP allow-lists; a key-rotation workflow beyond create-new + revoke-old; a usage analytics dashboard; SDKs; a cross-instance
+  (distributed) failure throttle; sparse-fields / expand parameters; filtering lists by more than the obvious fields.
+
+**Phase 10 remaining:** webhooks + event outbox (Slice 2), integration framework + automation centre (Slice 3), OAuth 2.0 for third-party apps.
+
+## Phase 10 — Platform (in progress)
+
+Slice 1 (the public API foundation, API keys) is complete - see above. Remaining: webhook subscriptions and the event outbox, the
+integration framework and adapters, the advanced automation centre, and OAuth 2.0 for third-party apps. (Phase 8's later slices - BAS/GST,
+STP lodgement, awards - are also still open.)
 
 ## Explicit non-goals for this session
 

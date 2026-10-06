@@ -66,6 +66,45 @@ export function normalBalanceSide(type: AccountType): "DEBIT" | "CREDIT" {
   return type === "ASSET" || type === "EXPENSE" ? "DEBIT" : "CREDIT";
 }
 
+async function trialBalanceWithCurrency(
+  actor: Actor,
+  asOfDate: Date,
+): Promise<{ currency: string; rows: TrialBalanceRow[] }> {
+  assertPermission(actor, "journal:read");
+  return withTenant(actor.organizationId, async (tx) => {
+    const [org] = await tx
+      .select({ baseCurrency: organizations.baseCurrency })
+      .from(organizations)
+      .where(eq(organizations.id, actor.organizationId));
+    const baseCurrency = org?.baseCurrency ?? "AUD";
+
+    // A REVERSED entry is still permanent ledger history — its lines stay
+    // in every balance calculation. Only its NEW reversal entry's
+    // opposite postings cancel the effect out. See
+    // docs/accounting-engine.md §1 and `sumPostedActivityByAccount`'s own
+    // comment, the shared helper this and every Phase 5 financial
+    // statement query build on.
+    const aggregated = await sumPostedActivityByAccount(tx, actor.organizationId, { to: asOfDate });
+
+    const rows = aggregated.map((row) => {
+      const debit = Money.of(row.totalDebit, baseCurrency);
+      const credit = Money.of(row.totalCredit, baseCurrency);
+      const side = normalBalanceSide(row.type);
+      const balance = side === "DEBIT" ? debit.subtract(credit) : credit.subtract(debit);
+      return {
+        accountId: row.accountId,
+        code: row.code,
+        name: row.name,
+        type: row.type,
+        balance: balance.toString(),
+        totalDebit: debit.toString(),
+        totalCredit: credit.toString(),
+      };
+    });
+    return { currency: baseCurrency, rows };
+  });
+}
+
 export const LedgerService = {
   /**
    * ONE account's posted balance as at `asOfDate`, in the base currency and in the account's
@@ -119,38 +158,12 @@ export const LedgerService = {
    * report and for account balance displays throughout the UI.
    */
   async getTrialBalance(actor: Actor, asOfDate: Date = new Date()): Promise<TrialBalanceRow[]> {
-    assertPermission(actor, "journal:read");
-    return withTenant(actor.organizationId, async (tx) => {
-      const [org] = await tx
-        .select({ baseCurrency: organizations.baseCurrency })
-        .from(organizations)
-        .where(eq(organizations.id, actor.organizationId));
-      const baseCurrency = org?.baseCurrency ?? "AUD";
+    return (await trialBalanceWithCurrency(actor, asOfDate)).rows;
+  },
 
-      // A REVERSED entry is still permanent ledger history — its lines stay
-      // in every balance calculation. Only its NEW reversal entry's
-      // opposite postings cancel the effect out. See
-      // docs/accounting-engine.md §1 and `sumPostedActivityByAccount`'s own
-      // comment, the shared helper this and every Phase 5 financial
-      // statement query build on.
-      const aggregated = await sumPostedActivityByAccount(tx, actor.organizationId, { to: asOfDate });
-
-      return aggregated.map((row) => {
-        const debit = Money.of(row.totalDebit, baseCurrency);
-        const credit = Money.of(row.totalCredit, baseCurrency);
-        const side = normalBalanceSide(row.type);
-        const balance = side === "DEBIT" ? debit.subtract(credit) : credit.subtract(debit);
-        return {
-          accountId: row.accountId,
-          code: row.code,
-          name: row.name,
-          type: row.type,
-          balance: balance.toString(),
-          totalDebit: debit.toString(),
-          totalCredit: credit.toString(),
-        };
-      });
-    });
+  /** The same trial balance together with the base currency its amounts are in (the public API needs both in one transaction). */
+  async getTrialBalanceWithCurrency(actor: Actor, asOfDate: Date = new Date()) {
+    return trialBalanceWithCurrency(actor, asOfDate);
   },
 
   async listJournalEntries(actor: Actor, opts: { limit?: number; offset?: number } = {}) {
