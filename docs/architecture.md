@@ -186,8 +186,8 @@ a structural test forbids `Promise.all`/`allSettled`/`race` and any private `pg`
 Only `api-auth.ts` and `rate-limit.ts` use the non-tenant `db` handle, for the two authentication statements.
 
 Phase 10 Slice 2 note: creating an invoice now also writes its `invoice.created` outbox row in that same transaction - one `INSERT` plus the
-three snapshot reads described in §12 - so the `POST /invoices` figure above (20 when it was measured) grows by exactly those four statements
-and is still independent of the number of lines; `api-query-budget.test.ts` is unchanged and still passes.
+three snapshot reads described in §12 - so the `POST /invoices` figure above now measures **23** statements (re-measured at the driver after Slice 2; the
+table's 20 predates the outbox), still independent of the number of lines and still one tenant transaction; `api-query-budget.test.ts` is unchanged and still passes.
 
 ## 12. Transactional outbox and webhook dispatch (Phase 10 Slice 2)
 

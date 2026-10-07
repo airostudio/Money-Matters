@@ -3221,6 +3221,13 @@ attempt after the request.
   public API, mTLS / sender IP allow-listing (no stable egress), dead-letter email notifications, bulk re-encryption when the encryption key is rotated.
 - The **integration framework (§53) and automation centre (§75)** are the next slice.
 
+**Verified.** Typecheck, lint, the full suite (1812 tests: 1475 existing, unmodified, + 337 new) and `npm run build` pass. A real-HTTP smoke test against `next start` (production build, no browser):
+an invoice created through the public API with a key wrote its outbox row and was dispatched right after the response to a real public HTTPS host (`example.com`: real DNS, real TLS verification, a real 405 recorded in the
+attempt log, a 1-minute backoff scheduled); the **Send now**, **Send test event** and **Replay** server actions were driven by posting the rendered forms with a logged-in session (303 redirects with the outcome, the
+replay attributed to the person in the attempt log); creating webhooks for `https://127.0.0.1`, the metadata address, `http://...`, `localhost` and `localtest.me` (a public name that resolves to 127.0.0.1) was **refused**
+by the guard; with the key unset the page showed the "Webhooks are turned off" message while the rest of Settings and Sales rendered and an API invoice still returned 201 (its event waiting, undispatched). **Not verified:**
+the visual layout (no browser), a delivery to a 2xx endpoint over the public internet (covered by the real-TLS-server tests instead), behaviour on Vercel itself (`waitUntil` is a no-op off Vercel).
+
 **New environment variable:** `WEBHOOK_SECRET_ENCRYPTION_KEY` (optional; webhooks are off without it). **New dependency:** `@vercel/functions` (for `waitUntil`).
 
 **Phase 10 remaining:** integration framework + automation centre (Slice 3), OAuth 2.0 for third-party apps, a global webhook dispatcher/scheduler (needs a cross-tenant work index).
