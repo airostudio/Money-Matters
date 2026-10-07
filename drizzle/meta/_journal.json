@@ -309,6 +309,20 @@
       "when": 1791437338245,
       "tag": "0043_public_api_slice1_row_level_security",
       "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1791437338246,
+      "tag": "0044_webhooks_slice2_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1791437338247,
+      "tag": "0045_webhooks_slice2_row_level_security",
+      "breakpoints": true
     }
   ]
 }

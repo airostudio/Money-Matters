@@ -6,6 +6,7 @@ import { ApiError, apiErrors, toApiError, toProblem } from "./errors";
 import { parseIdempotencyKey } from "./idempotency";
 import type { EndpointDef } from "./endpoints";
 import type { RateLimitState } from "./rate-limit";
+import { scheduleDispatchAfterResponse } from "@/domain/webhooks/post-response";
 
 /**
  * The request pipeline every v1 route runs through. In order, and each step before the next costs anything:
@@ -138,6 +139,12 @@ export function route(def: EndpointDef) {
         requestPath: url.pathname,
         rawQuery,
       });
+
+      // Phase 10 Slice 2: a creation that committed may have written outbox events. Dispatch them AFTER this response, on a
+      // fresh connection (this request's transaction has already committed); it can never throw into the request.
+      if (principalResult && def.method === "POST" && result.status === 201 && !result.replayed) {
+        void scheduleDispatchAfterResponse(principalResult.principal.actor.organizationId);
+      }
 
       const headers: Record<string, string> = { "X-Request-Id": requestId, ...(result.headers ?? {}) };
       if (rate) Object.assign(headers, rateLimitHeaders(rate));

@@ -13,6 +13,7 @@ import { withTenant, type TenantDb } from "@/db/tenant";
 import { Money } from "@/domain/money/money";
 import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
 import { AuditService } from "@/domain/audit/audit-service";
+import { DomainEventService } from "@/domain/webhooks/domain-events";
 import { PostingService, type PostOptions } from "@/domain/ledger/posting-service";
 import type { JournalLineDraft } from "@/domain/ledger/types";
 import {
@@ -259,6 +260,9 @@ async function persistBillWithLines(
     after: { billNumber, supplier: supplier.displayName, ...totals },
   });
 
+  // Phase 10 Slice 2: the outbox row commits (or rolls back) with the bill itself.
+  if (!existingId) await DomainEventService.emitBillEventIn(tx, actor.organizationId, "bill.created", billId);
+
   return { id: billId, billNumber };
 }
 
@@ -489,6 +493,8 @@ export const BillService = {
         before: { status: "DRAFT" },
         after: { status: "APPROVED", journalEntryId: posted.entryId, entryNumber: posted.entryNumber },
       });
+
+      await DomainEventService.emitBillEventIn(tx, actor.organizationId, "bill.approved", billId);
 
       return { ...updated!, journalEntryId: posted.entryId, entryNumber: posted.entryNumber };
     });

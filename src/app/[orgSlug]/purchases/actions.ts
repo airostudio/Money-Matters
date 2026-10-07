@@ -8,6 +8,7 @@ import { requireOrgAndActor } from "@/lib/session";
 import { lockFailureQuery, postOptionsFromForm } from "@/lib/lock-feedback";
 import { ContactService } from "@/domain/contacts/contact-service";
 import { BillService } from "@/domain/purchases/bill-service";
+import { scheduleDispatchAfterResponse } from "@/domain/webhooks/post-response";
 import { SupplierPaymentAllocationService } from "@/domain/purchases/supplier-payment-service";
 import { PurchaseOrderService } from "@/domain/purchases/purchase-order-service";
 import { RecurringBillService } from "@/domain/purchases/recurring-bill-service";
@@ -57,6 +58,7 @@ export async function createSupplierAction(orgSlug: string, formData: FormData):
       redirectWithError(`/${orgSlug}/purchases/suppliers/new`, error);
     }
 
+    void scheduleDispatchAfterResponse(actor.organizationId);
     revalidatePath(`/${orgSlug}/purchases/suppliers`);
     redirect(`/${orgSlug}/purchases/suppliers/${supplier.id}`);
   } catch (error) {
@@ -119,6 +121,7 @@ export async function createBillAction(orgSlug: string, formData: FormData): Pro
       redirect(`/${orgSlug}/purchases/bills/new?error=${encodeURIComponent(message)}`);
     }
 
+    void scheduleDispatchAfterResponse(actor.organizationId);
     revalidatePath(`/${orgSlug}/purchases/bills`);
     redirect(`/${orgSlug}/purchases/bills/${created.id}`);
   } catch (error) {
@@ -172,6 +175,7 @@ export async function approveAndPostBillAction(orgSlug: string, billId: string, 
       const message = error instanceof Error ? error.message : "Failed to post bill.";
       redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
     }
+    void scheduleDispatchAfterResponse(actor.organizationId);
     revalidatePath(returnPath);
     redirect(returnPath);
   } catch (error) {

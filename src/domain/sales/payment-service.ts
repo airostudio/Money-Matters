@@ -4,6 +4,7 @@ import { withTenant, type TenantDb } from "@/db/tenant";
 import { Money } from "@/domain/money/money";
 import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
 import { AuditService } from "@/domain/audit/audit-service";
+import { DomainEventService } from "@/domain/webhooks/domain-events";
 import { PostingService } from "@/domain/ledger/posting-service";
 import type { JournalLineDraft } from "@/domain/ledger/types";
 import {
@@ -65,6 +66,9 @@ async function refreshInvoiceStatus(tx: TenantDb, actor: Actor, invoiceId: strin
     before: { status: invoice.status },
     after: { status: nextStatus, amountPaid: allocated },
   });
+
+  // Phase 10 Slice 2: allocations now cover the invoice in full (a transition INTO PAID, never repeated).
+  if (nextStatus === "PAID") await DomainEventService.emitInvoiceEventIn(tx, actor.organizationId, "invoice.paid", invoiceId);
 }
 
 export const PaymentAllocationService = {
@@ -205,6 +209,9 @@ export const PaymentAllocationService = {
           createdById: actor.userId,
         })),
       );
+
+      // Phase 10 Slice 2: `payment.received` commits with the payment (and precedes any `invoice.paid` it causes below).
+      await DomainEventService.emitPaymentReceivedIn(tx, actor.organizationId, payment.id);
 
       const journalLines: JournalLineDraft[] = [
         { accountId: input.depositAccountId, debit: allocatedSoFar.toString(), currency: input.currency },

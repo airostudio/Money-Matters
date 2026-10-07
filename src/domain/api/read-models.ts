@@ -375,31 +375,34 @@ export async function listPayments(actor: Actor, filters: PaymentFilters, page: 
 export async function getPayment(actor: Actor, id: string): Promise<PaymentRow | null> {
   assertPermission(actor, "customer_payment:read");
   if (!isUuid(id)) return null;
-  return withTenant(actor.organizationId, async (tx) => {
-    const [r] = await tx
-      .select({ payment: payments, name: contacts.displayName })
-      .from(payments)
-      .innerJoin(contacts, eq(contacts.id, payments.customerContactId))
-      .where(and(eq(payments.id, id), eq(payments.organizationId, actor.organizationId)));
-    if (!r) return null;
-    const allocations = await tx
-      .select({ documentId: invoices.id, documentNumber: invoices.invoiceNumber, amount: paymentAllocations.amount })
-      .from(paymentAllocations)
-      .innerJoin(invoices, eq(invoices.id, paymentAllocations.invoiceId))
-      .where(and(eq(paymentAllocations.paymentId, id), eq(paymentAllocations.organizationId, actor.organizationId)));
-    return {
-      id: r.payment.id,
-      counterpartyId: r.payment.customerContactId,
-      counterpartyName: r.name,
-      paymentDate: r.payment.paymentDate,
-      amount: r.payment.amount,
-      currency: r.payment.currency,
-      method: r.payment.method,
-      reference: r.payment.reference,
-      createdAt: r.payment.createdAt,
-      allocations,
-    };
-  });
+  return withTenant(actor.organizationId, (tx) => loadPayment(tx, actor.organizationId, id));
+}
+
+/** One customer payment with its allocations - used by GET and to build the `payment.received` webhook snapshot (same shape). */
+export async function loadPayment(tx: TenantDb, organizationId: string, id: string): Promise<PaymentRow | null> {
+  const [r] = await tx
+    .select({ payment: payments, name: contacts.displayName })
+    .from(payments)
+    .innerJoin(contacts, eq(contacts.id, payments.customerContactId))
+    .where(and(eq(payments.id, id), eq(payments.organizationId, organizationId)));
+  if (!r) return null;
+  const allocations = await tx
+    .select({ documentId: invoices.id, documentNumber: invoices.invoiceNumber, amount: paymentAllocations.amount })
+    .from(paymentAllocations)
+    .innerJoin(invoices, eq(invoices.id, paymentAllocations.invoiceId))
+    .where(and(eq(paymentAllocations.paymentId, id), eq(paymentAllocations.organizationId, organizationId)));
+  return {
+    id: r.payment.id,
+    counterpartyId: r.payment.customerContactId,
+    counterpartyName: r.name,
+    paymentDate: r.payment.paymentDate,
+    amount: r.payment.amount,
+    currency: r.payment.currency,
+    method: r.payment.method,
+    reference: r.payment.reference,
+    createdAt: r.payment.createdAt,
+    allocations,
+  };
 }
 
 export async function listSupplierPayments(actor: Actor, filters: PaymentFilters, page: PageParams) {

@@ -8,6 +8,7 @@ import { requireOrgAndActor } from "@/lib/session";
 import { lockFailureQuery, postOptionsFromForm } from "@/lib/lock-feedback";
 import { ContactService } from "@/domain/contacts/contact-service";
 import { InvoiceService } from "@/domain/sales/invoice-service";
+import { scheduleDispatchAfterResponse } from "@/domain/webhooks/post-response";
 import { PaymentAllocationService } from "@/domain/sales/payment-service";
 import { QuoteService } from "@/domain/sales/quote-service";
 import { RecurringInvoiceService } from "@/domain/sales/recurring-invoice-service";
@@ -54,6 +55,7 @@ export async function createCustomerAction(orgSlug: string, formData: FormData):
       redirectWithError(`/${orgSlug}/sales/customers/new`, error);
     }
 
+    void scheduleDispatchAfterResponse(actor.organizationId);
     revalidatePath(`/${orgSlug}/sales/customers`);
     redirect(`/${orgSlug}/sales/customers/${customer.id}`);
   } catch (error) {
@@ -114,6 +116,7 @@ export async function createInvoiceAction(orgSlug: string, formData: FormData): 
       redirect(`/${orgSlug}/sales/invoices/new?error=${encodeURIComponent(message)}`);
     }
 
+    void scheduleDispatchAfterResponse(actor.organizationId);
     revalidatePath(`/${orgSlug}/sales/invoices`);
     redirect(`/${orgSlug}/sales/invoices/${created.id}`);
   } catch (error) {
@@ -178,6 +181,7 @@ export async function markSentAction(orgSlug: string, invoiceId: string): Promis
   try {
     const { actor } = await requireOrgAndActor(orgSlug);
     await InvoiceService.markSent(actor, invoiceId);
+    void scheduleDispatchAfterResponse(actor.organizationId);
     revalidatePath(`/${orgSlug}/sales/invoices/${invoiceId}`);
   } catch (error) {
     return rethrowPermissionDenied(error, orgSlug);
@@ -236,6 +240,7 @@ export async function recordPaymentAction(orgSlug: string, formData: FormData): 
       redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
     }
 
+    void scheduleDispatchAfterResponse(actor.organizationId);
     revalidatePath(returnPath);
     revalidatePath(`/${orgSlug}/sales/invoices`);
     redirect(returnPath);

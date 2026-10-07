@@ -157,6 +157,7 @@ export function isForbiddenForApi(permission: Permission): boolean {
     "consolidation",
     "client_request",
     "api_key",
+    "webhook",
     "tax_code",
     "audit",
     "bank_account",

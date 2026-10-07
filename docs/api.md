@@ -189,13 +189,169 @@ Bills are the mirror image (`supplier_id`, `ap_account_id`, optional `supplier_r
 - **Document numbers** are assigned at creation (`INV-000042`); two concurrent creations that collide on a number are retried
   server-side, so you do not see a spurious conflict.
 
-## 5. Deferred (and why)
+## 5. Webhooks
+
+Phase 10 Slice 2 (master spec §55, §65). Money Matters POSTs a signed JSON event to a URL you register whenever something
+happens in your organization. Manage subscriptions in **Settings → Webhooks** (Owner or Administrator, humans only — an API key
+or the AI can never create, change or read a webhook). Security design: `docs/security.md` §16; the outbox and dispatch design:
+`docs/architecture.md` §11.
+
+**Enabling.** The platform operator must set `WEBHOOK_SECRET_ENCRYPTION_KEY` (32 random bytes, base64: `openssl rand -base64 32`).
+Without it webhooks are disabled with a clear message in Settings and nothing else in the app is affected.
+
+### Event catalogue
+
+| Event | Fired when | `data.object` |
+|---|---|---|
+| `customer.created` | a customer (or a contact that is both) is added | Contact |
+| `supplier.created` | a supplier (or a contact that is both) is added | Contact |
+| `invoice.created` | a **draft** invoice is created (in the app, by recurrence or via the API) | Invoice, with `lines` |
+| `invoice.sent` | an approved invoice is marked as sent (the `APPROVED → SENT` transition; repeating it does nothing) | Invoice |
+| `invoice.paid` | allocations bring an invoice to fully paid (the transition into `PAID`) | Invoice |
+| `payment.received` | a customer payment is recorded and allocated | Payment, with `allocations` |
+| `bill.created` | a **draft** bill is created | Bill, with `lines` |
+| `bill.approved` | a bill is approved and posted | Bill |
+
+A subscription lists concrete event types; there is no wildcard in v1. **Not available:** `payroll.completed` (payroll is outside
+the public API) and `bank.transaction.created` (bank transactions have no API representation) — they will be offered when their
+data can be exposed under the same permission rules. There is also no `invoice.approved`/`bill.paid`/supplier-payment event yet.
+`ping` is sent only by the **Send test event** button.
+
+### Envelope
+
+```json
+{
+  "id": "0b8f6c0e-6d3c-4a3e-9d64-3f1c4f1f2a11",
+  "type": "invoice.paid",
+  "api_version": "v1",
+  "created_at": "2026-03-10T09:30:00.123Z",
+  "data": { "object": { "id": "…", "number": "INV-000042", "status": "PAID", "total": { "amount": "1100.00", "currency": "AUD" }, "…": "…" } }
+}
+```
+
+`data.object` is **exactly the object the public API returns** for that resource (same field names, money as decimal strings with a
+currency, dates as `YYYY-MM-DD`, timestamps in RFC 3339 UTC): a webhook never discloses more than `GET /api/v1/…` would. It is a
+**snapshot taken when the event was recorded** — fetch the resource if you need its current state. `id` is unique per event and is
+what you dedupe on. If an object is too large (over 256 KB, e.g. an invoice with thousands of lines) its `lines`/`allocations` are
+left out and `data.truncated` is `true`; fetch the object by id. The envelope carries no organization id: the subscription's
+`Mm-Subscription-Id` header tells you which registration (and so which secret) the delivery belongs to.
+
+### Request headers
+
+| Header | Value |
+|---|---|
+| `Content-Type` | `application/json` |
+| `User-Agent` | `MoneyMatters-Webhooks/1` |
+| `Mm-Event-Id` | the envelope `id` (dedupe on this) |
+| `Mm-Event-Type` | e.g. `invoice.paid` |
+| `Mm-Delivery-Id` | unique per event × subscription (stable across retries and replays) |
+| `Mm-Delivery-Attempt` | 1, 2, 3 … |
+| `Mm-Subscription-Id` | which of your subscriptions this is |
+| `Mm-Signature` | `t=<unix seconds>,v1=<hex>[,v1=<hex>]` |
+
+### Verifying the signature
+
+`v1 = hex( HMAC-SHA256( key = the whole secret string including its "whsec_" prefix, message = "<t>.<raw body>" ) )`. Use the
+**raw bytes** of the body as received, not re-serialised JSON. Compare in constant time. **Reject** a delivery whose `t` is more than
+**5 minutes** from your clock (replay protection) and reject if no `v1` matches a secret you hold. Respond `2xx` quickly (we wait at
+most 10 s) and process asynchronously.
+
+Node.js:
+
+```js
+const crypto = require("crypto");
+
+// rawBody: the request body EXACTLY as received (a string/Buffer) - never JSON.stringify(parsedBody).
+// header:  the value of the Mm-Signature header.
+// secrets: every signing secret you currently accept (two during a rotation).
+function verifyMoneyMattersSignature(rawBody, header, secrets, toleranceSeconds = 300) {
+  const parts = String(header).split(",").map((p) => p.trim().split("="));
+  const t = parts.find(([k]) => k === "t")?.[1];
+  const signatures = parts.filter(([k]) => k === "v1").map(([, v]) => v);
+  if (!t || !/^\d+$/.test(t) || signatures.length === 0) return false;
+  if (Math.abs(Date.now() / 1000 - Number(t)) > toleranceSeconds) return false; // replay protection
+  for (const secret of secrets) {
+    const expected = crypto.createHmac("sha256", secret).update(t + "." + rawBody).digest();
+    for (const sig of signatures) {
+      const given = Buffer.from(sig, "hex");
+      if (given.length === expected.length && crypto.timingSafeEqual(given, expected)) return true;
+    }
+  }
+  return false;
+}
+
+module.exports = { verifyMoneyMattersSignature };
+```
+
+Python:
+
+```python
+import hashlib
+import hmac
+import time
+
+
+def verify_money_matters_signature(raw_body: bytes, header: str, secrets, tolerance_seconds: int = 300) -> bool:
+    # raw_body: the request body EXACTLY as received (bytes). header: the Mm-Signature header value.
+    parts = [p.strip().split("=", 1) for p in header.split(",") if "=" in p]
+    t = next((v for k, v in parts if k == "t"), None)
+    signatures = [v for k, v in parts if k == "v1"]
+    if t is None or not t.isdigit() or not signatures:
+        return False
+    if abs(time.time() - int(t)) > tolerance_seconds:  # replay protection
+        return False
+    for secret in secrets:
+        expected = hmac.new(secret.encode(), t.encode() + b"." + raw_body, hashlib.sha256).hexdigest()
+        if any(hmac.compare_digest(expected, s) for s in signatures):
+            return True
+    return False
+```
+
+Both snippets are executed against the real signer in the test suite.
+
+### Secrets and rotation
+
+The secret (`whsec_…`) is shown **once**, when the subscription is created or rotated. We store it encrypted and can never show it
+again; if you lose it, rotate. **Rotate** issues a new secret and, for **24 hours**, signs every delivery with **both** (`v1=<new>,v1=<old>`),
+so you can deploy the new secret and verify with either without downtime; afterwards only the new one is used. Rotating again inside
+the window replaces the old secret immediately.
+
+### Delivery semantics
+
+- **At least once.** The same event can arrive more than once (a retry after a timeout whose first attempt actually succeeded, a
+  replay, a dispatcher crash). **Dedupe on the event `id`.**
+- **No ordering guarantee.** `invoice.paid` can arrive before `invoice.created`. Use the object's own fields, not arrival order.
+- **Snapshot.** The payload is the state when the event was recorded.
+- **Success is any `2xx`** within 10 seconds. Anything else — other status, timeout, TLS error, DNS failure — is a failure.
+  **Redirects are never followed**: a `3xx` is a failure (register the final URL). Only `https` on port 443 to a public address is allowed;
+  URLs that resolve to private, loopback, link-local or otherwise internal addresses are refused when you save them **and on every delivery**.
+- **Retries** with exponential backoff and ±20% jitter: **1 min, 5 min, 30 min, 2 h, 6 h, 12 h, 24 h** after consecutive failures, **8 attempts
+  in all**; then the delivery is dead-lettered (**Failed**) but stays replayable. **There is no background scheduler**: retries run when
+  someone presses **Send pending now** in Settings → Webhooks (or when the next best-effort dispatch runs after a request in the app/API
+  that creates events). The page shows "N deliveries are waiting" whenever work is due. This is deliberate and documented in
+  `docs/architecture.md` §11.
+- **Circuit breaker.** After **20 consecutive failed attempts** the subscription is automatically **disabled** (visible reason, audit entry).
+  Fix the endpoint and re-enable it; the counter resets.
+- **Replay.** Any delivery (delivered or failed) can be replayed from its page; it is sent again immediately as a fresh attempt and
+  logged as a replay by the person who pressed the button. A replay never consumes the retry schedule.
+- **Test event.** *Send test event* posts a signed `ping` so you can check your endpoint and your signature code.
+- **Retention.** Events and their delivery logs are kept 30 days.
+- Each delivery's attempts (time, duration, HTTP status or error class, a short sanitised response excerpt) are in the delivery log.
+  The log is append-only.
+
+## 6. Deferred (and why)
 
 | Item | Why |
 |---|---|
 | OAuth 2.0 for third-party apps | its own large, security-critical build; the auth layer is credential-agnostic so it can be added |
-| Webhooks and the event outbox | Phase 10 Slice 2 |
 | Integration framework and automation centre | Phase 10 Slice 3 |
+| A scheduler / global dispatcher (Vercel Cron) for webhook retries | owner decision: no job queue in this slice. Retries are on demand plus best-effort after a request. A global dispatcher needs a cross-tenant "which organizations have pending work" index that the row-level-security model deliberately does not give the application role; `WebhookDispatchService.dispatch(orgId)` is the function a scheduler would call once per organization |
+| `payroll.completed`, `bank.transaction.created` events | their data has no public API representation yet (see Webhooks) |
+| `GET /events` polling catch-up endpoint | not needed while deliveries are replayable from the log |
+| Per-event payload customisation, wildcard subscriptions | v1 payloads are exactly the API objects; subscriptions list concrete types |
+| Managing webhooks through the public API | webhooks aim the platform at a URL: a human-only decision |
+| Sender IP allow-listing / mTLS | requests originate from the serverless platform (no stable egress IPs); signatures are the authenticity control |
+| Dead-letter email notifications | the Settings page banner is the visible signal for now |
 | `PUT`/`PATCH`/`DELETE`; posting, approving, voiding, paying via API | integrations prepare drafts, people decide |
 | Draft journal entries via API | drafting is gated on the posting permission; would put a posting permission into a key's effective set |
 | Payroll, employees, practice, consolidation, admin endpoints | out of scope for v1 and excluded structurally |

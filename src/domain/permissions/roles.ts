@@ -119,6 +119,10 @@ export const PERMISSIONS = [
   // permission; no other role lists it). An API key can itself never carry this
   // permission - it is not reachable from any API scope (src/domain/api/scopes.ts).
   "api_key:manage",
+  // Phase 10 Slice 2 (webhooks, master spec s.55). Managing webhook subscriptions (create, pause, rotate the
+  // signing secret, replay) is held ONLY by OWNER / ADMINISTRATOR AND requires a HUMAN actor; like api_key:manage it
+  // is not reachable from any API scope or AI tool.
+  "webhook:manage",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];

@@ -10,7 +10,7 @@ import {
   type ResolvedConnection,
 } from "./connection";
 import { auditTableSecurity } from "./isolation-audit";
-import { checkRuntimeEnv, formatEnvProblems } from "@/lib/runtime-env";
+import { checkOptionalFeatures, checkRuntimeEnv, formatEnvProblems, formatOptionalFeatureNotes } from "@/lib/runtime-env";
 
 const SAFE_PASSWORD_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -309,6 +309,11 @@ async function main() {
     const envProblems = checkRuntimeEnv(process.env);
     if (envProblems.length > 0) {
       console.warn(formatEnvProblems(envProblems));
+    }
+    // Optional features that are switched off (fail closed) are noted, never treated as a failure of the build.
+    const optionalNotes = checkOptionalFeatures(process.env);
+    if (optionalNotes.length > 0) {
+      console.log(formatOptionalFeatureNotes(optionalNotes));
     }
   } finally {
     if (lockHeld) {

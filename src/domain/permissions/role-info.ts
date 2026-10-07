@@ -138,6 +138,7 @@ export const PERMISSION_AREAS: Record<string, string> = {
   consolidation: "Consolidation",
   client_request: "Accountant requests",
   api_key: "API access",
+  webhook: "Webhooks",
 };
 
 function areaOf(permission: Permission): string {

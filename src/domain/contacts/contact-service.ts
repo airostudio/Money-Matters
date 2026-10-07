@@ -3,6 +3,7 @@ import { contacts, type contactKindEnum } from "@/db/schema";
 import { withTenant, type TenantDb } from "@/db/tenant";
 import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
 import { AuditService } from "@/domain/audit/audit-service";
+import { DomainEventService } from "@/domain/webhooks/domain-events";
 
 export type ContactKind = (typeof contactKindEnum.enumValues)[number];
 
@@ -59,6 +60,9 @@ async function insertContact(tx: TenantDb, actor: Actor, input: CreateContactInp
     entityId: contact.id,
     after: contact,
   });
+
+  // Phase 10 Slice 2: customer.created / supplier.created commit (or roll back) with the contact.
+  await DomainEventService.emitContactCreatedIn(tx, actor.organizationId, contact);
 
   return contact;
 }

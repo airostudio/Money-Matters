@@ -13,6 +13,7 @@ import { withTenant, type TenantDb } from "@/db/tenant";
 import { Money } from "@/domain/money/money";
 import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
 import { AuditService } from "@/domain/audit/audit-service";
+import { DomainEventService } from "@/domain/webhooks/domain-events";
 import { PostingService, type PostOptions } from "@/domain/ledger/posting-service";
 import type { JournalLineDraft } from "@/domain/ledger/types";
 import {
@@ -232,6 +233,9 @@ async function persistInvoiceWithLines(
     entityId: invoiceId,
     after: { invoiceNumber, customer: customer.displayName, ...totals },
   });
+
+  // Phase 10 Slice 2: the outbox row commits (or rolls back) with the invoice itself.
+  if (!existingId) await DomainEventService.emitInvoiceEventIn(tx, actor.organizationId, "invoice.created", invoiceId);
 
   return { id: invoiceId, invoiceNumber, lines: insertedLines };
 }
@@ -602,6 +606,11 @@ async function setInformationalStatus(
       before: { status: invoice.status },
       after: { status },
     });
+
+    // `invoice.sent` only on a real transition into SENT (marking an already-SENT invoice again returns early above).
+    if (status === "SENT" && invoice.status !== "SENT") {
+      await DomainEventService.emitInvoiceEventIn(tx, actor.organizationId, "invoice.sent", invoiceId);
+    }
 
     return updated;
   });

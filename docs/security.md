@@ -915,4 +915,91 @@ audited (`api_key.created`, `api_key.revoked`) with id, prefix, name and scopes 
 ### 15.8 What is not covered
 
 OAuth 2.0 for third-party apps (the auth layer is credential-agnostic by design); per-key IP allow-lists; a distributed (cross-instance)
-failure throttle; automatic rotation. Webhooks and the integration framework are later Phase 10 slices.
+failure throttle; automatic rotation. Webhooks arrived in Slice 2 (section 16); the integration framework is the next slice.
+
+## 16. Webhooks (Phase 10 Slice 2): SSRF guard, signing secrets, signatures, human-only management
+
+Webhooks make the **server** issue HTTP requests to a URL a customer chose: a textbook SSRF primitive, plus a new store of secrets that must be recoverable.
+Developer-facing description: `docs/api.md` "Webhooks". Pipeline design: `docs/architecture.md` §12.
+
+### 16.1 The outbound guard (one guard, every request)
+
+One code path (`src/domain/webhooks/url-guard.ts`, `ip-classifier.ts`, `outbound.ts`) validates a subscription URL **when it is saved** and again on **every delivery**
+(a stored row is not trusted: a tampered or stale URL is refused at send time with no lookup and no request).
+
+- **URL rules.** `https` only (no `http`, `file`, `javascript`, ...); **no credentials** in the URL; **port 443 only**; no fragment; <= 2048 characters; no whitespace or control
+  characters; no `localhost`/`.local`/`.internal`/`.lan`-style names and no single-label hosts. An **IP-literal host** is classified directly: private/special literals are refused, and
+  because the WHATWG URL parser canonicalises decimal/hex/octal/short spellings (`2130706433`, `0x7f000001`, `0177.0.0.1`, `127.1`) to dotted decimal before the guard sees them, those
+  forms are caught too (tested).
+- **Resolution.** The host name is resolved and **every** returned address must be publicly routable; one private address among public ones refuses the whole host (a hostile DNS
+  server can interleave them). The classifier is **default-deny**: it allows only global unicast. It refuses `0.0.0.0/8`, `10/8`, `100.64/10` (CGNAT), `127/8`, `169.254/16`
+  (link-local **including the cloud metadata address 169.254.169.254**), `172.16/12`, `192.0.0/24`, `192.0.2/24`, `192.88.99/24`, `192.168/16`, `198.18/15`, `198.51.100/24`, `203.0.113/24`,
+  `224/4`, `240/4`; and for IPv6 `::`, `::1`, `::/8` (incl. the deprecated IPv4-compatible form), `fc00::/7` (ULA), `fe80::/10`, `fec0::/10`, `ff00::/8`, `2001::/23` (Teredo and IETF
+  assignments), `2001:db8::/32`, `3fff::/20`, `100::/64`, `5f00::/16`, everything outside `2000::/3`, and the **IPv4-embedded forms** - IPv4-mapped (`::ffff:a.b.c.d`), IPv4-translated,
+  NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) - judged by the embedded IPv4 (so `::ffff:169.254.169.254` is refused and `::ffff:8.8.8.8` is not). The exhaustive table is
+  `src/tests/unit/webhooks/ip-classifier.test.ts` (119 cases: both edges and the middle of each refused range, the boundary just outside each, public addresses, malformed text).
+- **DNS rebinding (the check/connect TOCTOU).** The delivery resolves the host **once**, vets all answers, and the socket is then opened **to that vetted address** through a pinned `lookup`
+  (the resolver's answer is never consulted again, so DNS cannot be re-pointed at an internal address between the check and the connect). The pinned lookup re-classifies the address at the
+  instant the socket asks for it. TLS still runs against the **real host name**: SNI and the certificate hostname check use the name, not the IP. A test against a real local TLS server
+  whose host name does not exist in DNS proves the connection goes to the vetted address with the right SNI/`Host`, and that a valid certificate for a *different* name is refused.
+- **TLS verification is never disabled** (`rejectUnauthorized: true`, TLS >= 1.2; a structural test forbids `rejectUnauthorized: false`, `checkServerIdentity` overrides and the env override).
+- **Redirects are never followed.** A 3xx is a recorded failure (`redirect`); a redirect to `http://169.254.169.254/...` is therefore never requested (tested: exactly one request reaches the server).
+- **Bounds.** 10 s connect-plus-total timeout; the response body is read for at most 8 KB and the connection dropped (a 50 MB response returns promptly); request body <= 512 KB (events are capped at 256 KB at
+  emit); the stored excerpt is <= 1000 characters, decoded as UTF-8, with every control/bidi/line-separator character replaced by a space (rendered as plain text, never HTML).
+- **Limits of this guard (defence in depth, not the only wall).** It runs in application code on the serverless platform: outbound requests originate from the platform's network, not a
+  fixed egress IP, so there is nothing for a customer to allow-list and the platform's own egress policy remains the outer control. The guard cannot see addresses the operating system
+  resolver would return differently on another host, cannot stop an *attacker-controlled public* endpoint from receiving the (signed, DTO-only) payload - that is the feature - and does not
+  defend against a compromise of the platform's DNS or kernel. It does not follow CNAME chains itself: the resolver's final addresses are what is vetted.
+
+### 16.2 Signing secrets: encrypted at rest, shown once
+
+Signing needs the raw secret, so unlike an API key it cannot be a one-way hash. Each subscription's secret (`whsec_` + 256 bits from the CSPRNG) is encrypted with **AES-256-GCM** under a key that
+exists **only in the environment** (`WEBHOOK_SECRET_ENCRYPTION_KEY`: 32 random bytes, base64 - `openssl rand -base64 32`; never in the database), with a fresh random 96-bit IV per encryption. The stored
+value is `base64(version byte | IV | auth tag | ciphertext)` with the **key version** also in its own column. The GCM additional authenticated data binds the ciphertext to its
+`(organization, subscription)` pair, so a ciphertext copied into another row, or any tampered byte, fails authentication (tested for tamper, wrong key, wrong row, truncation).
+A database dump alone therefore yields no usable secret; an attacker needs the dump **and** the environment.
+
+- **Shown once** in the response to the create/rotate action (`useFormState`), never in a URL, cookie, log, redirect or audit row; never returned by any list. `AuditService`'s redaction list gained
+  `secretCiphertext`, `previousSecretCiphertext`, `signingSecret` (belt and braces: the services never pass them), and tests search the whole `audit_logs` table for the secret and its ciphertext.
+  A structural test forbids any `console` call in the webhook modules.
+- **Fail closed.** With the variable missing or invalid, `loadKeyring` returns a reason (never throws): subscription creation, rotation, replay, test events and dispatch refuse with "Webhooks are
+  disabled: ...", Settings shows the message, events keep accumulating safely in the outbox, and **nothing else is affected** - the build does not read the variable (it is reported only as an
+  optional-feature note by `npm run db:migrate`, never as a failure).
+- **Key rotation.** The keyring holds the current key (`WEBHOOK_SECRET_ENCRYPTION_KEY`, version from `WEBHOOK_SECRET_ENCRYPTION_KEY_VERSION`, default 1) and any older ones as
+  `WEBHOOK_SECRET_ENCRYPTION_KEY_V<n>`. New ciphertexts use the current version; old ones still decrypt via the version byte; a ciphertext whose key was dropped fails loudly. There is no bulk
+  re-encryption job in this slice: a subscription's ciphertext moves to the new key the next time its secret is rotated. Losing the key makes every stored secret undecryptable (rotate each
+  subscription to recover) - back it up like any production secret.
+- **Secret rotation with overlap.** Rotating issues a new secret and keeps the previous one for **24 hours**: during the window every delivery carries two signatures (`v1=<new>,v1=<old>`) so a
+  consumer can deploy the new secret without downtime; after it, only the new one is used (tested both sides of the boundary). Rotating again inside the window replaces the old secret at once.
+
+### 16.3 The signature
+
+`Mm-Signature: t=<unix>,v1=<hex>[,v1=<hex>]` where `v1 = HMAC-SHA256(secret, "<t>.<raw body>")`; also `Mm-Event-Id`, `Mm-Delivery-Id`, `Mm-Event-Type`, `Mm-Subscription-Id`, `Mm-Delivery-Attempt` and
+`User-Agent: MoneyMatters-Webhooks/1`. The timestamp is inside the signed message so a captured delivery cannot be re-sent later with a fresh timestamp, and consumers are told to reject deliveries more than
+**5 minutes** from their clock (replay protection) and to compare in constant time. The published Node.js and Python verifiers are executed against the real signer in the test suite, and the docs are
+asserted to contain them verbatim.
+
+### 16.4 Human-only management; unreachable from the API and the AI
+
+`webhook:manage` is held by OWNER and ADMINISTRATOR only and `WebhookSubscriptionService` additionally requires a **HUMAN** actor - an API-key, AI or SYSTEM actor is refused even with the OWNER role. It is
+unreachable from the API by construction (`webhook` is a forbidden resource in `isForbiddenForApi`, absent from the scope whitelist, and no `/api/v1` route mentions webhooks) and from the AI (no tool, specialist
+mode or auto-execution entry; a test pins the only modules that import the webhook services). Creating a webhook is a decision to aim the platform at a URL, so it stays with a person. Every mutation is audited
+(`webhook_subscription.created|updated|paused|resumed|re_enabled|secret_rotated|deleted|test_sent|auto_disabled`, `webhook_delivery.replayed`) in the same transaction. The per-organization cap (10) is enforced under an advisory lock so
+concurrent creates cannot exceed it.
+
+### 16.5 Data exposure and tenancy
+
+- **Payloads are the public API's DTOs and nothing more**, built by the same mappers and loaders, validated in tests against the API's strict response schemas (any extra field fails). No internal ids or columns, money as
+  decimal strings with a currency. The envelope carries no organization id; the opaque `Mm-Subscription-Id` header identifies the registration.
+- Four new tenant tables - `domain_events`, `webhook_subscriptions`, `webhook_deliveries`, `webhook_delivery_attempts` - each with RLS enabled + FORCEd and the single-variable policy; the build-time isolation audit
+  passes (76 tenant tables), and tests verify visibility, cross-tenant WITH CHECK refusal and the grants over a raw connection as the real `mm_app` role.
+- **The attempt log is append-only**: `mm_app` has `INSERT, SELECT` only on `webhook_delivery_attempts` (UPDATE, DELETE and TRUNCATE are denied - tested). `domain_events` is `SELECT, INSERT`, `UPDATE (dispatched_at)` and `DELETE` (retention):
+  a recorded event's type, aggregate and payload cannot be rewritten. Honest note: because `domain_events` rows may be DELETEd for retention and attempts cascade from them via the foreign key (an action performed by the table owner, not by
+  `mm_app`), the application role *could* erase recent log rows by deleting their event; the grants stop edits and direct deletes, not a compromised application that deletes events. Retention is the only code path that does so, and it
+  only touches events older than 30 days.
+- Response excerpts are untrusted text from the customer's server: truncated, control-stripped, length-capped on write, rendered as text.
+
+### 16.6 What is not covered
+
+mTLS or an allow-listed sender IP (no stable egress); a global dispatcher; per-event payload customisation; wildcard subscriptions; email alerts for dead letters; bulk re-encryption on key rotation; `payroll.completed` and
+`bank.transaction.created` (their data has no API representation and so no agreed permission rule for exposing it).

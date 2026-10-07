@@ -33,6 +33,15 @@ const REDACTED_FIELDS = new Set([
   "apiKey",
   "api_key",
   "authorization",
+  // Phase 10 Slice 2: webhook signing secrets. The raw secret is shown once and exists encrypted at rest only; neither
+  // it nor its ciphertext may ever be written to an audit row (belt-and-braces: the service never passes them).
+  "secretCiphertext",
+  "secret_ciphertext",
+  "previousSecretCiphertext",
+  "previous_secret_ciphertext",
+  "signingSecret",
+  "signing_secret",
+  "whsec",
 ]);
 const REDACTED_PLACEHOLDER = "[redacted]";
 

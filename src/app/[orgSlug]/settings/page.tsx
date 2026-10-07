@@ -36,6 +36,7 @@ export default async function SettingsPage({
   const canManageMembers = roleHasPermission(actor.role, "membership:manage");
   const canManageOrganization = roleHasPermission(actor.role, "organization:manage");
   const canManageApiKeys = roleHasPermission(actor.role, "api_key:manage");
+  const canManageWebhooks = roleHasPermission(actor.role, "webhook:manage");
 
   const members = canManageMembers
     ? (await OrganizationService.listMembers(actor)).filter((m) => m.isActive)
@@ -108,6 +109,20 @@ export default async function SettingsPage({
               Create API keys for approved server integrations. Keys can read your data and create draft invoices, bills, customers and suppliers - never post, approve or pay anything.{" "}
               <Link href={`/${org.slug}/settings/api`} className="text-primary underline">
                 Manage API keys
+              </Link>
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      )}
+
+      {canManageWebhooks && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Webhooks</CardTitle>
+            <CardDescription>
+              Send signed events (invoice created or paid, payment received, bill approved, customer added) to your own server as they happen, with a delivery log, retries and replay.{" "}
+              <Link href={`/${org.slug}/settings/webhooks`} className="text-primary underline">
+                Manage webhooks
               </Link>
             </CardDescription>
           </CardHeader>

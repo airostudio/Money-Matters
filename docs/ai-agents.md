@@ -717,6 +717,18 @@ has **no tool that touches them**, in either direction:
 - `src/tests/unit/api/ai-boundary.test.ts` asserts the controller tool registry (read and write), the specialist agent modes and the
   auto-execution allowlist contain nothing API-key related and that the AI source tree never imports the API modules.
 
+## 0k. Webhooks and the event outbox are not an AI surface (Phase 10 Slice 2)
+
+Phase 10 Slice 2 adds webhook subscriptions and a transactional event outbox (`docs/api.md` "Webhooks", `docs/security.md` section 16). The AI Financial Controller has **no tool that reads, creates,
+changes, replays or even lists them**:
+
+- `webhook:manage` is held by OWNER/ADMINISTRATOR only and `WebhookSubscriptionService` / `WebhookDispatchService` require a `HUMAN` actor, so an `AI`-typed actor is refused even with the OWNER role. A webhook aims the
+  platform's server at a URL of someone's choosing (an SSRF-shaped capability) and holds a signing secret: both are decisions for a person.
+- No read tool, write (`prepare_*`) tool, specialist mode or auto-execution allowlist entry mentions webhooks, the outbox or domain events (`src/tests/unit/webhooks/structure.test.ts`), the AI source tree never imports the
+  webhook modules, and a test pins the only modules that do (the settings pages and actions). The "never auto-executable" list (supplier payments, payroll, tax, period close) is unchanged.
+- The outbox is not an AI input either: events carry the same DTOs as the public API (customer, invoice, payment and bill objects) to the customer's own endpoint; nothing from the delivery log is fed to a model.
+- Business events are emitted by the same domain services whoever acts, so a document the AI drafts and a person confirms emits the same event as one created by hand; the AI never decides whether an event is emitted.
+
 
 ## 1. Why this belongs in the Phase 1 docs
 

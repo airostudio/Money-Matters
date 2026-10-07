@@ -3172,7 +3172,7 @@ slices. Developer guide: `docs/api.md`. Security design: `docs/security.md` sect
 - **OAuth 2.0** authorization server / bearer tokens for third-party apps - a large, security-critical feature of its own (consent, client
   registration, refresh/rotation). The authentication layer resolves a credential to an `ApiPrincipal`; nothing downstream is
   key-specific, so OAuth tokens can be added without touching endpoints, scopes or rate limiting.
-- **Webhooks and the event outbox** - Phase 10 Slice 2. **Integration framework and automation centre** - Slice 3.
+- **Webhooks and the event outbox** - delivered in Phase 10 Slice 2 (below). **Integration framework and automation centre** - Slice 3.
 - `PUT`/`PATCH`/`DELETE`, and posting/approving/voiding/paying via API (integrations prepare drafts, people decide).
 - **Draft journal entries via API**: `PostingService.createDraft` is gated on the *posting* permission (`journal:post`); granting it would
   put a posting permission into a key's effective set. Needs its own permission split first.
@@ -3180,12 +3180,55 @@ slices. Developer guide: `docs/api.md`. Security design: `docs/security.md` sect
 - Per-key IP allow-lists; a key-rotation workflow beyond create-new + revoke-old; a usage analytics dashboard; SDKs; a cross-instance
   (distributed) failure throttle; sparse-fields / expand parameters; filtering lists by more than the obvious fields.
 
-**Phase 10 remaining:** webhooks + event outbox (Slice 2), integration framework + automation centre (Slice 3), OAuth 2.0 for third-party apps.
+**Phase 10 remaining:** (webhooks + event outbox: done, see Slice 2 below), integration framework + automation centre (Slice 3), OAuth 2.0 for third-party apps.
+
+## Phase 10 Slice 2 — Webhooks & outbox — complete
+
+Master spec §65 ("important business events should generate domain events ... implement a durable outbox pattern") and §55 (webhooks: signatures,
+retries, exponential backoff, delivery logs, replay, idempotency). Developer guide: `docs/api.md` "Webhooks". Design: `docs/architecture.md` §12.
+Security: `docs/security.md` §16. Owner decision honoured: **no job queue, no scheduler, no Vercel Cron** - retries are on demand plus a best-effort immediate
+attempt after the request.
+
+**Built**
+- **Transactional outbox** `domain_events` (tenant table, RLS + FORCE + policy, narrow grants: events immutable except `dispatched_at`). `DomainEventService.emitIn(tx, ...)` runs inside the
+  same transaction as the business change: a rolled-back invoice leaves no event (tested). Emit = one insert plus the same snapshot reads the API's `GET` does; no subscription matching,
+  no network, no extra tables in the business transaction.
+- **Events wired** (each exactly once, payload = the public API's DTO validated against the API's strict response schemas): `customer.created`, `supplier.created` (a separate type; a BOTH contact emits each),
+  `invoice.created`, **`invoice.sent` - emitted from `InvoiceService.markSent` on the real `APPROVED -> SENT` transition only (that transition exists in the codebase; repeating it emits nothing)**,
+  `invoice.paid` (the transition into PAID), `payment.received`, `bill.created`, `bill.approved`. Versioned envelope `{id, type, api_version: "v1", created_at, data: {object}}`, no organization id,
+  256 KB cap (oversize drops lines/allocations and flags `data.truncated`).
+- **Subscriptions** (`webhook_subscriptions`): closed event list (no wildcard), ACTIVE/PAUSED/DISABLED, cap 10 per organization, management service + Settings -> Webhooks UI gated on the new
+  permission `webhook:manage` (OWNER/ADMINISTRATOR, **human only**; unreachable from API scopes and AI tools - tested), every mutation audited, secrets never audited.
+- **Signing and secrets.** `Mm-Signature: t=,v1=` HMAC-SHA256 over `"<t>.<raw body>"` plus `Mm-Event-Id/-Delivery-Id/-Event-Type/-Subscription-Id/-Delivery-Attempt`; 5-minute tolerance guidance; Node and Python verifiers
+  in the docs, executed against the real signer in tests. Secrets are `whsec_` + 256 bits, **AES-256-GCM encrypted at rest** with `WEBHOOK_SECRET_ENCRYPTION_KEY` (key-versioned, bound to the row by AAD), shown once,
+  **fail-closed without the key** (UI message; app and build unaffected; reported only as an optional-feature note by `db:migrate`). **Rotation with a 24 h overlap** (two `v1=` signatures).
+- **SSRF guard** (one guard for subscription validation and every delivery): https/443/no-credentials; default-deny IP classifier (IPv4 + IPv6 + every IPv4-embedded form) with a 119-case table; resolves and vets
+  **every** address; **connects to the validated IP** via a pinned lookup (rebinding-proof) with correct SNI/Host and TLS verification always on; **no redirects**; 10 s timeout; 8 KB read cap; sanitised excerpts.
+  Resolver and HTTP client are injectable; tests also exercise the real transport against a real local TLS server.
+- **Dispatch** (`WebhookDispatchService`): fan-out (idempotent, unique event x subscription) -> claim with `FOR UPDATE SKIP LOCKED` + lease in one short transaction -> sequential sends with **no connection held across
+  HTTP** -> a short transaction per delivery recording the attempt and next state. Backoff 1m/5m/30m/2h/6h/12h/24h with +/-20% jitter, 8 attempts, then FAILED (dead letter, replayable);
+  circuit breaker at 20 consecutive failures (auto-DISABLE, visible reason, SYSTEM audit entry; re-enable resets). At-least-once, unordered, snapshot semantics documented. Replay (attributed, audited, never
+  consumes the retry schedule), "Send test event" (signed `ping`), delivery log UI with attempt history, and a "N events pending delivery - Send now" banner. Lazy 30-day retention.
+- **Post-response best-effort dispatch** through **`waitUntil` from `@vercel/functions`** (the one mechanism; Next 14.2 has no `after()`), skipped when already running for that organization, never throws into the request.
+  Wired into API `POST` 201s and the UI actions that create/mark-sent/record-payment.
+- **Measured budgets:** emit = 1 insert (+3 snapshot reads for an invoice/bill, +2 for a payment); dispatch = 10 statements in one transaction + 6 per delivery (one delivery 16, five 40).
+
+**Deliberately deferred (and why)**
+- **A scheduler / global cross-tenant dispatcher (Vercel Cron).** Owner decision (no queue). A global dispatcher also needs a cross-tenant "which organizations have pending work" index, which the RLS model does not allow the
+  application role to read; `dispatch(orgId)` is the unit it would call.
+- `payroll.completed` and `bank.transaction.created` - payroll is outside the public API surface and bank transactions have no API DTO; they wait until their data can be exposed under the same permission rules.
+- Also not built: `invoice.approved` / `bill.paid` / supplier-payment events (not in the §55 list), a polling `GET /events` catch-up endpoint, per-event payload customisation, wildcard subscriptions, webhook management via the
+  public API, mTLS / sender IP allow-listing (no stable egress), dead-letter email notifications, bulk re-encryption when the encryption key is rotated.
+- The **integration framework (§53) and automation centre (§75)** are the next slice.
+
+**New environment variable:** `WEBHOOK_SECRET_ENCRYPTION_KEY` (optional; webhooks are off without it). **New dependency:** `@vercel/functions` (for `waitUntil`).
+
+**Phase 10 remaining:** integration framework + automation centre (Slice 3), OAuth 2.0 for third-party apps, a global webhook dispatcher/scheduler (needs a cross-tenant work index).
 
 ## Phase 10 — Platform (in progress)
 
-Slice 1 (the public API foundation, API keys) is complete - see above. Remaining: webhook subscriptions and the event outbox, the
-integration framework and adapters, the advanced automation centre, and OAuth 2.0 for third-party apps. (Phase 8's later slices - BAS/GST,
+Slices 1 (the public API foundation, API keys) and 2 (webhooks and the event outbox) are complete - see above. Remaining: the
+integration framework and adapters, the advanced automation centre, OAuth 2.0 for third-party apps, and a global webhook dispatcher. (Phase 8's later slices - BAS/GST,
 STP lodgement, awards - are also still open.)
 
 ## Explicit non-goals for this session

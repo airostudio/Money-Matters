@@ -4910,3 +4910,120 @@ export const apiIdempotencyKeys = pgTable("api_idempotency_keys", {
   keyUnique: uniqueIndex("api_idempotency_org_key_unique").on(table.organizationId, table.apiKeyId, table.idempotencyKey),
   createdIdx: index("api_idempotency_created_idx").on(table.organizationId, table.createdAt),
 }));
+
+// ---- Phase 10 Slice 2: webhooks and the durable event outbox (docs/architecture.md section 11, docs/security.md section 16) ----
+
+export const webhookSubscriptionStatusEnum = pgEnum("webhook_subscription_status", ["ACTIVE", "PAUSED", "DISABLED"]);
+export const webhookDeliveryStatusEnum = pgEnum("webhook_delivery_status", ["PENDING", "DELIVERED", "FAILED"]);
+
+/**
+ * The TRANSACTIONAL OUTBOX. A row is inserted in the SAME transaction as the business change it describes, so an event
+ * exists if and only if the change committed. `payload` is the public API's DTO snapshot of the aggregate at that moment
+ * (never a raw row). `dispatched_at` is NULL until the dispatcher has fanned the event out into per-subscription
+ * deliveries - that is where subscription matching happens, never at emit time. Test pings (`type = 'ping'`) are stored
+ * pre-marked dispatched so fan-out never touches them.
+ */
+export const domainEvents = pgTable("domain_events", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  type: text("type").notNull(),
+  aggregateType: text("aggregate_type").notNull(),
+  aggregateId: uuid("aggregate_id").notNull(),
+  payload: jsonb("payload").notNull(),
+  occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
+  dispatchedAt: timestamp("dispatched_at", { withTimezone: true }),
+}, (table) => ({
+  orgOccurredIdx: index("domain_events_org_occurred_idx").on(table.organizationId, table.occurredAt),
+  undispatchedIdx: index("domain_events_undispatched_idx").on(table.organizationId, table.occurredAt).where(sql`dispatched_at IS NULL`),
+}));
+
+/**
+ * A customer endpoint that wants events. The signing secret is stored ENCRYPTED (AES-256-GCM, key from
+ * WEBHOOK_SECRET_ENCRYPTION_KEY, key version recorded) because signing needs the raw value; it is never returned after
+ * creation and never written to the audit log. `previous_*` hold the prior secret during a rotation grace window.
+ */
+export const webhookSubscriptions = pgTable("webhook_subscriptions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  url: text("url").notNull(),
+  description: text("description"),
+  eventTypes: text("event_types").array().notNull(),
+  status: webhookSubscriptionStatusEnum("status").notNull().default("ACTIVE"),
+  /** Why a subscription is DISABLED (circuit breaker) or PAUSED, shown in the UI. */
+  statusReason: text("status_reason"),
+  createdByUserId: uuid("created_by_user_id")
+    .notNull()
+    .references(() => users.id),
+  secretCiphertext: text("secret_ciphertext").notNull(),
+  secretKeyVersion: integer("secret_key_version").notNull(),
+  previousSecretCiphertext: text("previous_secret_ciphertext"),
+  previousSecretKeyVersion: integer("previous_secret_key_version"),
+  previousSecretExpiresAt: timestamp("previous_secret_expires_at", { withTimezone: true }),
+  consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+  lastSuccessAt: timestamp("last_success_at", { withTimezone: true }),
+  lastFailureAt: timestamp("last_failure_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  orgCreatedIdx: index("webhook_subscriptions_org_created_idx").on(table.organizationId, table.createdAt),
+  idOrgUnique: uniqueIndex("webhook_subscriptions_id_org_unique").on(table.id, table.organizationId),
+}));
+
+/** One row per (event, subscription): the unique pair makes fan-out idempotent. State machine PENDING -> DELIVERED | FAILED (dead letter). */
+export const webhookDeliveries = pgTable("webhook_deliveries", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  eventId: uuid("event_id")
+    .notNull()
+    .references(() => domainEvents.id, { onDelete: "cascade" }),
+  subscriptionId: uuid("subscription_id")
+    .notNull()
+    .references(() => webhookSubscriptions.id, { onDelete: "cascade" }),
+  status: webhookDeliveryStatusEnum("status").notNull().default("PENDING"),
+  /** Every attempt of any kind (numbering of the log). */
+  attemptCount: integer("attempt_count").notNull().default(0),
+  /** Automatic attempts only: the retry policy's counter (a manual replay never consumes the schedule). */
+  autoAttempts: integer("auto_attempts").notNull().default(0),
+  nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
+  /** A claimed delivery is invisible to other dispatchers until this passes (crash safety: it simply becomes due again). */
+  leaseUntil: timestamp("lease_until", { withTimezone: true }),
+  lastStatusCode: integer("last_status_code"),
+  lastError: text("last_error"),
+  lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+  deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  eventSubUnique: uniqueIndex("webhook_deliveries_event_sub_unique").on(table.eventId, table.subscriptionId),
+  dueIdx: index("webhook_deliveries_due_idx").on(table.organizationId, table.status, table.nextAttemptAt),
+  subCreatedIdx: index("webhook_deliveries_sub_created_idx").on(table.subscriptionId, table.createdAt),
+}));
+
+/** APPEND-ONLY attempt log: mm_app has INSERT and SELECT only (no UPDATE, no DELETE). */
+export const webhookDeliveryAttempts = pgTable("webhook_delivery_attempts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  deliveryId: uuid("delivery_id")
+    .notNull()
+    .references(() => webhookDeliveries.id, { onDelete: "cascade" }),
+  attemptNumber: integer("attempt_number").notNull(),
+  /** AUTO (dispatch), REPLAY (a person replayed it), TEST (the ping). */
+  trigger: text("trigger").notNull(),
+  triggeredByUserId: uuid("triggered_by_user_id").references(() => users.id),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+  durationMs: integer("duration_ms").notNull(),
+  statusCode: integer("status_code"),
+  /** NULL on an HTTP response; otherwise a short class such as ssrf_blocked, timeout, redirect, tls, dns, connect, response_too_large. */
+  errorClass: text("error_class"),
+  responseExcerpt: text("response_excerpt"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  deliveryIdx: index("webhook_delivery_attempts_delivery_idx").on(table.deliveryId, table.attemptNumber),
+}));

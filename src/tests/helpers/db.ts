@@ -7,6 +7,10 @@ import type { Actor } from "@/domain/permissions/permission-service";
 import type { MembershipRole } from "@/domain/permissions/roles";
 
 const TENANT_TABLES = [
+  "webhook_delivery_attempts",
+  "webhook_deliveries",
+  "webhook_subscriptions",
+  "domain_events",
   "api_idempotency_keys",
   "api_rate_windows",
   "api_key_index",

@@ -182,9 +182,24 @@ organization>)` as the restricted database role - no RLS change. Cursor
 pagination, `Idempotency-Key` (required for invoice/bill creation; two simultaneous
 identical POSTs create one invoice), per-key rate limits with `X-RateLimit-*` /
 `Retry-After`, RFC 7807 errors, and a generated OpenAPI 3.1 document at
-`/api/v1/openapi.json`. OAuth, webhooks and the automation centre are later Phase 10
+`/api/v1/openapi.json`. OAuth and the automation centre are later Phase 10
 slices. See [`docs/api.md`](docs/api.md), `docs/security.md` section 15 and
 `docs/roadmap.md`.
+
+Phase 10 Slice 2 adds **webhooks on a durable transactional outbox**: business events
+(`customer.created`, `supplier.created`, `invoice.created`, `invoice.sent`,
+`invoice.paid`, `payment.received`, `bill.created`, `bill.approved`) are written to a
+`domain_events` table in the **same transaction** as the change, and delivered to
+subscriber URLs (Settings -> Webhooks; Owner/Administrator humans only) as signed
+(HMAC-SHA256, timestamped) JSON that is exactly the public API's object for the
+resource. Delivery is at-least-once with exponential backoff, a circuit breaker, a
+delivery log, replay and a test event. There is **no scheduler**: retries run on demand
+("Send now") and best-effort right after the request that caused the event. Every
+delivery goes through an SSRF guard (https/443 only, every resolved address must be
+public, the connection is pinned to the validated IP, no redirects, TLS verified).
+Signing secrets are AES-256-GCM encrypted with `WEBHOOK_SECRET_ENCRYPTION_KEY` (see
+below) and webhooks are simply off without it. See [`docs/api.md`](docs/api.md)
+(Webhooks), `docs/architecture.md` section 12 and `docs/security.md` section 16.
 See
 [`docs/roadmap.md`](docs/roadmap.md) for exactly what's built
 vs. explicitly deferred in each phase (a customer portal, AI-drafted
@@ -304,6 +319,21 @@ functionality and no network call:
 | `ANTHROPIC_MANAGEMENT_PACK_MODEL` | Defaults to `claude-haiku-4-5-20251001` if unset. |
 | `ANTHROPIC_CONTROLLER_MODEL` | Defaults to `claude-sonnet-4-5-20250929` if unset (the Financial Controller's multi-turn tool-use reasoning benefits from a stronger model than the single-shot classification calls above). |
 | `ANTHROPIC_DAILY_BRIEF_MODEL` | Defaults to `claude-haiku-4-5-20251001` if unset. |
+
+Optionally, set `WEBHOOK_SECRET_ENCRYPTION_KEY` to turn on **webhooks** (Phase 10
+Slice 2). Webhook signing secrets must be stored recoverably (signing needs the raw
+value), so they are encrypted at rest under this key, which lives only in the
+environment. **Fail closed:** unset or invalid means webhooks are disabled with a clear
+message in Settings -> Webhooks; the build and the rest of the app are unaffected (the
+build log shows an optional-feature *note*, not a warning). Keep it stable - changing
+or losing it makes stored secrets undecryptable (rotate each subscription's secret to
+recover):
+
+| Variable | Value |
+|---|---|
+| `WEBHOOK_SECRET_ENCRYPTION_KEY` | 32 random bytes, base64: `openssl rand -base64 32`. Server-side only. |
+| `WEBHOOK_SECRET_ENCRYPTION_KEY_VERSION` | Optional, 1-255 (default 1): the version stamped on new ciphertexts, for key rotation. |
+| `WEBHOOK_SECRET_ENCRYPTION_KEY_V<n>` | Optional: an older key (version `n`) kept so existing ciphertexts still decrypt after a rotation. |
 
 Deploy. `npm run build` runs `npm run db:migrate:ci` first, which applies the
 schema and RLS policies, provisions the `mm_app` role, and then **connects
