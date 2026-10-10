@@ -259,9 +259,14 @@ export const WebhookDispatchService = {
 
     // ---- phase A: one short transaction ------------------------------------------------------------------------------
     const claims = await withTenant(organizationId, async (tx) => {
-      const [{ got } = { got: false }] = (await tx.execute(
-        sql`SELECT pg_try_advisory_xact_lock(hashtext(${`webhook-fanout:${organizationId}`})) AS got`,
-      )).rows as { got: boolean }[];
+      // ONE statement: the fan-out try-lock AND whether the organization is archived (a primary-key scalar subquery on the
+      // non-tenant organizations table - no extra round trip). An archived organization dispatches NOTHING: no fan-out,
+      // no claims, no sends; its events stay in the outbox untouched and flow again, in order, after a restore.
+      const [{ got, archived } = { got: false, archived: false }] = (await tx.execute(
+        sql`SELECT pg_try_advisory_xact_lock(hashtext(${`webhook-fanout:${organizationId}`})) AS got,
+                   coalesce((SELECT archived_at IS NOT NULL FROM organizations WHERE id = ${organizationId}), false) AS archived`,
+      )).rows as { got: boolean; archived: boolean }[];
+      if (archived) return [] as Claim[];
 
       if (got) {
         if (!lastPurgeAt.has(organizationId) || now.getTime() - (lastPurgeAt.get(organizationId) as number) > PURGE_INTERVAL_MS) {

@@ -42,6 +42,12 @@ const REDACTED_FIELDS = new Set([
   "signingSecret",
   "signing_secret",
   "whsec",
+  // Organisation lifecycle slice: an invite code is a bearer secret shown once and stored only as a hash in a
+  // non-audited lookup table. (Deliberately NOT the bare word "code": account codes are audited legitimately.)
+  "inviteCode",
+  "invite_code",
+  "codeHash",
+  "code_hash",
 ]);
 const REDACTED_PLACEHOLDER = "[redacted]";
 

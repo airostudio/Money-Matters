@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import { db } from "@/db/client";
-import { apiKeyIndex, organizationMemberships, users } from "@/db/schema";
+import { apiKeyIndex, organizationMemberships, organizations, users } from "@/db/schema";
 import type { Actor } from "@/domain/permissions/permission-service";
 import type { MembershipRole, Permission } from "@/domain/permissions/roles";
 import { apiErrors, ApiError } from "./errors";
@@ -51,6 +51,8 @@ export interface KeyLookupRow {
   membershipRole: MembershipRole | null;
   membershipActive: boolean | null;
   userDisabledAt: Date | null;
+  /** Set when the key's organization is ARCHIVED (folded into the one lookup join - no extra query). Optional so older fixtures still type-check; absent means active. */
+  organizationArchivedAt?: Date | null;
 }
 
 /** The single lookup query: key by prefix, with the creator's current membership and suspension flag. */
@@ -69,6 +71,7 @@ export async function lookupKeyByPrefix(prefix: string): Promise<KeyLookupRow | 
       membershipRole: organizationMemberships.role,
       membershipActive: organizationMemberships.isActive,
       userDisabledAt: users.disabledAt,
+      organizationArchivedAt: organizations.archivedAt,
     })
     .from(apiKeyIndex)
     .leftJoin(
@@ -79,6 +82,7 @@ export async function lookupKeyByPrefix(prefix: string): Promise<KeyLookupRow | 
       ),
     )
     .leftJoin(users, eq(users.id, apiKeyIndex.createdByUserId))
+    .innerJoin(organizations, eq(organizations.id, apiKeyIndex.organizationId))
     .where(eq(apiKeyIndex.prefix, prefix))
     .limit(1);
   return row ?? null;
@@ -92,6 +96,7 @@ export function resolvePrincipal(row: KeyLookupRow, presentedHash: string, now: 
   if (!hashesEqual(presentedHash, row.secretHash)) throw apiErrors.invalidApiKey();
   if (row.revokedAt) throw apiErrors.apiKeyRevoked();
   if (row.expiresAt && row.expiresAt.getTime() <= now.getTime()) throw apiErrors.apiKeyExpired();
+  if (row.organizationArchivedAt) throw apiErrors.organizationArchived();
   if (!row.membershipRole || !row.membershipActive || row.userDisabledAt) throw apiErrors.apiKeyOwnerInactive();
 
   const permissions = effectivePermissions(row.scopes, row.membershipRole);

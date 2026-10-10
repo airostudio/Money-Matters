@@ -21,8 +21,14 @@ import type { Pool } from "pg";
  * stops a row for another organization's key being forged. See
  * docs/security.md section 15 and
  * src/tests/integration/api/api-key-index-grants.test.ts.
+ *
+ * `organization_invite_index` (organisation lifecycle slice) is the same shape again: invite redemption happens BEFORE
+ * the redeemer is a member, so the code-hash -> (invite, organization) lookup cannot be keyed on
+ * `app.current_org_id`. It is SELECT + INSERT only (no UPDATE, no DELETE), carries no email/role/expiry/state, and a
+ * composite foreign key to the RLS-protected `organization_invites` stops a row for another organization's invite
+ * being forged. See docs/security.md section 17 and src/tests/integration/organizations/invite-index.test.ts.
  */
-export const RLS_EXEMPT_TABLES = new Set(["organization_memberships", "api_key_index"]);
+export const RLS_EXEMPT_TABLES = new Set(["organization_memberships", "api_key_index", "organization_invite_index"]);
 
 /**
  * The practice (accounting firm) scoping model, Phase 9 Slice 5 (docs/security.md

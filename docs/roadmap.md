@@ -3232,6 +3232,38 @@ the visual layout (no browser), a delivery to a 2xx endpoint over the public int
 
 **Phase 10 remaining:** integration framework + automation centre (Slice 3), OAuth 2.0 for third-party apps, a global webhook dispatcher/scheduler (needs a cross-tenant work index).
 
+## Organisation lifecycle & joining — complete
+
+Owner request: "build the archive feature and a join/add-another-company option." Before this slice there was no way to remove or deactivate an organization, a signed-in user could not create a second company or join one, and members
+could only be added by an owner typing the email of someone who had already registered. Design and threat model: `docs/security.md` section 17; schema: `docs/database.md` section 2t (migrations `0046`, `0047`); runbook: `docs/operations.md`.
+
+**Built**
+- **Archive / restore (reversible, not deletion).** `organizations.archived_at / archived_by_user_id / archive_reason`. Settings -> Danger zone for the **OWNER** (human only; ADMINISTRATOR refused at the service layer): company name typed
+  exactly + acknowledgement + reason, with a link to export reports first. The platform admin archives/restores from `/admin/organizations/[orgId]` (reason mandatory; archived filter in the directory; archived count on the dashboard); the
+  boundary is unchanged (no tenant data). OWNERs restore from the "Archived companies" list on the chooser. Audited in the organization's own log and, for the admin, `platform_admin_audit_logs`. Data, seats and memberships are untouched; a
+  restore returns ledger/trial balance/audit ids byte-identical (tested). Slug stays reserved.
+- **Enforcement at every entry point, without a query on the hot path.** Session helpers, the `[orgSlug]` layout (members see an archived page, non-members 404), server actions, route handlers, the chooser and switcher (archived excluded from both and
+  from the single-membership redirect, so no loop), public API keys (`403 organization_archived`, folded into the existing lookup join - still 2 statements), webhook dispatch (same statement as the try-lock; events stay in the outbox), AI
+  auto-execution and recurring generators (skip), practice (client unavailable, neutral message) and consolidation (excluded with the usual notice). A structural test enumerates every membership-resolving module and every Actor-building site, so a
+  future entry point cannot silently skip the check.
+- **Create another company.** Chooser button / switcher / `/app/new`; shares registration's slug generation (now with repeated retries); creator is OWNER in seat 1 with the usual 2-seat default; goes straight to onboarding; cap of 5 active owned
+  companies (archived do not count; restore is held to the same cap; constant in `limits.ts`); per-person attempt throttle (reuses the API's per-instance `AuthThrottle`; registration itself has none).
+- **Join with an invite code.** OWNER/ADMINISTRATOR (human only) create an email + role invite and receive a `mmj_` + 160-bit code **once**; stored only as a SHA-256 in a narrow non-tenant lookup (`organization_invite_index`, the `api_key_index` pattern);
+  7-day expiry, single use, email-bound, max 10 pending, revocable; writer-role confirmation enforced at creation; redemption from the chooser or the registration form re-checks everything under the organization lock (seat limit via the shared
+  `addMembership`; a full company returns the specific message and keeps the invite valid); two simultaneous redemptions yield exactly one membership; failed attempts are throttled per person and per address; every refusal is one generic message
+  (no enumeration); the code never appears in audit rows, logs or lists. The existing add-by-email flow is unchanged.
+
+**Deliberately not built, and why**
+- **Permanent erase.** Deleting a ledger is the one thing this system exists to prevent, the app role has no DELETE on the ledger or audit tables by design, and adding a privileged connection would break the tenancy model. Archive is the product answer;
+  erasure is a documented DBA-level, outside-the-app procedure with strong warnings and **no shipped script** (`docs/operations.md`).
+- **Email-delivered invites and request-to-join.** There is no email infrastructure and, critically, no email verification, so an invite bound only to an address (or a "ask to join" by company name) would be unsafe or an enumeration oracle.
+  Codes shared out of band avoid both.
+- **Persistent throttling.** The failed-redemption and create-company throttles are in-process, like the API's failed-auth throttle (best effort; the real controls are the 160-bit secret, the email match and the cap).
+- A separate `organization:archive` permission (OWNER-only is a role rule at the service layer, so `PERMISSION_AREAS` is untouched); archive scheduling/auto-expiry; ownership transfer as part of archiving.
+
+**Practical notes.** A two-seat company archives like any other: both seats stay occupied and are available again on restore. A practice's link to an archived client stays on file but reads as unavailable (and resumes on restore); a consolidation
+group keeps the entity configured and simply excludes it while archived. Webhook events raised before the archive wait in the outbox and are delivered, in order, after the restore.
+
 ## Phase 10 — Platform (in progress)
 
 Slices 1 (the public API foundation, API keys) and 2 (webhooks and the event outbox) are complete - see above. Remaining: the

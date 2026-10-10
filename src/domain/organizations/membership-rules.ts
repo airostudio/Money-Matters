@@ -16,9 +16,10 @@ import type { MembershipRole } from "@/domain/permissions/roles";
  * last OWNER. Always lock the organization row FIRST (never a membership row
  * first) so lock order is consistent and cannot deadlock.
  *
- * A "seat" is one ACTIVE organization_memberships row. There is no pending
- * invitation concept (a member can only be attached by an existing user's
- * email), so there is nothing else to count. Removing a member (is_active =
+ * A "seat" is one ACTIVE organization_memberships row. No pending invitation
+ * holds a seat: an invite code (invite-service.ts) reserves nothing and is
+ * checked against the limit when it is REDEEMED, here, under the same row lock -
+ * so there is still nothing else to count. Removing a member (is_active =
  * false) frees the seat.
  */
 
@@ -96,6 +97,12 @@ export function assertValidRole(role: string): asserts role is MembershipRole {
     throw new InvalidRoleError(role);
   }
 }
+
+// Archive / restore of the whole organization shares this module's serialisation point (the organization row lock) and,
+// like the membership rules, is used by both an organization's own settings and the platform admin section. They are
+// re-exported from here because the admin section's imports are allow-listed per module
+// (src/tests/unit/platform-admin/boundary.test.ts): one door, one place to audit.
+export * from "./archive-rules";
 
 /** Locks and returns the organization row — the serialisation point for every membership change. */
 export async function lockOrganization(tx: TenantDb, organizationId: string) {

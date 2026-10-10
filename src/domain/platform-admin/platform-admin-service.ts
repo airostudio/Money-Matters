@@ -4,8 +4,12 @@ import { withTenant } from "@/db/tenant";
 import { organizations, planTierEnum, users } from "@/db/schema";
 import { AuditService } from "@/domain/audit/audit-service";
 import {
+  ARCHIVE_REASON_MIN_LENGTH_ADMIN,
+  applyArchive,
+  applyRestore,
   assertValidRole,
   changeMembershipRole,
+  normaliseArchiveReason,
   countActiveSeats,
   deactivateMembership,
   lockOrganization,
@@ -132,6 +136,67 @@ export const PlatformAdminService = {
       });
 
       return { changed: true as const, organization: updated! };
+    });
+  },
+
+  /**
+   * Archives an organization (reversible, nothing is deleted - docs/security.md section 17). The reason is mandatory and
+   * is recorded in BOTH the platform audit log and the organization's own log. The admin gains this one write only; they
+   * still cannot read any tenant data.
+   */
+  async archiveOrganization(adminUserId: string, organizationId: string, reason: string) {
+    const admin = await verifyPlatformAdmin(adminUserId);
+    assertUuid(organizationId, "organization");
+    const cleanReason = normaliseArchiveReason(reason, ARCHIVE_REASON_MIN_LENGTH_ADMIN);
+
+    return withTenant(organizationId, async (tx) => {
+      const { before, after } = await applyArchive(tx, organizationId, { byUserId: admin.userId, reason: cleanReason });
+      const platformAuditId = await PlatformAuditService.record(tx, admin, {
+        action: "organization.archived",
+        targetType: "Organization",
+        targetId: organizationId,
+        targetOrganization: organizationId,
+        before: { archivedAt: before.archivedAt },
+        after: { archivedAt: after.archivedAt, reason: cleanReason },
+        metadata: { organizationName: before.name },
+      });
+      await AuditService.recordPlatformAction(tx, organizationId, {
+        action: "organization.archived",
+        entityType: "Organization",
+        entityId: organizationId,
+        before: { archivedAt: before.archivedAt },
+        after: { archivedAt: after.archivedAt, reason: cleanReason },
+        platformAuditId,
+      });
+      return after;
+    });
+  },
+
+  /** Restores an archived organization exactly as it was. */
+  async restoreOrganization(adminUserId: string, organizationId: string) {
+    const admin = await verifyPlatformAdmin(adminUserId);
+    assertUuid(organizationId, "organization");
+
+    return withTenant(organizationId, async (tx) => {
+      const { before, after } = await applyRestore(tx, organizationId);
+      const platformAuditId = await PlatformAuditService.record(tx, admin, {
+        action: "organization.restored",
+        targetType: "Organization",
+        targetId: organizationId,
+        targetOrganization: organizationId,
+        before: { archivedAt: before.archivedAt, reason: before.archiveReason },
+        after: { archivedAt: null },
+        metadata: { organizationName: before.name },
+      });
+      await AuditService.recordPlatformAction(tx, organizationId, {
+        action: "organization.restored",
+        entityType: "Organization",
+        entityId: organizationId,
+        before: { archivedAt: before.archivedAt, reason: before.archiveReason },
+        after: { archivedAt: null },
+        platformAuditId,
+      });
+      return after;
     });
   },
 

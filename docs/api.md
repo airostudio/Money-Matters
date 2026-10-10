@@ -131,6 +131,7 @@ Switch on `code`, never on `detail`.
 | 400 | `invalid_json`, `body_required`, `invalid_query`, `invalid_cursor`, `idempotency_key_required`, `idempotency_key_invalid` | malformed request |
 | 401 | `invalid_api_key`, `api_key_revoked`, `api_key_expired`, `api_key_owner_inactive` | authentication failed |
 | 403 | `insufficient_scope`, `permission_denied` | the key's scopes, or its creator's current permissions, don't allow it |
+| 403 | `organization_archived` | the key's organization is archived (see below); nothing is deleted and the key works again after an owner restores it |
 | 404 | `not_found`, `route_not_found` | no such resource in your organization / no such endpoint |
 | 405 | `method_not_allowed` | v1 is GET/HEAD/POST only |
 | 409 | `period_locked` (carries `lockLevel`), `idempotency_in_progress`, `conflict` | locked period, in-flight duplicate, concurrent change (retry) |
@@ -138,6 +139,11 @@ Switch on `code`, never on `detail`.
 | 422 | `validation_failed` (with `errors[]`), `idempotency_key_reuse` | |
 | 429 | `rate_limited`, `too_many_failed_attempts` | see `Retry-After` |
 | 500 / 503 | `internal_error`, `service_unavailable` | quote `requestId`; 503 is retryable |
+
+**Archived organizations.** When an owner (or the platform administrator) archives a company, every API key of that company answers `403 organization_archived` (problem JSON, no
+data) from then on - on every endpoint - until an owner restores it; then the same keys work again unchanged, nothing having been deleted. The check happens after the key's secret verified
+(a wrong secret still gets `401 invalid_api_key`) and costs no additional database statement. **Webhooks** for an archived company are paused the same way: no delivery is attempted and its
+events wait in the outbox, then flow in order after a restore. Managing invites, archiving and restoring are human-only and are not part of the public API.
 
 A document dated in a locked period is refused with `409 period_locked` for **any** lock level (even a soft lock, which a person may
 override with a reason in the app — an integration has no override). Nothing is saved.

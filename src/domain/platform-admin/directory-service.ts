@@ -10,12 +10,15 @@ import { verifyPlatformAdmin } from "./identity";
  */
 
 export type SeatFilter = "all" | "full" | "over";
+export type StatusFilter = "all" | "active" | "archived";
 
 export interface DirectoryQuery {
   q?: string;
   page?: number;
   pageSize?: number;
   seats?: SeatFilter;
+  /** Archived companies are listed by default (a platform admin must be able to find them to restore them). */
+  status?: StatusFilter;
 }
 
 export interface OrganizationRow {
@@ -27,6 +30,9 @@ export interface OrganizationRow {
   seatsUsed: number;
   memberCount: number;
   createdAt: Date;
+  archivedAt: Date | null;
+  archiveReason: string | null;
+  archivedByUserId: string | null;
 }
 
 export interface UserRow {
@@ -58,6 +64,7 @@ function likePattern(q: string | undefined): string | null {
 const ORG_SEATS_CTE = sql`
   seats AS (
     SELECT o.id, o.name, o.slug, o.plan_tier::text AS plan_tier, o.seat_limit, o.created_at,
+           o.archived_at, o.archive_reason, o.archived_by_user_id,
            (count(m.id) FILTER (WHERE m.is_active))::int AS used
     FROM organizations o
     LEFT JOIN organization_memberships m ON m.organization_id = o.id
@@ -71,6 +78,8 @@ function orgWhere(query: DirectoryQuery) {
   if (pattern) parts.push(sql`(name ILIKE ${pattern} OR slug ILIKE ${pattern})`);
   if (query.seats === "full") parts.push(sql`used >= seat_limit`);
   if (query.seats === "over") parts.push(sql`used > seat_limit`);
+  if (query.status === "active") parts.push(sql`archived_at IS NULL`);
+  if (query.status === "archived") parts.push(sql`archived_at IS NOT NULL`);
   return sql.join(parts, sql` AND `);
 }
 
@@ -82,8 +91,14 @@ function mapOrg(r: {
   seat_limit: number;
   used: number;
   created_at: Date;
+  archived_at: Date | null;
+  archive_reason: string | null;
+  archived_by_user_id: string | null;
 }): OrganizationRow {
   return {
+    archivedAt: r.archived_at ? new Date(r.archived_at) : null,
+    archiveReason: r.archive_reason,
+    archivedByUserId: r.archived_by_user_id,
     id: r.id,
     name: r.name,
     slug: r.slug,

@@ -32,11 +32,11 @@ export default function RegisterPage({
           )}
           <div className="space-y-2">
             <Label htmlFor="organizationName">Business name</Label>
+            <p className="text-xs text-muted-foreground">Leave blank only if you are joining an existing company with an invite code below.</p>
             <Input
               id="organizationName"
               name="organizationName"
               placeholder="Northstar Electrical Group"
-              required
             />
           </div>
           <div className="space-y-2">
@@ -50,6 +50,13 @@ export default function RegisterPage({
           <div className="space-y-2">
             <Label htmlFor="password">Password</Label>
             <Input id="password" name="password" type="password" minLength={8} required />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="inviteCode">Have an invite code? (optional)</Label>
+            <p className="text-xs text-muted-foreground">
+              Joins you to an existing company instead of creating your own. Register with the email the invite was made for.
+            </p>
+            <Input id="inviteCode" name="inviteCode" placeholder="mmj_…" autoComplete="off" spellCheck={false} />
           </div>
         </CardContent>
         <CardFooter className="flex flex-col gap-4">

@@ -17,6 +17,9 @@ import {
   emergencyStopAction,
   inviteMemberAction,
   removeMemberAction,
+  archiveCompanyAction,
+  createInviteCodeAction,
+  revokeInviteAction,
   runAutoExecutionsAction,
   updateAutoApprovedActionAction,
   updateAutonomyLevelAction,
@@ -24,13 +27,17 @@ import {
 } from "./actions";
 import { MemberRoleSelect } from "@/components/shell/member-role-select";
 import { InviteMemberForm } from "@/components/shell/invite-member-form";
+import { CreateInviteForm } from "@/components/shell/create-invite-form";
+import { ArchiveCompanyForm } from "@/components/shell/archive-company-form";
+import { InviteService } from "@/domain/organizations/invite-service";
+import { INVITE_TTL_DAYS, MAX_PENDING_INVITES_PER_ORG } from "@/domain/organizations/limits";
 
 export default async function SettingsPage({
   params,
   searchParams,
 }: {
   params: { orgSlug: string };
-  searchParams: { memberError?: string };
+  searchParams: { memberError?: string; archiveError?: string };
 }) {
   const { org, actor } = await requireOrgAndActor(params.orgSlug);
   const canManageMembers = roleHasPermission(actor.role, "membership:manage");
@@ -43,6 +50,10 @@ export default async function SettingsPage({
     : [];
   const seats = canManageMembers ? await OrganizationService.getSeatUsage(org.id) : null;
   const memberError = typeof searchParams.memberError === "string" ? searchParams.memberError.slice(0, 600) : null;
+  const archiveError = typeof searchParams.archiveError === "string" ? searchParams.archiveError.slice(0, 600) : null;
+  const invites = canManageMembers ? await InviteService.list(actor) : [];
+  const pendingInviteCount = invites.filter((i) => i.status === "PENDING").length;
+  const isOwner = actor.role === "OWNER";
   const autoApprovedActions = await AutoApprovedActionsService.list(org.id);
   const enabledActionTypes = new Set(autoApprovedActions.map((a) => a.actionType));
   const autonomyLevel = org.aiAutonomyLevel as 0 | 1 | 2 | 3 | 4;
@@ -55,6 +66,9 @@ export default async function SettingsPage({
   const boundEmergencyStop = emergencyStopAction.bind(null, org.slug);
   const boundUpdateAutoApproved = updateAutoApprovedActionAction.bind(null, org.slug);
   const boundRunAutoExecutions = runAutoExecutionsAction.bind(null, org.slug);
+  const boundCreateInvite = createInviteCodeAction.bind(null, org.slug);
+  const boundRevokeInvite = revokeInviteAction.bind(null, org.slug);
+  const boundArchive = archiveCompanyAction.bind(null, org.slug);
 
   return (
     <div className="max-w-3xl space-y-8">
@@ -303,7 +317,68 @@ export default async function SettingsPage({
             )}
             <InviteMemberForm action={boundInvite} options={roles} defaultRole={DEFAULT_INVITE_ROLE} disabled={seats?.isFull} />
           </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Invite someone with a code</CardTitle>
+              <CardDescription>
+                For people who have not signed up yet (or whom you would rather not look up by email). You get a one-time secret
+                code to give them yourself - there is no email delivery. It works once, only for an account registered with the
+                email you enter, and expires after {INVITE_TTL_DAYS} days. A seat is only used when they redeem it, and the seat
+                limit is checked then. Up to {MAX_PENDING_INVITES_PER_ORG} invites can be pending ({pendingInviteCount} now).
+              </CardDescription>
+            </CardHeader>
+            <CreateInviteForm action={boundCreateInvite} options={roles} defaultRole={DEFAULT_INVITE_ROLE} />
+            {invites.length > 0 && (
+              <CardContent className="p-0">
+                <div className="divide-y divide-border border-t border-border" data-testid="invite-list">
+                  {invites.map((invite) => (
+                    <div key={invite.id} className="flex items-center justify-between gap-4 px-6 py-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium">{invite.email}</p>
+                        <p className="truncate text-xs text-muted-foreground">
+                          {invite.role.toLowerCase().replace("_", " ")} · code {invite.codePrefix}… · created by {invite.createdByName ?? "unknown"} ·{" "}
+                          {invite.status === "PENDING"
+                            ? `expires ${invite.expiresAt.toISOString().slice(0, 10)}`
+                            : invite.status.toLowerCase()}
+                        </p>
+                      </div>
+                      {invite.status === "PENDING" && (
+                        <form action={boundRevokeInvite}>
+                          <input type="hidden" name="inviteId" value={invite.id} />
+                          <Button type="submit" variant="ghost" size="sm" className="text-destructive hover:text-destructive">
+                            Revoke
+                          </Button>
+                        </form>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            )}
+          </Card>
         </>
+      )}
+
+      {isOwner && (
+        <Card className="border-destructive/40">
+          <CardHeader>
+            <CardTitle className="text-base text-destructive">Danger zone</CardTitle>
+            <CardDescription>
+              Archive {org.name}. Archiving is reversible and deletes nothing: the company is closed to everyone (including you)
+              and its API keys, webhooks and automations pause, until an owner restores it from the company list. Only an Owner
+              can archive.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {archiveError && (
+              <p role="alert" className="mb-4 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                {archiveError}
+              </p>
+            )}
+            <ArchiveCompanyForm action={boundArchive} orgName={org.name} orgSlug={org.slug} />
+          </CardContent>
+        </Card>
       )}
     </div>
   );

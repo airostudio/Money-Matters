@@ -176,8 +176,14 @@ export const AutoApprovedActionsService = {
  * neither one alone ever triggers auto-execution (see this module's and
  * `autonomy.ts`'s doc comments, and the "level alone does nothing" test).
  */
-export async function isAutoExecutionApproved(organizationId: string, actionType: AutoApprovedActionType): Promise<{ approved: boolean; level: number }> {
-  const level = await AutonomySettingsService.getLevel(organizationId);
+export async function isAutoExecutionApproved(
+  organizationId: string,
+  actionType: AutoApprovedActionType,
+): Promise<{ approved: boolean; level: number; archived?: boolean }> {
+  // The archived flag rides in the SAME query as the level (no extra round trip). An archived organization is never
+  // approved, whatever its stored level/whitelist - and they are left untouched for a later restore.
+  const { level, archived } = await AutonomySettingsService.getLevelAndArchived(organizationId);
+  if (archived) return { approved: false, level, archived: true };
   if (level < 3) return { approved: false, level };
 
   const approved = await withTenant(organizationId, async (tx) => {

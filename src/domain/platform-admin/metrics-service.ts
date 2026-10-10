@@ -13,7 +13,7 @@ import { verifyPlatformAdmin } from "./identity";
 
 export interface PlatformMetrics {
   users: { total: number; active: number; suspended: number };
-  organizations: { total: number };
+  organizations: { total: number; archived: number };
   seats: {
     used: number;
     allowed: number;
@@ -51,19 +51,20 @@ export const MetricsService = {
 
     const seatCounts = await db.execute(sql`
       WITH seats AS (
-        SELECT o.id, o.seat_limit,
+        SELECT o.id, o.seat_limit, o.archived_at,
                (count(m.id) FILTER (WHERE m.is_active))::int AS used
         FROM organizations o
         LEFT JOIN organization_memberships m ON m.organization_id = o.id
-        GROUP BY o.id, o.seat_limit
+        GROUP BY o.id, o.seat_limit, o.archived_at
       )
       SELECT count(*)::int AS organizations,
+             (count(*) FILTER (WHERE archived_at IS NOT NULL))::int AS archived,
              coalesce(sum(used), 0)::int AS used,
              coalesce(sum(seat_limit), 0)::int AS allowed,
              (count(*) FILTER (WHERE used >= seat_limit))::int AS at_limit,
              (count(*) FILTER (WHERE used > seat_limit))::int AS over_limit
       FROM seats
-    `) as unknown as Rows<{ organizations: number; used: number; allowed: number; at_limit: number; over_limit: number }>;
+    `) as unknown as Rows<{ organizations: number; archived: number; used: number; allowed: number; at_limit: number; over_limit: number }>;
 
     const tiers = await db.execute(sql`
       SELECT plan_tier::text AS plan_tier, count(*)::int AS organizations
@@ -115,11 +116,11 @@ export const MetricsService = {
     }>;
 
     const u = userCounts.rows[0] ?? { total: 0, active: 0, suspended: 0 };
-    const s = seatCounts.rows[0] ?? { organizations: 0, used: 0, allowed: 0, at_limit: 0, over_limit: 0 };
+    const s = seatCounts.rows[0] ?? { organizations: 0, archived: 0, used: 0, allowed: 0, at_limit: 0, over_limit: 0 };
 
     return {
       users: { total: u.total, active: u.active, suspended: u.suspended },
-      organizations: { total: s.organizations },
+      organizations: { total: s.organizations, archived: s.archived },
       seats: { used: s.used, allowed: s.allowed, orgsAtLimit: s.at_limit, orgsOverLimit: s.over_limit },
       planTiers: tiers.rows.map((r) => ({ planTier: r.plan_tier, organizations: r.organizations })),
       signupsPerWeek: weekly.rows,

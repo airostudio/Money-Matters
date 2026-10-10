@@ -323,6 +323,20 @@
       "when": 1791437338247,
       "tag": "0045_webhooks_slice2_row_level_security",
       "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1791623973329,
+      "tag": "0046_organisation_lifecycle_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1791623976846,
+      "tag": "0047_organisation_lifecycle_row_level_security",
+      "breakpoints": true
     }
   ]
 }

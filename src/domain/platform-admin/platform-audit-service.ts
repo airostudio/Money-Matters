@@ -8,6 +8,8 @@ import { verifyPlatformAdmin, type PlatformAdmin } from "./identity";
 
 export const PLATFORM_AUDIT_ACTIONS = [
   "organization.plan_changed",
+  "organization.archived",
+  "organization.restored",
   "membership.role_changed",
   "membership.removed",
   "user.suspended",

@@ -159,10 +159,14 @@ export class NotAClientMemberError extends Error {
   constructor(
     public readonly clientName: string,
     public readonly seats: { used: number; limit: number } | null,
+    /** The client company is ARCHIVED: one neutral message, no seat or membership detail (nothing about it is disclosed). */
+    public readonly unavailable = false,
   ) {
     const full = seats && seats.used >= seats.limit;
     super(
-      `You are not a member of ${clientName}, so you cannot read its books. Practice access never grants data access by itself: ` +
+      unavailable
+        ? `${clientName} is currently unavailable, so its books cannot be read.`
+        : `You are not a member of ${clientName}, so you cannot read its books. Practice access never grants data access by itself: ` +
         `ask ${clientName}'s owner or administrator to add you as a member (Accountant or Bookkeeper)` +
         (full
           ? `. ${clientName} is at its seat limit (${seats.used} of ${seats.limit} seats used), so a seat must be freed first or ` +

@@ -189,6 +189,12 @@ Phase 10 Slice 2 note: creating an invoice now also writes its `invoice.created`
 three snapshot reads described in §12 - so the `POST /invoices` figure above now measures **23** statements (re-measured at the driver after Slice 2; the
 table's 20 predates the outbox), still independent of the number of lines and still one tenant transaction; `api-query-budget.test.ts` is unchanged and still passes.
 
+Organisation lifecycle note (archive): **no budget above changed.** The archived flag rides inside statements that already existed - the API key lookup now joins `organizations` (still 2 statements per
+authenticated request; an archived company's key costs 1 and never reaches the rate limiter or a tenant transaction), and webhook dispatch's phase A reads it in the same statement as its advisory try-lock
+(still 10). `withTenant` is untouched. `OrganizationService.getMembership` / `listMembershipsForUser` became joins to `organizations` (one query each, as before), the chooser makes one membership query for its
+active list, archived list and owned-company count, and the `[orgSlug]` layout is still at most three reads. The new flows are small and fixed: create-another-company is one transaction (user-row lock, owned count, slug check,
+insert, membership) plus the audit row and two starter accounts exactly as registration; invite redemption is one non-tenant lookup (hash), one user read and one tenant transaction; none uses `Promise.all`. See `docs/security.md` section 17.
+
 ## 12. Transactional outbox and webhook dispatch (Phase 10 Slice 2)
 
 Master spec §65: "important business events should generate domain events ... implement a durable outbox pattern"; §55: webhooks with

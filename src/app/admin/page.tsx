@@ -21,7 +21,11 @@ export default async function AdminDashboardPage() {
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Stat label="Users" value={m.users.total} hint={`${m.users.active} active · ${m.users.suspended} suspended`} />
-        <Stat label="Organizations" value={m.organizations.total} />
+        <Stat
+          label="Organizations"
+          value={m.organizations.total}
+          hint={m.organizations.archived > 0 ? `${m.organizations.archived} archived` : "none archived"}
+        />
         <Stat
           label="Seats used / allowed"
           value={`${m.seats.used} / ${m.seats.allowed}`}

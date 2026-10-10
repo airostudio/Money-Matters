@@ -135,7 +135,8 @@ export const ClientLinkService = {
 
     // 2. Resolve the organization. Anything wrong here is the same generic error.
     const org = slug ? await OrganizationService.getBySlug(slug) : null;
-    if (!org) throw new ProposalNotPossibleError();
+    // An ARCHIVED organization is unavailable: the same generic error as a slug that does not exist (nothing is disclosed).
+    if (!org || org.archivedAt) throw new ProposalNotPossibleError();
 
     // 3. Client side: the PENDING proposal in the client's own tenant table.
     const proposal = await PracticeConsentService.propose(org.id, { id: practiceId, name: practiceName }, actor.userId);

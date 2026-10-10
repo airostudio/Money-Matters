@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import {
   accounts,
   billRecurringSource,
@@ -279,7 +279,12 @@ export const RecurringBillService = {
       tx
         .select()
         .from(recurringBillTemplates)
-        .where(and(eq(recurringBillTemplates.organizationId, actor.organizationId), eq(recurringBillTemplates.isActive, true))),
+        .where(and(
+            eq(recurringBillTemplates.organizationId, actor.organizationId),
+            eq(recurringBillTemplates.isActive, true),
+            // An ARCHIVED organization generates nothing (skip, not throw): no extra query, the check rides in this one.
+            sql`NOT EXISTS (SELECT 1 FROM organizations o WHERE o.id = ${actor.organizationId} AND o.archived_at IS NOT NULL)`,
+          )),
     );
 
     const generated: Array<{ templateId: string; billId: string; billNumber: string; issueDate: Date }> = [];

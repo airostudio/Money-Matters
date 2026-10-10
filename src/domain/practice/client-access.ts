@@ -56,6 +56,9 @@ export async function explainNotAMember(clientOrganizationId: string, clientName
   let seats: { used: number; limit: number } | null = null;
   try {
     const usage = await OrganizationService.getSeatUsage(clientOrganizationId);
+    // An ARCHIVED client is "unavailable" - the same neutral message whether or not the person was ever a member, and
+    // no seat information (docs/security.md section 17).
+    if (usage.archived) return new NotAClientMemberError(clientName, null, true);
     seats = { used: usage.seatsUsed, limit: usage.seatLimit };
   } catch {
     seats = null;

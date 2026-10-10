@@ -95,6 +95,22 @@ export const AutonomySettingsService = {
     });
   },
 
+  /**
+   * The level AND whether the organization is archived, in the same single query `getLevel` makes. Auto-execution
+   * reads this: an archived organization never auto-executes anything (its stored level and whitelist are left
+   * untouched, so a restore resumes exactly the configuration it had).
+   */
+  async getLevelAndArchived(organizationId: string): Promise<{ level: AutonomyLevel; archived: boolean }> {
+    return withTenant(organizationId, async (tx) => {
+      const [row] = await tx
+        .select({ aiAutonomyLevel: organizations.aiAutonomyLevel, archivedAt: organizations.archivedAt })
+        .from(organizations)
+        .where(eq(organizations.id, organizationId));
+      const level = row?.aiAutonomyLevel ?? DEFAULT_AUTONOMY_LEVEL;
+      return { level: isAutonomyLevel(level) ? level : DEFAULT_AUTONOMY_LEVEL, archived: Boolean(row?.archivedAt) };
+    });
+  },
+
   /** OWNER/ADMINISTRATOR-only, per the task's "reaching a higher level must be an explicit opt-in by an OWNER/ADMINISTRATOR, not a default." */
   async setLevel(actor: Actor, level: number): Promise<AutonomyLevel> {
     assertPermission(actor, "organization:manage");

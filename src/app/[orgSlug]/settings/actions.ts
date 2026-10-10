@@ -14,6 +14,22 @@ import {
   WriteAccessConfirmationRequiredError,
 } from "@/domain/organizations/organization-service";
 import { membershipRoleEnum } from "@/db/schema";
+import { InvalidRoleError } from "@/domain/organizations/membership-rules";
+import {
+  ArchiveConfirmationError,
+  ArchiveNotPermittedError,
+  InvalidArchiveReasonError,
+  OrganizationAlreadyArchivedError,
+  OrganizationArchivedError,
+} from "@/domain/organizations/archive-rules";
+import { OrganizationLifecycleService } from "@/domain/organizations/lifecycle-service";
+import {
+  InviteEmailInvalidError,
+  InviteNotFoundError,
+  InviteNotPendingError,
+  InviteService,
+  PendingInviteLimitError,
+} from "@/domain/organizations/invite-service";
 import { AutonomySettingsService, InvalidAutonomyLevelError } from "@/domain/ai-controller/autonomy";
 import { AutoApprovedActionsService, InvalidAutoApprovedActionTypeError } from "@/domain/ai-controller/auto-execution-policy";
 import { AutoExecutionService } from "@/domain/ai-controller/auto-execution-service";
@@ -212,4 +228,92 @@ export async function runAutoExecutionsAction(orgSlug: string): Promise<void> {
   } catch (error) {
     return rethrowPermissionDenied(error, orgSlug);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Invite codes (docs/security.md section 17)
+// ---------------------------------------------------------------------------
+
+export type CreateInviteState =
+  | { status: "idle" }
+  | { status: "created"; code: string; email: string; role: string; expiresAt: string }
+  | { status: "error"; error: string };
+
+const INVITE_ERRORS = [
+  InviteEmailInvalidError,
+  PendingInviteLimitError,
+  AlreadyMemberError,
+  WriteAccessConfirmationRequiredError,
+  InvalidRoleError,
+  OrganizationArchivedError,
+];
+
+/**
+ * Creates an invite and RETURNS the code to the calling form (never a redirect/query string, so the secret never lands
+ * in a URL, a history entry or an access log). The form shows it once. The role-confirmation rule is enforced in the
+ * service; `confirmWriteAccess` is always passed.
+ */
+export async function createInviteCodeAction(orgSlug: string, _previous: CreateInviteState, formData: FormData): Promise<CreateInviteState> {
+  try {
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const parsed = InviteSchema.safeParse({ email: formData.get("email"), role: formData.get("role") });
+    if (!parsed.success) return { status: "error", error: "Enter a valid email address and choose a role." };
+    try {
+      const { invite, code } = await InviteService.create(actor, parsed.data, {
+        confirmWriteAccess: formData.get("confirmWriteAccess") === "true",
+      });
+      revalidatePath(`/${orgSlug}/settings`);
+      return { status: "created", code, email: invite.email, role: invite.role, expiresAt: invite.expiresAt.toISOString() };
+    } catch (error) {
+      if (INVITE_ERRORS.some((E) => error instanceof E)) return { status: "error", error: (error as Error).message };
+      throw error;
+    }
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
+}
+
+export async function revokeInviteAction(orgSlug: string, formData: FormData): Promise<void> {
+  try {
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const inviteId = formData.get("inviteId");
+    if (typeof inviteId !== "string" || !/^[0-9a-f-]{36}$/i.test(inviteId)) return;
+    try {
+      await InviteService.revoke(actor, inviteId);
+    } catch (error) {
+      if (error instanceof InviteNotFoundError || error instanceof InviteNotPendingError) failWith(orgSlug, error.message);
+      throw error;
+    }
+    revalidatePath(`/${orgSlug}/settings`);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Danger zone: archive (OWNER only, reversible - docs/security.md section 17)
+// ---------------------------------------------------------------------------
+
+const ARCHIVE_ERRORS = [ArchiveNotPermittedError, ArchiveConfirmationError, InvalidArchiveReasonError, OrganizationAlreadyArchivedError];
+
+export async function archiveCompanyAction(orgSlug: string, formData: FormData): Promise<void> {
+  try {
+    const { actor } = await requireOrgAndActor(orgSlug);
+    try {
+      await OrganizationLifecycleService.archive(actor, {
+        confirmName: String(formData.get("confirmName") ?? ""),
+        acknowledged: formData.get("acknowledge") === "true",
+        reason: String(formData.get("reason") ?? ""),
+      });
+    } catch (error) {
+      if (ARCHIVE_ERRORS.some((E) => error instanceof E)) {
+        redirect(`/${orgSlug}/settings?archiveError=${encodeURIComponent((error as Error).message.slice(0, 600))}`);
+      }
+      throw error;
+    }
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
+  // The company is archived now, so its own URL is the archived page; the chooser lists it under "Archived companies".
+  redirect("/app");
 }

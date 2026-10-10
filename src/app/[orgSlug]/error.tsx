@@ -2,6 +2,7 @@
 
 import { useParams } from "next/navigation";
 import { parsePermissionDeniedDigest } from "@/domain/permissions/permission-service";
+import { isOrganizationArchivedDigest } from "@/domain/organizations/archived-digest";
 import { PermissionDeniedView } from "@/components/shell/permission-denied";
 
 /**
@@ -16,6 +17,21 @@ import { PermissionDeniedView } from "@/components/shell/permission-denied";
 export default function OrgError({ error, reset }: { error: Error & { digest?: string }; reset: () => void }) {
   const params = useParams<{ orgSlug?: string }>();
   const denial = parsePermissionDeniedDigest(error.digest);
+  if (isOrganizationArchivedDigest(error.digest)) {
+    // A server action (or page) fired at a company that was archived after the page loaded: say so plainly. The
+    // [orgSlug] layout shows the full archived page with the restore button on the next navigation.
+    return (
+      <div role="status" className="mx-auto max-w-xl space-y-3 rounded-lg border border-border bg-card p-6">
+        <h1 className="text-lg font-semibold tracking-tight">This company is archived</h1>
+        <p className="text-sm text-muted-foreground">
+          Nothing was changed. Nobody can view or change this company until an owner restores it.
+        </p>
+        <a href={params?.orgSlug ? `/${params.orgSlug}` : "/app"} className="text-sm text-primary underline">
+          Continue
+        </a>
+      </div>
+    );
+  }
   if (denial) {
     return (
       <PermissionDeniedView

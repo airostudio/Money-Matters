@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { requirePlatformAdmin } from "@/lib/platform-admin";
-import { DirectoryService, type SeatFilter } from "@/domain/platform-admin/directory-service";
+import { DirectoryService, type SeatFilter, type StatusFilter } from "@/domain/platform-admin/directory-service";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Pager, Table, first, formatDate, pageParam } from "../_components";
@@ -13,11 +13,14 @@ export default async function AdminOrganizationsPage({
   const admin = await requirePlatformAdmin();
   const q = first(searchParams.q)?.slice(0, 100) ?? "";
   const seats: SeatFilter = first(searchParams.seats) === "full" ? "full" : first(searchParams.seats) === "over" ? "over" : "all";
+  const statusParam = first(searchParams.status);
+  const status: StatusFilter = statusParam === "archived" ? "archived" : statusParam === "active" ? "active" : "all";
   const page = pageParam(first(searchParams.page));
-  const { rows, total, pageSize } = await DirectoryService.listOrganizations(admin.userId, { q, seats, page });
+  const { rows, total, pageSize } = await DirectoryService.listOrganizations(admin.userId, { q, seats, status, page });
   const exportParams = new URLSearchParams();
   if (q) exportParams.set("q", q);
   if (seats !== "all") exportParams.set("seats", seats);
+  if (status !== "all") exportParams.set("status", status);
 
   return (
     <>
@@ -43,6 +46,16 @@ export default async function AdminOrganizationsPage({
           <option value="full">At seat limit</option>
           <option value="over">Over seat limit</option>
         </select>
+        <select
+          name="status"
+          defaultValue={status}
+          className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+          aria-label="Status filter"
+        >
+          <option value="all">Active and archived</option>
+          <option value="active">Active only</option>
+          <option value="archived">Archived only</option>
+        </select>
         <Button type="submit" size="sm">
           Search
         </Button>
@@ -56,6 +69,7 @@ export default async function AdminOrganizationsPage({
                 {o.name}
               </Link>{" "}
               <span className="text-xs text-muted-foreground">/{o.slug}</span>
+              {o.archivedAt && <span className="ml-2 rounded bg-muted px-1.5 py-0.5 text-xs font-medium text-muted-foreground">Archived</span>}
             </td>
             <td className="px-3 py-2">{o.planTier}</td>
             <td className="px-3 py-2 tabular-nums">
@@ -66,7 +80,7 @@ export default async function AdminOrganizationsPage({
           </tr>
         ))}
       </Table>
-      <Pager basePath="/admin/organizations" params={{ q, seats: seats === "all" ? undefined : seats }} page={page} pageSize={pageSize} total={total} />
+      <Pager basePath="/admin/organizations" params={{ q, seats: seats === "all" ? undefined : seats, status: status === "all" ? undefined : status }} page={page} pageSize={pageSize} total={total} />
     </>
   );
 }

@@ -182,9 +182,13 @@ export const AutoExecutionService = {
   async runPendingAutoExecutions(actor: Actor): Promise<AutoExecutionResult[]> {
     const results: AutoExecutionResult[] = [];
     for (const actionType of Object.keys(RUNNERS) as AutoApprovedActionType[]) {
-      const { approved, level } = await isAutoExecutionApproved(actor.organizationId, actionType);
+      const { approved, level, archived } = await isAutoExecutionApproved(actor.organizationId, actionType);
       if (!approved) {
-        results.push({ actionType, executed: 0, skippedReason: level < 3 ? "autonomy level below 3" : "not whitelisted" });
+        results.push({
+          actionType,
+          executed: 0,
+          skippedReason: archived ? "organization is archived" : level < 3 ? "autonomy level below 3" : "not whitelisted",
+        });
         continue;
       }
       try {

@@ -58,6 +58,11 @@ export function LoginForm() {
               Account created — sign in to continue.
             </p>
           )}
+          {searchParams.get("notice") && (
+            <p role="status" className="rounded-md bg-muted px-3 py-2 text-sm text-foreground">
+              {searchParams.get("notice")!.slice(0, 400)}
+            </p>
+          )}
           {error && (
             <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p>
           )}

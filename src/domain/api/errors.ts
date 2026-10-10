@@ -78,6 +78,13 @@ export const apiErrors = {
     new ApiError(401, "invalid_api_key", "Authentication failed", "The API key is missing, malformed or not recognised. Send it as `Authorization: Bearer <key>`."),
   apiKeyRevoked: () => new ApiError(401, "api_key_revoked", "API key revoked", "This API key has been revoked."),
   apiKeyExpired: () => new ApiError(401, "api_key_expired", "API key expired", "This API key has expired."),
+  organizationArchived: () =>
+    new ApiError(
+      403,
+      "organization_archived",
+      "Organization is archived",
+      "The organization this API key belongs to is archived, so the key does not work until an owner restores it. Nothing has been deleted.",
+    ),
   apiKeyOwnerInactive: () =>
     new ApiError(
       401,

@@ -1003,3 +1003,101 @@ concurrent creates cannot exceed it.
 
 mTLS or an allow-listed sender IP (no stable egress); a global dispatcher; per-event payload customisation; wildcard subscriptions; email alerts for dead letters; bulk re-encryption on key rotation; `payroll.completed` and
 `bank.transaction.created` (their data has no API representation and so no agreed permission rule for exposing it).
+
+## 17. Organisation lifecycle & joining (archive, create another company, invite codes)
+
+Built: reversible **archive**; **create another company** under the same login; **join a company with an invite code**. Deliberately **not** built: permanent deletion, email-delivered invites,
+request-to-join (reasons in §17.8 and `docs/roadmap.md`). Schema: `docs/database.md` §2t. Manual-deletion runbook (DBA only, outside the app): `docs/operations.md`.
+
+### 17.1 What "archived" means
+
+`organizations.archived_at / archived_by_user_id / archive_reason`. **Archive is not deletion**: those three columns are the whole change - no tenant row, membership, seat, API key, webhook
+subscription, autonomy setting or audit row is touched, and the slug stays reserved (the unique index covers archived rows). Restore clears the three columns and the company is exactly as it was
+(`archive.test.ts` snapshots ledger, trial balance, journal rows, memberships, API keys, webhook subscriptions, the organization row and every pre-existing audit id before and after, byte for byte,
+and the previously issued API key works again). While archived **nobody** - member, owner, administrator or API key - can read or write the company's data through any application path.
+Seats and memberships are untouched, so a restored company has the same team; a **practice** link to the company simply stops resolving (below) and resumes on restore; consolidation groups keep the
+entity configured and resume including it.
+
+Because the check must not add a query to `withTenant` (the hot path - DB connection discipline), it lives at the **few places where a person, key or process is turned into an Actor for an
+organization**. That is a short, finite list, and `src/tests/unit/organizations/archived-entry-points.test.ts` reads the source and fails if a new one appears (or an existing one changes
+shape) until it is added to the audited table with a statement of how it refuses an archived organization.
+
+### 17.2 The entry points (all refuse an archived organization)
+
+| Entry point | How it refuses | Extra queries |
+|---|---|---|
+| `OrganizationService.getMembership` (the basis of every session helper, practice, route handlers) | returns `null` for an archived organization unless the caller passes `includeArchived` (only the restore path and the layout do) | none: the `organizations` join that carries the flag replaced a single-table read |
+| `requireOrgAndActor` / `requireActor` (every server action and page) | a **member** gets `OrganizationArchivedError` (carries a digest the org `error.tsx` renders as "This company is archived"); a non-member gets `NotAMemberError`, as before | none (`getMembershipWithState` is the same one query) |
+| `getActorForOrganization` (route handlers, e.g. request attachments) | `null` -> 404 | none |
+| `[orgSlug]/layout.tsx` (every page) | members see the **archived page** (Restore button for OWNERs; "ask an owner" for others) and `children` is never rendered; non-members get a plain 404. *Why not 404 for everyone:* a member already knows the company exists, a 404 would read as data loss, and a non-member learns nothing either way | none (the layout's three reads became two for an archived company) |
+| Company chooser `/app` | archived companies are split into an "Archived companies" list (Restore for OWNERs only) and never take part in the "exactly one company -> redirect" decision, so a person whose only company is archived lands on the chooser, not a loop | none (**one** membership query feeds the list, the redirect, the owned-company count for the create cap) |
+| Company switcher | built from `listMembershipsForUser`, which excludes archived | none |
+| **Public API** (`api-auth.ts`) | the one lookup join now also joins `organizations`; a valid key of an archived company gets `403 organization_archived` (problem JSON) *after* its secret verified (a wrong secret still gets `invalid_api_key`, so the archive is not disclosed) | **none**: still 2 statements for an active key (lookup + rate-limit upsert); an archived key costs **1** (the lookup) and never reaches the rate limiter or a tenant transaction - measured in `archive.test.ts` |
+| **Webhook dispatch** (`dispatch-service.ts`, also the post-response run and "Send now") | the archived flag is read in the **same statement** as the existing fan-out try-lock; an archived organization returns before fan-out, claim or send. Events stay in the outbox (`dispatched_at` NULL) and flow, in order, after a restore | none (same statement; test asserts the statement count does not grow) |
+| **AI auto-execution** (`isAutoExecutionApproved`) | level and archived flag are read together; an archived organization is never approved (`skippedReason: "organization is archived"`). Level and whitelist are left untouched so a restore resumes exactly the same configuration | none |
+| **Recurring "generate due"** (`RecurringInvoiceService/RecurringBillService.generateDue`) | the template read excludes an archived organization (`NOT EXISTS ...`), so it returns `[]` | none (inside the existing read) |
+| **Practice** (client-access map, `requireClientActor`, `HealthService`) | they read memberships through the archive-aware helpers, so an archived client drops out of dashboards (counted only in "not accessible"), refresh answers a neutral "<client> is currently unavailable" - no seat, member or archive detail - and `propose` treats an archived slug as unknown | none (the failure path's existing seat lookup also reads the flag) |
+| **Consolidation** (`loadEntityAccessMap`) | an archived entity is absent from the access map, so it is excluded from every report with the existing "N entity excluded - no access" notice and no name, id, slug or figure | none |
+| Daily brief, AI chat, reports, everything else | ride on the session helpers above | none |
+
+`src/app`, `src/lib` and `src/components` never import `withTenant`, `withUserScope` or the raw `db` handle (asserted), so the request layer cannot bypass the helpers.
+
+### 17.3 Who can archive and restore
+
+- **OWNER, human only** (`OrganizationLifecycleService.archive`): Settings -> Danger zone. Needs the company name typed **exactly** (surrounding whitespace forgiven), an acknowledgement ("everyone loses access, and webhooks, API keys and
+  automations stop"), and a reason (5+ characters). The OWNER role is re-read from the database inside the transaction (a stale Actor for a since-demoted owner is refused). **ADMINISTRATOR cannot archive** - a service-layer
+  rule, whatever the UI shows. An `API`, `AI` or `SYSTEM` actor holding the OWNER role is refused. The page suggests exporting reports first (links to the existing CSV exports); no new export feature.
+- **Restore by an OWNER** (`restore`): from the chooser's "Archived companies" list. The user must be an active OWNER of that company. Restore is also refused while the person already owns the maximum number of **active** companies
+  (otherwise archive -> create -> restore would be a way round the cap).
+- **Platform admin** (`PlatformAdminService.archiveOrganization / restoreOrganization`): `/admin/organizations/[orgId]`, reason mandatory (10+ characters), archived status/filter in the directory, archived count on the dashboard. The admin gains
+  these two writes **only**; the admin boundary test is unchanged and still proves the section touches no tenant data. Both are audited in `platform_admin_audit_logs` **and** in the organization's own `audit_logs` (as the platform, linked by
+  `platformAuditId`). The two actions live in their own module (`admin/organizations/[orgId]/actions.ts`) and are proven to 404 for non-admins in `admin-archive-actions.test.ts`.
+- Every archive/restore is one transaction under the organization row lock (the same serialisation point membership changes use), with its audit row.
+
+### 17.4 Create another company
+
+Chooser button, switcher item, `/app/new`. `OrganizationService.createAdditionalCompany` -> the **same** `createWithUniqueSlug` -> `createWithOwner` registration uses (extracted, with retries: a collision or a reserved slug such as `admin` gets a
+random suffix; a unique-index race is mapped to the same error). The creator is OWNER in seat 1, the seat limit is the usual 2, starter system accounts are created, `organization.created` is audited (with `createdFromExistingAccount`), and the
+form redirects into the onboarding wizard. **Cap: 5 active owned companies** per person (`MAX_OWNED_ACTIVE_COMPANIES` in `limits.ts`); archived ones and companies where the person is only an administrator/member do not count; the count and the
+insert run in one transaction after locking the person's user row, so simultaneous requests cannot overshoot (tested: 5 racing creations at cap-2 yield exactly 2). **Throttle:** registration has no throttle today, so there was nothing to be consistent with
+beyond the API's per-instance `AuthThrottle`; create-another-company reuses that class (10 attempts per person per hour, per server instance, best effort). The cap is the real limit.
+
+### 17.5 Invite codes
+
+**Why codes, not email-bound auto-claim.** There is no email delivery and **no email verification**. An invite tied only to an email address would let anyone register that address first and inherit access. So an OWNER/ADMINISTRATOR
+(`membership:manage`, human only - an API key, AI agent or system actor is refused even with the role) creates an invite for an email + role and receives a **secret code, shown once**, to pass on out of band.
+
+- **Format and storage.** `mmj_` + 32 base32 characters = **160 bits** from the OS CSPRNG. Only the SHA-256 is stored (a fast hash is right for a uniformly random 160-bit secret, as for API keys); the invite row keeps a 6-character non-secret display prefix. The code is returned to the
+  creating form through the server action's **return value** (never a URL or query string) and shown once; it is never logged, never audited (`REDACTED_FIELDS` gained `inviteCode`, `invite_code`, `codeHash`, `code_hash` - deliberately not the bare word `code`, which account audits legitimately carry) and
+  never listed (the list shows prefix, email, role, creator, expiry, status).
+- **Rules at creation.** Writer-role confirmation is enforced server-side exactly like add-by-email, but `confirmWriteAccess` is **required** (no trusted caller omits it); READ_ONLY is preselected; expiry 7 days; at most 10 pending per company (under the organization lock); refused for an
+  existing active member's email and for an archived company. Revoke is available for pending invites. All audited.
+- **Redemption** (`InviteService.redeem`, from the chooser's "Join a company" or the optional field on the registration form). All enforced server-side: the code must match an unexpired, unrevoked, unused invite; the redeeming account's **normalised email must equal the invite's email**; the
+  company must not be archived; the seat limit is checked **under the organization row lock** through the same `addMembership` as every other join, so a full company returns the *specific* seat-limit message and the invite **stays valid**; the invite is marked used in the same transaction, so two simultaneous
+  redemptions of one code produce exactly one membership (tested with five racing calls; and two different invites racing for the last seat -> one wins, the other gets the seat message and stays pending). It writes `membership.created` (with `viaInviteId`) and `organization_invite.redeemed` in the company's log.
+  Registration with a code redeems **after** the account exists and, if it works, the new user does **not** also get a personal company; if the code fails (invalid, throttled, full company) registration falls back to the normal path (their own company when they gave a business name) with a clear notice, and the account is never lost over a bad code.
+- **Throttle (best effort, per server instance).** 5 failed attempts per window (15 min) per **person** and per **address** (first `X-Forwarded-For` hop), after which even a correct code is refused without being checked. Malformed input counts. A seat-limit refusal does not (the guesser would already hold a valid code). A success clears only the person's counter, not a shared address's. Like the API's failed-auth throttle the counters live in process memory: serverless instances each have their own and a cold
+  start resets them, so it is not a security boundary - the boundary is the 160-bit secret plus the email match; the throttle just makes casual guessing cheap to refuse.
+- **No enumeration.** Unknown, malformed, wrong-email, expired, revoked, used and archived-company all return **one identical message**. The only specific messages are ones the redeemer is already entitled to (their company is full; they are already a member) or that concern only them (throttled).
+- **Honest limit.** Email binding is defence in depth, not proof of identity: with no verification, someone who both obtains a code *and* registered the invitee's address first could redeem it. The code is the secret; treat it like a password and revoke an invite you suspect leaked.
+
+### 17.6 The invite lookup and why it is safe
+
+Redemption runs **before** the redeemer is a member, so which company a code belongs to is unknown until it resolves - the same problem `api_key_index` solved in Phase 10 Slice 1, with the same answer. `organization_invites` is an ordinary tenant table (`organization_id`, RLS enabled + FORCED, the single-variable
+policy, `mm_app`: `SELECT, INSERT` and `UPDATE` of only `revoked_at, revoked_by_user_id, used_at, used_by_user_id`; no DELETE). `organization_invite_index` is the narrow non-tenant lookup (listed in `RLS_EXEMPT_TABLES`):
+
+- it holds **only** `code_hash -> (invite id, organization id)` (+ `created_at`) - no email, role, expiry or state; every decision is made against the RLS-protected invite row after the app opens `withTenant(<that organization>)`;
+- `mm_app` has **`SELECT, INSERT` only** - no UPDATE (a hash can never be re-pointed or rewritten), no DELETE, no TRUNCATE (tested as the real role);
+- a composite foreign key `(id, organization_id) -> organization_invites(id, organization_id)` means a row for an invite that does not exist in that organization cannot be inserted, and since the invite row is RLS-protected a transaction scoped to organization A cannot plant a hash that resolves into B (tested);
+- what an attacker who could read the whole index learns: that some 160-bit-hash maps to some organization id. They cannot reverse the hash, and an invite id alone reads nothing (the invite row is invisible without the tenant context). That is strictly less than `api_key_index`, which carries a secret hash, scopes and a creator.
+
+No new permission was needed (`membership:manage` covers it), so `PERMISSION_AREAS` is unchanged. The AI controller registry and the API scope whitelist contain nothing about archive, restore or invites (asserted structurally).
+
+### 17.7 Audit
+
+`organization.created`, `organization.archived`, `organization.restored`, `organization_invite.created|revoked|redeemed`, `membership.created` (with `viaInviteId`). Platform admin archive/restore additionally write `platform_admin_audit_logs`. No audit row, log line or list ever contains a code or its hash.
+
+### 17.8 What is not covered
+
+Permanent deletion (impossible through the app role by design - append-only tables deny DELETE - and deliberately not built; see `docs/operations.md`); email delivery of invites and request-to-join (no email infrastructure or verification); a persistent (database-backed) throttle; per-invite
+rate limiting across instances; invite-by-link for already-registered users without a code; automatic expiry of archived companies; transferring ownership during archive (use the existing role change first).

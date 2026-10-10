@@ -388,6 +388,15 @@ export const organizations = pgTable("organizations", {
    */
   seatLimit: integer("seat_limit").notNull().default(2),
   planTier: planTierEnum("plan_tier").notNull().default("STANDARD"),
+  /**
+   * Archive (reversible, NOT deletion): while set, nobody can read or write this organization's data through ANY
+   * path (session choke point, server actions, public API keys, webhook dispatch, AI auto-execution, practice
+   * and consolidation). Nothing is removed - restoring clears these three columns and everything is exactly as it
+   * was. The slug stays reserved. See docs/security.md section 17 and src/domain/organizations/archive-rules.ts.
+   */
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
+  archivedByUserId: uuid("archived_by_user_id").references(() => users.id),
+  archiveReason: text("archive_reason"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
@@ -5026,4 +5035,65 @@ export const webhookDeliveryAttempts = pgTable("webhook_delivery_attempts", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   deliveryIdx: index("webhook_delivery_attempts_delivery_idx").on(table.deliveryId, table.attemptNumber),
+}));
+
+// ---------------------------------------------------------------------------
+// Organisation invite codes (docs/security.md section 17)
+// ---------------------------------------------------------------------------
+
+/**
+ * A pending/used/revoked invite to join an organization, redeemed with a secret CODE shared out of band (there is no
+ * email delivery and no email verification, so an invite tied only to an email address would be unsafe). Tenant table
+ * (RLS). The code itself is never stored here: only a non-secret display prefix. The SHA-256 of the code lives in
+ * `organization_invite_index`, the narrow non-tenant lookup that lets a redeemer who is not yet a member find the
+ * invite. Rows are never deleted; a state change is revoked_at (revoke) or used_at (redeem).
+ */
+export const organizationInvites = pgTable("organization_invites", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  /** Normalised (lower-cased, trimmed) address the redeeming account must have registered with. */
+  email: text("email").notNull(),
+  role: membershipRoleEnum("role").notNull(),
+  /** Non-secret first characters of the code, so a person can tell invites apart in the list. */
+  codePrefix: text("code_prefix").notNull(),
+  invitedByUserId: uuid("invited_by_user_id")
+    .notNull()
+    .references(() => users.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  revokedByUserId: uuid("revoked_by_user_id").references(() => users.id),
+  usedAt: timestamp("used_at", { withTimezone: true }),
+  usedByUserId: uuid("used_by_user_id").references(() => users.id),
+}, (table) => ({
+  orgCreatedIdx: index("organization_invites_org_created_idx").on(table.organizationId, table.createdAt),
+  // Target of the composite foreign key from organization_invite_index.
+  idOrgUnique: uniqueIndex("organization_invites_id_org_unique").on(table.id, table.organizationId),
+}));
+
+/**
+ * The narrow, NON-tenant lookup for invite redemption: code hash -> (invite id, organization id). Redemption happens
+ * BEFORE the redeemer is a member, so the organization is unknown until the code resolves; the same shape of problem
+ * (and the same answer) as `api_key_index`. Holds nothing beyond what is needed to open the organization's tenant
+ * transaction: no email, no role, no expiry, no state (all of that is read from the RLS-protected organization_invites
+ * row once the tenant context is set). SELECT + INSERT only for mm_app - no UPDATE, no DELETE, so a hash can never be
+ * rewritten or re-pointed - and the composite foreign key to organization_invites(id, organization_id) means a row
+ * for an invite that does not exist in that organization cannot be forged from a tenant transaction. Listed in
+ * RLS_EXEMPT_TABLES (src/db/isolation-audit.ts).
+ */
+export const organizationInviteIndex = pgTable("organization_invite_index", {
+  id: uuid("id").primaryKey(),
+  organizationId: uuid("organization_id").notNull(),
+  /** Hex SHA-256 of the full invite code. A >=160-bit random code needs no slow hash. */
+  codeHash: text("code_hash").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  codeHashUnique: uniqueIndex("organization_invite_index_code_hash_unique").on(table.codeHash),
+  inviteFk: foreignKey({
+    columns: [table.id, table.organizationId],
+    foreignColumns: [organizationInvites.id, organizationInvites.organizationId],
+    name: "organization_invite_index_invite_org_fk",
+  }).onDelete("cascade"),
 }));

@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice, Stat, Table, first, formatDate } from "../../_components";
 import { changeMemberRoleAction, removeMemberAction, updateOrganizationPlanAction } from "../../actions";
+import { archiveOrganizationAction, restoreOrganizationAction } from "./actions";
 
 export default async function AdminOrganizationPage({
   params,
@@ -36,11 +37,22 @@ export default async function AdminOrganizationPage({
           </Link>{" "}
           / {org.slug}
         </p>
-        <h1 className="text-xl font-semibold">{org.name}</h1>
+        <h1 className="text-xl font-semibold">
+          {org.name}
+          {org.archivedAt ? <span className="ml-2 rounded bg-muted px-2 py-0.5 align-middle text-xs font-medium text-muted-foreground">Archived</span> : null}
+        </h1>
         <p className="text-sm text-muted-foreground">Created {formatDate(org.createdAt)}</p>
       </div>
 
       <Notice ok={first(searchParams.ok)} error={first(searchParams.error)} />
+
+      {org.archivedAt && (
+        <p role="status" className="rounded-md border border-border bg-muted px-3 py-2 text-sm">
+          <span className="font-medium">Archived</span> on {formatDate(org.archivedAt)}
+          {org.archiveReason ? ` - reason: ${org.archiveReason}` : ""}. Nobody can access this organization; its API keys,
+          webhooks and automations are paused. Nothing has been deleted.
+        </p>
+      )}
 
       <div className="grid gap-4 sm:grid-cols-3">
         <Stat label="Seats" value={`${org.seatsUsed} of ${org.seatLimit}`} hint={org.seatsUsed > org.seatLimit ? "Over limit" : org.seatsUsed >= org.seatLimit ? "At limit" : "Seat available"} />
@@ -133,6 +145,43 @@ export default async function AdminOrganizationPage({
           audit log and this organization&apos;s own audit log.
         </p>
       </section>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">{org.archivedAt ? "Restore this organization" : "Archive this organization"}</CardTitle>
+          <CardDescription>
+            Archiving is reversible and deletes nothing: the organization is closed to every member, and its API keys,
+            webhooks and automations pause, until it is restored. Memberships, seats and all records are untouched. A reason
+            is required and is recorded in both the platform audit log and the organization&apos;s own audit log. You gain no
+            access to the organization&apos;s data either way.
+          </CardDescription>
+        </CardHeader>
+        {org.archivedAt ? (
+          <form action={restoreOrganizationAction}>
+            <input type="hidden" name="organizationId" value={org.id} />
+            <input type="hidden" name="returnTo" value={returnTo} />
+            <CardContent>
+              <Button type="submit" variant="outline">
+                Restore organization
+              </Button>
+            </CardContent>
+          </form>
+        ) : (
+          <form action={archiveOrganizationAction}>
+            <input type="hidden" name="organizationId" value={org.id} />
+            <input type="hidden" name="returnTo" value={returnTo} />
+            <CardContent className="flex flex-col gap-4 sm:flex-row sm:items-end">
+              <div className="flex-1 space-y-2">
+                <Label htmlFor="archive-reason">Reason (at least 10 characters)</Label>
+                <Input id="archive-reason" name="reason" minLength={10} maxLength={500} required />
+              </div>
+              <Button type="submit" variant="destructive">
+                Archive organization
+              </Button>
+            </CardContent>
+          </form>
+        )}
+      </Card>
 
       <section className="space-y-2">
         <h2 className="text-sm font-semibold">Recent admin actions on this organization</h2>

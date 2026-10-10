@@ -5,6 +5,9 @@ import { UserService } from "@/domain/auth/user-service";
 import { authOptions } from "./auth";
 import { OrganizationService } from "@/domain/organizations/organization-service";
 import type { Actor } from "@/domain/permissions/permission-service";
+import { OrganizationArchivedError } from "@/domain/organizations/archive-rules";
+
+export { OrganizationArchivedError };
 
 export interface CurrentUser {
   id: string;
@@ -36,7 +39,11 @@ async function resolveCurrentUser(): Promise<CurrentUser | null> {
 
 export const getCurrentUser: () => Promise<CurrentUser | null> = memoizePerRequest(resolveCurrentUser);
 
-/** Resolves the authenticated user's Actor for a specific organization, or null if not a member. */
+/**
+ * Resolves the authenticated user's Actor for a specific organization, or null if not a member. An ARCHIVED
+ * organization also resolves to null (`getMembership` excludes it - docs/security.md section 17), so route handlers
+ * built on this answer 404 for it.
+ */
 export async function getActorForOrganization(organizationId: string): Promise<Actor | null> {
   const user = await getCurrentUser();
   if (!user) return null;
@@ -82,8 +89,12 @@ export async function requireOrgAndActor(orgSlug: string) {
   const org = await OrganizationService.getBySlug(orgSlug);
   if (!org) throw new OrganizationNotFoundError(orgSlug);
 
-  const membership = await OrganizationService.getMembership(user.id, org.id);
-  if (!membership) throw new NotAMemberError();
+  const found = await OrganizationService.getMembershipWithState(user.id, org.id);
+  if (!found) throw new NotAMemberError();
+  // A member of an archived company gets the explicit, friendly "archived" state (the org error boundary renders it,
+  // and the [orgSlug] layout renders it for page navigations). A non-member sees exactly what they saw before: nothing.
+  if (found.archivedAt) throw new OrganizationArchivedError(org.id);
+  const membership = found.membership;
 
   return {
     org,
@@ -97,8 +108,9 @@ export async function requireActor(organizationId: string): Promise<Actor> {
   const user = await getCurrentUser();
   if (!user) throw new NotAuthenticatedError();
 
-  const membership = await OrganizationService.getMembership(user.id, organizationId);
-  if (!membership) throw new NotAMemberError();
+  const found = await OrganizationService.getMembershipWithState(user.id, organizationId);
+  if (!found) throw new NotAMemberError();
+  if (found.archivedAt) throw new OrganizationArchivedError(organizationId);
 
-  return { userId: user.id, organizationId, role: membership.role };
+  return { userId: user.id, organizationId, role: found.membership.role };
 }

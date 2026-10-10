@@ -3,6 +3,8 @@ import { getCurrentUser } from "@/lib/session";
 import { isPlatformAdminUser } from "@/lib/platform-admin";
 import { OrganizationService } from "@/domain/organizations/organization-service";
 import { DashboardShell } from "@/components/shell/dashboard-shell";
+import { ArchivedCompanyNotice } from "@/components/shell/archived-company";
+import { restoreCompanyAction } from "@/app/app/actions";
 import { getUiMode } from "@/lib/ui-mode";
 
 /**
@@ -30,10 +32,30 @@ export default async function OrgLayout({
   const org = await OrganizationService.getBySlug(params.orgSlug);
   if (!org) notFound();
 
-  const membership = await OrganizationService.getMembership(user.id, org.id);
-  if (!membership) notFound();
+  // The membership AND the archived flag in one query. A non-member gets a plain 404 whether or not the company is
+  // archived (nothing is revealed). A MEMBER of an archived company gets an explicit "this company is archived" page -
+  // they already know it exists, so a clear explanation (and, for an OWNER, the way back) beats a confusing 404 - and
+  // `children` is deliberately NOT rendered, so no page under it runs. Server actions and route handlers fired at an
+  // archived company are refused separately by the session helpers (src/lib/session.ts).
+  const found = await OrganizationService.getMembershipWithState(user.id, org.id);
+  if (!found) notFound();
 
-  // One membership query feeds the company switcher (no per-organization lookups).
+  if (org.archivedAt) {
+    const isOwner = found.membership.role === "OWNER";
+    return (
+      <ArchivedCompanyNotice
+        orgId={org.id}
+        orgName={org.name}
+        archivedAt={org.archivedAt}
+        reason={isOwner ? org.archiveReason : null}
+        canRestore={isOwner}
+        restoreAction={restoreCompanyAction}
+      />
+    );
+  }
+  const membership = found.membership;
+
+  // One membership query feeds the company switcher (no per-organization lookups); archived companies are excluded.
   const memberships = await OrganizationService.listMembershipsForUser(user.id);
   const switcherOrgs = memberships
     .map((m) => ({ slug: m.organization.slug, name: m.organization.name, role: m.role }))

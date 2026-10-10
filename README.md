@@ -200,6 +200,18 @@ public, the connection is pinned to the validated IP, no redirects, TLS verified
 Signing secrets are AES-256-GCM encrypted with `WEBHOOK_SECRET_ENCRYPTION_KEY` (see
 below) and webhooks are simply off without it. See [`docs/api.md`](docs/api.md)
 (Webhooks), `docs/architecture.md` section 12 and `docs/security.md` section 16.
+
+**Organisation lifecycle & joining.** A signed-in user can **create another company** under the same login (chooser or
+company switcher; up to 5 active owned companies) and **join a company with an invite code**. An Owner or Administrator
+creates the invite in Settings -> Team (an email + role; the one-time `mmj_...` code is shown once and passed on out of band -
+there is no email delivery or verification, so codes, not email-bound invites, are the safe design); the invitee enters it on
+the chooser ("Join a company") or the sign-up form, and it works once, only for the matching email, within 7 days. An Owner can
+**archive** a company (Settings -> Danger zone; type the company name, acknowledge, give a reason) and restore it from the
+chooser; the platform admin can archive/restore with a reason. Archive is **reversible and deletes nothing** - while archived
+nobody (including API keys, webhooks and automations) can reach the company, and a restore returns it exactly as it was.
+**Permanent deletion is deliberately not built**: it is a manual, DBA-level procedure outside the app, described with strong
+warnings (and no script) in [`docs/operations.md`](docs/operations.md). See `docs/security.md` section 17.
+
 See
 [`docs/roadmap.md`](docs/roadmap.md) for exactly what's built
 vs. explicitly deferred in each phase (a customer portal, AI-drafted

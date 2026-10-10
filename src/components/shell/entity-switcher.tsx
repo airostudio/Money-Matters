@@ -2,7 +2,7 @@
 
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import Link from "next/link";
-import { Building2, Check, ChevronsUpDown, Layers } from "lucide-react";
+import { Building2, Check, ChevronsUpDown, KeyRound, Layers, Plus } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export interface SwitcherOrg {
@@ -17,11 +17,11 @@ export interface SwitcherOrg {
  * no per-organization lookups. Each item is an ordinary link to that
  * organization's home page: nothing is carried across (the other organization
  * resolves the user's role there for itself), so switching never lends one
- * entity's permissions to another. Hidden when the user belongs to only one.
+ * entity's permissions to another. Shown even for a single company (it also leads to creating or joining another).
  */
 export function EntitySwitcher({ currentSlug, orgs }: { currentSlug: string; orgs: SwitcherOrg[] }) {
   const current = orgs.find((o) => o.slug === currentSlug);
-  if (orgs.length < 2) return null;
+  // Always shown now (even with one company): it is also where "Create a new company" and "Join a company" live.
 
   return (
     <DropdownMenu.Root>
@@ -55,6 +55,16 @@ export function EntitySwitcher({ currentSlug, orgs }: { currentSlug: string; org
             </DropdownMenu.Item>
           ))}
           <DropdownMenu.Separator className="my-1 h-px bg-border" />
+          <DropdownMenu.Item asChild>
+            <Link href="/app/new" className="flex cursor-pointer items-center gap-2 rounded-sm px-3 py-2 text-sm outline-none hover:bg-accent">
+              <Plus className="size-4" /> Create a new company
+            </Link>
+          </DropdownMenu.Item>
+          <DropdownMenu.Item asChild>
+            <Link href="/app?all=1" className="flex cursor-pointer items-center gap-2 rounded-sm px-3 py-2 text-sm outline-none hover:bg-accent">
+              <KeyRound className="size-4" /> Join a company / all companies
+            </Link>
+          </DropdownMenu.Item>
           <DropdownMenu.Item asChild>
             <Link href="/app/groups" className="flex cursor-pointer items-center gap-2 rounded-sm px-3 py-2 text-sm outline-none hover:bg-accent">
               <Layers className="size-4" /> Consolidated reporting
