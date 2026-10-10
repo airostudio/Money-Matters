@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { Pool } from "pg";
-import { evaluateIsolation, loadTableSecurityRows } from "@/db/isolation-audit";
+import { RLS_EXEMPT_TABLES, evaluateIsolation, loadTableSecurityRows } from "@/db/isolation-audit";
 import { closeTestPools } from "../../helpers/db";
 
 describe("the real test database passes the isolation audit under BOTH scoping models", () => {
@@ -32,8 +32,13 @@ describe("the real test database passes the isolation audit under BOTH scoping m
         expect(t.policy_exprs.every((e) => e.includes("app.current_user_id") && !e.includes("app.current_org_id")), t.table_name).toBe(true);
       }
       // The tenant model is unchanged: still no tenant policy mentions the user variable.
-      for (const t of rows.filter((r) => r.tenant_scoped && r.table_name !== "organization_memberships")) {
+      for (const t of rows.filter((r) => r.tenant_scoped && !RLS_EXEMPT_TABLES.has(r.table_name))) {
         expect(t.policy_exprs.every((e) => e.includes("app.current_org_id") && !e.includes("app.current_user_id")), t.table_name).toBe(true);
+      }
+      // The exempt lookup indexes (pre-tenant reads) may carry an open SELECT policy (oauth_*: write-bound, see migration 0051),
+      // but no policy anywhere on them may mention the USER variable.
+      for (const t of rows.filter((r) => RLS_EXEMPT_TABLES.has(r.table_name))) {
+        expect(t.policy_exprs.every((e) => !e.includes("app.current_user_id")), t.table_name).toBe(true);
       }
     } finally {
       await pool.end();
