@@ -329,6 +329,10 @@ the allow-listed non-tenant schema symbols, may not name any
 `organization_id`-bearing table (ts or raw SQL), may only import allow-listed
 domain modules, and may not open their own DB connection.
 
+The admin's write set gained exactly one thing in the organisation-lifecycle slice: **archive / restore** an organization with a mandatory reason (section 17.3) - two
+`UPDATE`s of three columns on the non-tenant `organizations` row plus the two audit rows. It does not widen the boundary: the shared archive rules are reached through the already
+allow-listed `membership-rules` module, and the admin still reads no tenant data (a platform admin who is not a member of an archived company gets the same 404 as anyone else).
+
 The admin domain code is **not** AI-accessible: no Financial Controller tool
 references it, a test asserts the tool registry (read and write tools) contains
 nothing admin-related, and another asserts no `ai-controller` module imports
@@ -354,9 +358,10 @@ organizations), so it is recorded in the platform log only.
 ### 10.6 Seat limit
 
 `organizations.seat_limit` (default 2) caps **active** memberships — a seat is
-one active `organization_memberships` row; there is no invitation concept (a
-member can only be attached by an existing user's email), so there are no
-pending invites to count. Enforcement is in the service layer
+one active `organization_memberships` row. A pending invite code (section 17)
+**holds no seat**: it is checked against the limit when it is redeemed, under the
+same lock, so there is nothing else to count (a full company returns the specific
+seat message and the invite stays valid). Enforcement is in the service layer
 (`src/domain/organizations/membership-rules.ts`, used by both the org's own
 settings and the admin section) under `SELECT … FOR UPDATE` on the organization
 row, so simultaneous adds cannot overshoot (tested with a deterministic
@@ -792,7 +797,8 @@ contacts, projects, budgets, journals drafts, settings, etc. are still last-writ
 a read-only member occupies a seat like any other. When it is full, the Team card says so
 and removing someone frees a seat. More seats are raised by the **platform
 administrator** from `/admin/organizations/<id>` (see 10.6) - the owner cannot raise it
-themselves.
+themselves. Colleagues can also be brought in with a single-use **invite code** (section 17), which
+checks the seat limit at redemption and uses the same "writer role needs explicit confirmation" rule at creation.
 
 ## 15. Public developer API (Phase 10 Slice 1): API keys, effective permissions, the lookup index
 
