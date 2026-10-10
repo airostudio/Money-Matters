@@ -125,10 +125,14 @@ export const NAV_ITEMS: NavItem[] = [
     label: "Payroll",
     href: "/payroll",
     icon: Wallet,
-    permission: "employee:read",
+    anyPermission: ["employee:read", "payslip:read"],
     children: [
+      { label: "My pay and leave", href: "/payroll/my", permission: "payslip:read" },
       { label: "Employees", href: "/payroll/employees", permission: "employee:read" },
       { label: "Pay Runs", href: "/payroll/pay-runs", permission: "payrun:read" },
+      { label: "Leave requests", href: "/payroll/leave", permission: "leave:read" },
+      { label: "Remittances", href: "/payroll/remittances", permission: "payroll_payment:read" },
+      { label: "Payroll reports", href: "/payroll/reports/summary", permission: "payrun:read" },
     ],
   },
   {
@@ -154,6 +158,7 @@ export const NAV_ITEMS: NavItem[] = [
       { label: "Ask a question", href: "/accounting/reports/ask", permission: "financial_report:read" },
       { label: "Dimensions", href: "/accounting/dimensions", permission: "dimension:read" },
       { label: "Tax Codes", href: "/accounting/tax-codes", permission: "tax_code:manage" },
+      { label: "BAS / GST", href: "/accounting/bas", permission: "bas:read" },
     ],
   },
   {

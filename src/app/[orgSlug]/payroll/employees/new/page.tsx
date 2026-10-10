@@ -89,6 +89,19 @@ export default async function NewEmployeePage({
             </div>
           </div>
 
+          <div className="max-w-sm">
+            <Label htmlFor="taxResidency">Tax residency</Label>
+            <select
+              id="taxResidency"
+              name="taxResidency"
+              defaultValue="RESIDENT"
+              className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+            >
+              <option value="RESIDENT">Australian resident for tax purposes</option>
+              <option value="FOREIGN_RESIDENT">Foreign resident (rates approximated, no Medicare levy)</option>
+            </select>
+          </div>
+
           <div>
             <Label htmlFor="userId">
               Linked login (user ID) — required only for an HOURLY employee whose hours should be pulled from

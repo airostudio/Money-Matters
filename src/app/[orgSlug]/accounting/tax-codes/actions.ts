@@ -7,14 +7,34 @@ import { z } from "zod";
 import { requireOrgAndActor } from "@/lib/session";
 import { TaxCodeService } from "@/domain/tax/tax-code-service";
 
-const CreateTaxCodeSchema = z.object({
+const TREATMENTS = ["TAXABLE", "GST_FREE", "EXPORT", "INPUT_TAXED", "NOT_REPORTED"] as const;
+
+const CreateTaxCodeSchema =z.object({
   code: z.string().trim().min(1).max(20),
   name: z.string().trim().min(1).max(200),
   ratePercent: z.coerce.number().min(0).max(100),
   jurisdiction: z.string().trim().min(1).max(10),
   payableAccountId: z.string().uuid().optional(),
   receivableAccountId: z.string().uuid().optional(),
+  basTreatment: z.enum(TREATMENTS).optional(),
+  basCapital: z.boolean().optional(),
 });
+
+export async function classifyTaxCodeAction(orgSlug: string, taxCodeId: string, formData: FormData): Promise<void> {
+  try {
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const raw = String(formData.get("basTreatment") ?? "");
+    const basTreatment = (TREATMENTS as readonly string[]).includes(raw) ? (raw as (typeof TREATMENTS)[number]) : null;
+    await TaxCodeService.setBasClassification(actor, taxCodeId, {
+      basTreatment,
+      basCapital: basTreatment === "TAXABLE" && formData.get("basCapital") === "on",
+    });
+    revalidatePath(`/${orgSlug}/accounting/tax-codes`);
+    redirect(`/${orgSlug}/accounting/tax-codes`);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
+}
 
 export async function createTaxCodeAction(orgSlug: string, formData: FormData): Promise<void> {
   try {
@@ -27,6 +47,8 @@ export async function createTaxCodeAction(orgSlug: string, formData: FormData): 
       jurisdiction: formData.get("jurisdiction"),
       payableAccountId: formData.get("payableAccountId") || undefined,
       receivableAccountId: formData.get("receivableAccountId") || undefined,
+      basTreatment: formData.get("basTreatment") || undefined,
+      basCapital: formData.get("basCapital") === "on",
     });
     if (!parsed.success) return;
 
@@ -38,6 +60,8 @@ export async function createTaxCodeAction(orgSlug: string, formData: FormData): 
       effectiveFrom: new Date("2000-01-01"),
       payableAccountId: parsed.data.payableAccountId,
       receivableAccountId: parsed.data.receivableAccountId,
+      basTreatment: parsed.data.basTreatment,
+      basCapital: parsed.data.basTreatment === "TAXABLE" && parsed.data.basCapital === true,
     });
 
     revalidatePath(`/${orgSlug}/accounting/tax-codes`);

@@ -142,6 +142,17 @@ export default async function NewPayRunPage({
             </div>
           </div>
 
+          <div className="rounded-md border border-border p-4 text-sm">
+            <label className="flex items-start gap-2">
+              <input name="legacyQuarterlySuper" type="checkbox" className="mt-1 h-4 w-4" />
+              <span>
+                Use the <strong>legacy quarterly</strong> super method (labelled legacy) instead of Payday Super. From 1 July 2026
+                super is calculated on each payday against an annual contribution base; leave this unticked unless a registered
+                tax agent tells you otherwise.
+              </span>
+            </label>
+          </div>
+
           <Button type="submit">Create draft pay run</Button>
         </form>
       </CardContent>

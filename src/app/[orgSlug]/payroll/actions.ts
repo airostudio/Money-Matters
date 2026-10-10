@@ -38,6 +38,7 @@ export async function createEmployeeAction(orgSlug: string, formData: FormData):
         standardHoursPerWeek: optionalString(formData, "standardHoursPerWeek"),
         payFrequency: String(formData.get("payFrequency") ?? "FORTNIGHTLY") as PayFrequencyDb,
         taxFreeThresholdClaimed: formData.get("taxFreeThresholdClaimed") === "on",
+        taxResidency: String(formData.get("taxResidency") ?? "RESIDENT") === "FOREIGN_RESIDENT" ? "FOREIGN_RESIDENT" : "RESIDENT",
         startDate: new Date(String(formData.get("startDate") ?? "")),
         userId: optionalString(formData, "userId"),
         tfn: optionalString(formData, "tfn"),
@@ -101,6 +102,7 @@ export async function createPayRunAction(orgSlug: string, formData: FormData): P
           payDate: new Date(String(formData.get("payDate") ?? "")),
           employeeIds,
           manualHoursByEmployeeId,
+          legacyQuarterlySuper: formData.get("legacyQuarterlySuper") === "on",
         },
         {
           wagesExpenseAccountId: String(formData.get("wagesExpenseAccountId") ?? ""),

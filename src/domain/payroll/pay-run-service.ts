@@ -1,6 +1,14 @@
-import { and, asc, eq, gte, lt, lte, sql, sum } from "drizzle-orm";
+import { and, asc, eq, gte, isNull, lt, lte, ne, sql, sum } from "drizzle-orm";
 import Decimal from "decimal.js";
-import { employees, payRunLines, payRuns, payrollTaxRuleSets, timesheetEntries } from "@/db/schema";
+import {
+  employees,
+  leaveRequests,
+  payRunLines,
+  payRuns,
+  payrollPayments,
+  payrollTaxRuleSets,
+  timesheetEntries,
+} from "@/db/schema";
 import { withTenant, type TenantDb } from "@/db/tenant";
 import { Money } from "@/domain/money/money";
 import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
@@ -10,6 +18,7 @@ import type { JournalLineDraft } from "@/domain/ledger/types";
 import { TaxRuleService } from "./tax-rule-service";
 import { calculatePaygWithholding } from "./payg-calculations";
 import { calculateSuperGuarantee, sgQuarterStart } from "./super-calculations";
+import { australianFinancialYearStart, paydaySuperSafeByDate, type SuperCadence } from "./payday-super";
 import { calculateLeaveAccrual } from "./leave-calculations";
 import { loadEmployeeOr404 } from "./employee-service";
 import {
@@ -17,7 +26,10 @@ import {
   InvalidPayRunError,
   PayRunNotDraftError,
   PayRunNotFoundError,
+  PayRunHasPaymentsError,
+  PayRunNotPostedError,
 } from "./errors";
+import { outstandingRemittance } from "./liabilities";
 import type { CreatePayRunInput, PayRunLineView, PayRunView, PostedPayRunSummary } from "./types";
 
 const AU_JURISDICTION = "AU";
@@ -31,14 +43,22 @@ export async function loadPayRunOr404(tx: TenantDb, organizationId: string, id: 
   return row;
 }
 
-async function sumQuarterToDateOteBefore(
+/**
+ * This employee's POSTED earnings earlier in the SG accumulation window before `payDate`: the calendar quarter under the
+ * QUARTERLY (legacy) cadence, the financial year (from 1 July) under PAYDAY (Payday Super's annual contribution base).
+ */
+async function sumPeriodToDateOteBefore(
   tx: TenantDb,
   organizationId: string,
   employeeId: string,
   payDate: Date,
+  cadence: SuperCadence,
 ): Promise<string> {
-  const quarterStart = sgQuarterStart(payDate);
-  const quarterEnd = new Date(Date.UTC(quarterStart.getUTCFullYear(), quarterStart.getUTCMonth() + 3, 1));
+  const quarterStart = cadence === "PAYDAY" ? australianFinancialYearStart(payDate) : sgQuarterStart(payDate);
+  const quarterEnd =
+    cadence === "PAYDAY"
+      ? new Date(Date.UTC(quarterStart.getUTCFullYear() + 1, 6, 1))
+      : new Date(Date.UTC(quarterStart.getUTCFullYear(), quarterStart.getUTCMonth() + 3, 1));
 
   const rows = await tx
     .select({ total: sum(payRunLines.ordinaryTimeEarnings) })
@@ -55,6 +75,39 @@ async function sumQuarterToDateOteBefore(
       ),
     );
   return rows[0]?.total ?? "0";
+}
+
+/**
+ * APPROVED, not-yet-applied leave requests that start on or before `periodEnd`, summed per type. Used both when a
+ * DRAFT is created (the figure is frozen on the line) and when it is POSTED (re-checked: if approvals changed in
+ * between, posting refuses and the draft must be re-created).
+ */
+async function pendingLeaveTaken(
+  tx: TenantDb,
+  organizationId: string,
+  employeeId: string,
+  periodEnd: Date,
+): Promise<{ annual: string; personal: string; requestIds: string[] }> {
+  const rows = await tx
+    .select({ id: leaveRequests.id, leaveType: leaveRequests.leaveType, hours: leaveRequests.hours })
+    .from(leaveRequests)
+    .where(
+      and(
+        eq(leaveRequests.organizationId, organizationId),
+        eq(leaveRequests.employeeId, employeeId),
+        eq(leaveRequests.status, "APPROVED"),
+        isNull(leaveRequests.appliedPayRunId),
+        lte(leaveRequests.startDate, periodEnd),
+      ),
+    )
+    .orderBy(asc(leaveRequests.startDate), asc(leaveRequests.createdAt));
+  let annual = new Decimal(0);
+  let personal = new Decimal(0);
+  for (const r of rows) {
+    if (r.leaveType === "ANNUAL") annual = annual.plus(r.hours);
+    else personal = personal.plus(r.hours);
+  }
+  return { annual: annual.toFixed(4), personal: personal.toFixed(4), requestIds: rows.map((r) => r.id) };
 }
 
 async function sumApprovedTimesheetHours(
@@ -229,7 +282,9 @@ export const PayRunService = {
         .returning();
       if (!created) throw new Error("Failed to create pay run.");
 
-      const ruleSet = await TaxRuleService.resolve(AU_JURISDICTION, input.payDate);
+      const ruleSet = await TaxRuleService.resolve(AU_JURISDICTION, input.payDate, {
+        legacyQuarterlySuper: input.legacyQuarterlySuper === true,
+      });
       const currency = "AUD";
 
       for (const employeeId of input.employeeIds) {
@@ -251,6 +306,8 @@ export const PayRunService = {
             and(
               eq(payRunLines.organizationId, actor.organizationId),
               eq(payRunLines.employeeId, employeeId),
+              // A REVERSED run no longer occupies its period: the corrected run is created in the same window.
+              ne(payRuns.status, "REVERSED"),
               gte(payRuns.periodEnd, input.periodStart),
               lte(payRuns.periodStart, input.periodEnd),
             ),
@@ -295,19 +352,27 @@ export const PayRunService = {
             lowerThreshold: ruleSet.medicareLevyLowerThreshold,
             upperThreshold: ruleSet.medicareLevyUpperThreshold,
           },
+          residency: employee.taxResidency === "FOREIGN_RESIDENT" ? "FOREIGN_RESIDENT" : "RESIDENT",
+          foreignResidentBrackets: ruleSet.foreignResidentBrackets,
         }).toString();
 
-        const quarterToDateOteBefore = await sumQuarterToDateOteBefore(
+        const periodToDateOteBefore = await sumPeriodToDateOteBefore(
           tx,
           actor.organizationId,
           employeeId,
           input.payDate,
+          ruleSet.sgCadence,
         );
+        if (ruleSet.sgCadence === "PAYDAY" && ruleSet.sgAnnualContributionBaseCap === null) {
+          // Fail closed: a Payday Super rule set without its annual base is incomplete, never "no cap".
+          throw new InvalidPayRunError(`Rule set "${ruleSet.label}" has no annual contribution base; super cannot be calculated.`);
+        }
         const sg = calculateSuperGuarantee({
           ordinaryTimeEarningsForPeriod: ordinaryTimeEarnings,
-          quarterToDateOteBefore,
+          quarterToDateOteBefore: periodToDateOteBefore,
           sgRate: ruleSet.sgRate,
-          quarterlyContributionBaseCap: ruleSet.sgQuarterlyContributionBaseCap,
+          quarterlyContributionBaseCap:
+            ruleSet.sgCadence === "PAYDAY" ? ruleSet.sgAnnualContributionBaseCap : ruleSet.sgQuarterlyContributionBaseCap,
         });
 
         const netPay = Money.of(grossPay, currency).subtract(Money.of(paygWithholding, currency)).toString();
@@ -319,10 +384,16 @@ export const PayRunService = {
           hoursPaidThisPeriod: hoursPaid,
         });
 
+        const taken = await pendingLeaveTaken(tx, actor.organizationId, employeeId, input.periodEnd);
+
         await tx.insert(payRunLines).values({
           organizationId: actor.organizationId,
           payRunId: created.id,
           employeeId,
+          annualLeaveTaken: taken.annual,
+          personalLeaveTaken: taken.personal,
+          superCadence: ruleSet.sgCadence,
+          superSafeByDate: ruleSet.sgCadence === "PAYDAY" ? paydaySuperSafeByDate(input.payDate) : null,
           taxRuleSetId: ruleSet.id,
           hoursPaid,
           grossPay,
@@ -431,18 +502,41 @@ export const PayRunService = {
       });
 
       for (const { line, employee } of lines) {
+        // Approved leave is deducted from the balance here (balance-only; gross pay is unchanged). The hours frozen on
+        // the draft line must still equal the approvals on file, or the draft is stale.
+        const taken = await pendingLeaveTaken(tx, actor.organizationId, employee.id, run.periodEnd);
+        if (
+          !new Decimal(taken.annual).equals(line.annualLeaveTaken) ||
+          !new Decimal(taken.personal).equals(line.personalLeaveTaken)
+        ) {
+          throw new InvalidPayRunError(
+            `Approved leave for "${employee.name}" changed after this draft was created. Discard the draft and create it again.`,
+          );
+        }
+        const annualAfter = new Decimal(employee.annualLeaveBalanceHours)
+          .plus(line.annualLeaveAccrued)
+          .minus(line.annualLeaveTaken);
+        const personalAfter = new Decimal(employee.personalLeaveBalanceHours)
+          .plus(line.personalLeaveAccrued)
+          .minus(line.personalLeaveTaken);
         await tx
           .update(employees)
           .set({
-            annualLeaveBalanceHours: new Decimal(employee.annualLeaveBalanceHours)
-              .plus(line.annualLeaveAccrued)
-              .toFixed(4),
-            personalLeaveBalanceHours: new Decimal(employee.personalLeaveBalanceHours)
-              .plus(line.personalLeaveAccrued)
-              .toFixed(4),
+            annualLeaveBalanceHours: annualAfter.toFixed(4),
+            personalLeaveBalanceHours: personalAfter.toFixed(4),
             updatedAt: new Date(),
           })
           .where(eq(employees.id, employee.id));
+        await tx
+          .update(payRunLines)
+          .set({ annualLeaveBalanceAfter: annualAfter.toFixed(4), personalLeaveBalanceAfter: personalAfter.toFixed(4) })
+          .where(eq(payRunLines.id, line.id));
+        for (const requestId of taken.requestIds) {
+          await tx
+            .update(leaveRequests)
+            .set({ appliedPayRunId: id, updatedAt: new Date() })
+            .where(eq(leaveRequests.id, requestId));
+        }
       }
 
       const [updated] = await tx
@@ -464,6 +558,100 @@ export const PayRunService = {
           totalSuper: totalSuper.toString(),
           totalNet: totalNet.toString(),
         },
+      });
+
+      return buildPayRunView(tx, actor.organizationId, updated!);
+    });
+  },
+
+  /**
+   * Reverses a POSTED pay run (Phase 8 Slice 3): the posting journal is reversed through `PostingService.reverseEntry`
+   * (original lines never edited), the run becomes `REVERSED`, each employee's leave balance is unwound (accrual
+   * removed, leave taken restored) and the leave requests the run consumed are released so a corrected run applies them.
+   * A reversed run is excluded from quarter-to-date OTE and from the duplicate-period check, so the corrected run can
+   * cover the same period. Refused while net wages for this run are still marked paid (reverse that payment first) or
+   * when removing the run would leave more super / PAYG remitted than is owed (reverse that remittance first).
+   */
+  async reverse(actor: Actor, id: string, reason: string): Promise<PayRunView> {
+    assertPermission(actor, "payrun:reverse");
+    const trimmed = reason.trim();
+    if (trimmed.length < 10) throw new InvalidPayRunError("A reason of at least 10 characters is required to reverse a pay run.");
+    return withTenant(actor.organizationId, async (tx) => {
+      const run = await loadPayRunOr404(tx, actor.organizationId, id);
+      if (run.status !== "POSTED" || !run.journalEntryId) throw new PayRunNotPostedError(id, run.status);
+
+      const [paidNet] = await tx
+        .select({ n: sql<number>`count(*)::int` })
+        .from(payrollPayments)
+        .where(
+          and(
+            eq(payrollPayments.organizationId, actor.organizationId),
+            eq(payrollPayments.payRunId, id),
+            eq(payrollPayments.status, "POSTED"),
+          ),
+        );
+      if (Number(paidNet?.n ?? 0) > 0) {
+        throw new PayRunHasPaymentsError("net wages for this run are recorded as paid. Reverse that payment first.");
+      }
+      for (const [kind, accountId] of [
+        ["SUPER", run.superannuationPayableAccountId],
+        ["PAYG", run.paygWithholdingPayableAccountId],
+      ] as const) {
+        const after = await outstandingRemittance(tx, actor.organizationId, kind, accountId, { excludeRunId: id });
+        if (new Decimal(after.outstanding).isNegative()) {
+          throw new PayRunHasPaymentsError(
+            `${kind === "SUPER" ? "superannuation" : "PAYG"} remittances recorded (${after.paid}) would exceed what is owed once this run is removed. Reverse the remittance first.`,
+          );
+        }
+      }
+
+      const reversal = await PostingService.reverseEntry(actor, run.journalEntryId, trimmed);
+
+      const lines = await tx
+        .select({ line: payRunLines, employee: employees })
+        .from(payRunLines)
+        .innerJoin(employees, eq(employees.id, payRunLines.employeeId))
+        .where(eq(payRunLines.payRunId, id));
+      for (const { line, employee } of lines) {
+        await tx
+          .update(employees)
+          .set({
+            annualLeaveBalanceHours: new Decimal(employee.annualLeaveBalanceHours)
+              .minus(line.annualLeaveAccrued)
+              .plus(line.annualLeaveTaken)
+              .toFixed(4),
+            personalLeaveBalanceHours: new Decimal(employee.personalLeaveBalanceHours)
+              .minus(line.personalLeaveAccrued)
+              .plus(line.personalLeaveTaken)
+              .toFixed(4),
+            updatedAt: new Date(),
+          })
+          .where(eq(employees.id, employee.id));
+      }
+      await tx
+        .update(leaveRequests)
+        .set({ appliedPayRunId: null, updatedAt: new Date() })
+        .where(and(eq(leaveRequests.organizationId, actor.organizationId), eq(leaveRequests.appliedPayRunId, id)));
+
+      const [updated] = await tx
+        .update(payRuns)
+        .set({
+          status: "REVERSED",
+          reversalJournalEntryId: reversal.entryId,
+          reversedAt: new Date(),
+          reversedById: actor.userId,
+          reversalReason: trimmed,
+          updatedAt: new Date(),
+        })
+        .where(eq(payRuns.id, id))
+        .returning();
+
+      await AuditService.record(tx, actor, {
+        action: "pay_run.reversed",
+        entityType: "PayRun",
+        entityId: id,
+        before: { status: "POSTED" },
+        after: { status: "REVERSED", reversalJournalEntryId: reversal.entryId, reason: trimmed },
       });
 
       return buildPayRunView(tx, actor.organizationId, updated!);
@@ -498,7 +686,11 @@ async function buildPayRunView(
     netPay: r.line.netPay,
     annualLeaveAccrued: r.line.annualLeaveAccrued,
     personalLeaveAccrued: r.line.personalLeaveAccrued,
+    annualLeaveTaken: r.line.annualLeaveTaken,
+    personalLeaveTaken: r.line.personalLeaveTaken,
     taxRuleSetLabel: r.ruleSet.label,
+    superCadence: r.line.superCadence === "PAYDAY" ? "PAYDAY" : "QUARTERLY",
+    superSafeByDate: r.line.superSafeByDate ? r.line.superSafeByDate.toISOString().slice(0, 10) : null,
   }));
 
   const currency = "AUD";

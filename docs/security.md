@@ -728,6 +728,23 @@ requests) write the client's own audit log with the real actor. Workpaper sign-o
 reopenings are additionally in the append-only `workpaper_signoffs` history with
 identity, role, version, reason and the single-staff-exception flag.
 
+## 13a. BAS / GST preparation (Phase 8 Slice 2): human-only finalising, immutable snapshots
+
+- **Permissions.** `bas:read` (OWNER, ADMINISTRATOR, ACCOUNTANT, BOOKKEEPER), `bas:manage` (same; prepare / discard drafts), `bas:finalise` (OWNER, ADMINISTRATOR, ACCOUNTANT). MANAGER and READ_ONLY deliberately do **not** hold `bas:read` because the BAS shows payroll totals (W1/W2), which need `payrun:read`-level trust.
+- **Human-only.** `finalise` and `markLodgedOutside` refuse any actor that is not `HUMAN` (AI, API key, automation, system), even an OWNER-role one (tested). The AI Controller has one read-only tool, `bas_summary` (`bas:read`); there is no AI write path to a BAS.
+- **Immutability is a database property.** `bas_statements` has per-command RLS policies: UPDATE and DELETE only match rows whose `status = 'DRAFT'`, so a finalised snapshot cannot be edited or deleted by `mm_app` whatever the application does (verified as the real role). `bas_lodgement_records` is append-only (`SELECT, INSERT` grants). Both are FORCE-RLS tenant tables covered by the isolation audit and the tenant-isolation test.
+- **Nothing leaves the system.** No ATO endpoint, credential or transmission exists. "Lodged outside Money Matters" is an unverified note. Every page, CSV and AI answer carries "requires registered tax agent / BAS agent review; NOT lodged with the ATO".
+- **Audit.** `bas.draft_created`, `bas.draft_deleted`, `bas.finalised` (labels + hash), `bas.lodgement_recorded`, `tax_code.bas_classification_changed`.
+
+## 13b. Payroll operations (Phase 8 Slice 3): payslips, payments, leave
+
+- **Payslips are own-record only.** `payslip:read` is held by every role (including READ_ONLY), but `PayslipService` returns a payslip only when the pay run line belongs to the employee record whose `user_id` is the caller's login; holders of `employee:manage` (payroll managers, owners, administrators) read anyone's. Any other request is "not found", never "forbidden", so existence does not leak. Human-only (AI, API and automation actors are refused). No TFN on a payslip; the bank account is masked to its last four digits.
+- **Payments.** `payroll_payment:read` (ACCOUNTANT, BOOKKEEPER, PAYROLL_MANAGER) and `payroll_payment:manage` (ACCOUNTANT, PAYROLL_MANAGER, OWNER, ADMINISTRATOR) plus `journal:post`/`journal:reverse` at the ledger. Recording, reversing and generating the ABA file are human-only. `payroll_payments` is a tenant FORCE-RLS table with `SELECT, INSERT` and column-level `UPDATE` of only the status/reversal columns for `mm_app`: an amount cannot be edited and a row cannot be deleted (tested as the real role).
+- **ABA file.** Needs `payroll_payment:manage` AND `employee:manage` (it reads full BSB / account numbers). The originator's bank identifiers are form fields, never stored and never logged; the audit row holds only counts and totals (tested: no BSB or account number reaches `audit_logs`). The download route is POST-only with `Cache-Control: no-store`.
+- **Leave.** `leave:request` (every role except READ_ONLY), `leave:read` and `leave:approve` (MANAGER, PAYROLL_MANAGER, OWNER, ADMINISTRATOR; ACCOUNTANT reads only). Nobody can approve or reject their own request (by requester id or by linked employee record). `leave_requests` has no DELETE grant.
+- **Reversal.** `payrun:reverse` (ACCOUNTANT, PAYROLL_MANAGER, OWNER, ADMINISTRATOR) with a mandatory reason; audited (`pay_run.reversed`).
+- **Autonomy.** Payroll remains structurally excluded from AI auto-execution; no payroll tool was added to the AI Controller.
+
 ## 14. Sharing a company file (read-only colleagues and concurrent sessions)
 
 **Adding a read-only colleague.** An Owner or Administrator opens **Settings -> Team ->

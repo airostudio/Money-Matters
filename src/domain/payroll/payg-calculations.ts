@@ -45,9 +45,14 @@ export function withoutTaxFreeThreshold(brackets: TaxBracket[]): TaxBracket[] {
  * Standard nil-below/full-above step function for the Medicare levy's
  * low-income reduction, plus the optional linear phase-in between the two
  * thresholds (`(annualIncome - lowerThreshold) × 0.10`, capped at the
- * standard levy amount). The phase-in formula itself is a widely-documented
- * general mechanism, NOT one of this slice's ATO-verified figures — see
- * docs/roadmap.md's caveat. Returns the ANNUAL levy amount as a Decimal.
+ * standard levy amount). VERIFIED in Phase 8 Slice 4(f): the 2025-26 singles
+ * thresholds ($28,011 / $35,013) are on the ATO's "Medicare levy reduction"
+ * pages, and the 10 cents per dollar over the lower threshold shade-in capped
+ * at the standard 2% (so the cap bites at about 1.25 x the lower threshold) is
+ * described consistently by pay-calculator-australia.com, canstar.com.au and
+ * money-snap.com (see docs/roadmap.md). The 2026-27 thresholds were NOT
+ * published when this was checked; the FY2026-27 rule sets carry the 2025-26
+ * figures with a verification note. Returns the ANNUAL levy amount as a Decimal.
  */
 export function annualMedicareLevy(rule: MedicareLevyRule, annualTaxableIncome: Decimal): Decimal {
   const lower = new Decimal(rule.lowerThreshold);
@@ -69,6 +74,22 @@ export interface PaygWithholdingInput {
   taxFreeThresholdClaimed: boolean;
   brackets: TaxBracket[];
   medicareLevy: MedicareLevyRule;
+  /**
+   * Phase 8 Slice 4(c). `FOREIGN_RESIDENT` uses `foreignResidentBrackets` (no tax-free threshold, so `taxFreeThresholdClaimed`
+   * is ignored) and charges NO Medicare levy. Defaults to `RESIDENT`. If `FOREIGN_RESIDENT` is requested without foreign
+   * resident brackets the calculation REFUSES (throws) rather than falling back to resident rates.
+   */
+  residency?: "RESIDENT" | "FOREIGN_RESIDENT";
+  foreignResidentBrackets?: TaxBracket[];
+}
+
+export class ForeignResidentRatesMissingError extends Error {
+  constructor() {
+    super(
+      "This employee is a foreign resident but the resolved rule set has no foreign resident rates. Withholding is refused rather than approximated with resident rates.",
+    );
+    this.name = "ForeignResidentRatesMissingError";
+  }
 }
 
 /**
@@ -95,9 +116,18 @@ export function calculatePaygWithholding(input: PaygWithholdingInput): Decimal {
   const grossPay = new Decimal(input.grossPayForPeriod);
   const annualized = grossPay.times(periodsPerYear);
 
-  const brackets = input.taxFreeThresholdClaimed ? input.brackets : withoutTaxFreeThreshold(input.brackets);
+  const foreign = input.residency === "FOREIGN_RESIDENT";
+  if (foreign && (!input.foreignResidentBrackets || input.foreignResidentBrackets.length === 0)) {
+    throw new ForeignResidentRatesMissingError();
+  }
+  const brackets = foreign
+    ? input.foreignResidentBrackets!
+    : input.taxFreeThresholdClaimed
+      ? input.brackets
+      : withoutTaxFreeThreshold(input.brackets);
   const annualIncomeTax = BracketCalculations.annualTax(brackets, annualized);
-  const annualLevy = annualMedicareLevy(input.medicareLevy, annualized);
+  // Foreign residents are not liable for the Medicare levy (ATO foreign resident tax rates page; ozcalc.com.au; taxbne.com.au).
+  const annualLevy = foreign ? new Decimal(0) : annualMedicareLevy(input.medicareLevy, annualized);
 
   const annualWithholding = annualIncomeTax.plus(annualLevy);
   const periodWithholding = annualWithholding.dividedBy(periodsPerYear);

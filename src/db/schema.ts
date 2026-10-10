@@ -530,6 +530,24 @@ export const exchangeRates = pgTable("exchange_rates", {
   ),
 }));
 
+/**
+ * Phase 8 Slice 2 (BAS / GST preparation). How a tax code's supplies are treated for the Business Activity
+ * Statement. NULL on `tax_codes.bas_treatment` means UNCLASSIFIED: the BAS prep service refuses to guess and reports
+ * the amounts separately. TAXABLE = GST is charged/claimed at the code's rate; GST_FREE and EXPORT are 0% supplies
+ * that still carry input tax credits (reported at G3 and G2 on sales); INPUT_TAXED sales carry no GST and no credits
+ * (reported within G1 only); NOT_REPORTED is outside the GST labels entirely. See docs/accounting-engine.md.
+ */
+export const basGstTreatmentEnum = pgEnum("bas_gst_treatment", [
+  "TAXABLE",
+  "GST_FREE",
+  "EXPORT",
+  "INPUT_TAXED",
+  "NOT_REPORTED",
+]);
+
+export const basStatusEnum = pgEnum("bas_status", ["DRAFT", "FINALISED"]);
+export const basFrequencyEnum = pgEnum("bas_frequency", ["MONTHLY", "QUARTERLY"]);
+
 export const taxCodes = pgTable("tax_codes", {
   id: uuid("id").primaryKey().defaultRandom(),
   organizationId: uuid("organization_id")
@@ -562,6 +580,10 @@ export const taxCodes = pgTable("tax_codes", {
    * purchases).
    */
   receivableAccountId: uuid("receivable_account_id").references((): AnyPgColumn => accounts.id),
+  /** Phase 8 Slice 2: BAS treatment. NULL = unclassified (never guessed). See `basGstTreatmentEnum`. */
+  basTreatment: basGstTreatmentEnum("bas_treatment"),
+  /** Phase 8 Slice 2: purchases under this code are capital purchases (BAS label G10) rather than non-capital (G11). */
+  basCapital: boolean("bas_capital").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
@@ -4224,6 +4246,12 @@ export const payrollTaxRuleSets = pgTable("payroll_tax_rule_sets", {
   sgRate: numeric("sg_rate", { precision: 6, scale: 4 }).notNull(),
   /** Decimal string — quarterly OTE cap above which SG is not mandatory. Null only for a rule set whose cadence/cap mechanics are themselves unresolved (see this table's doc comment) — `SuperCalculations` must treat null as "do not fabricate a cap", never silently fall back to a default. */
   sgQuarterlyContributionBaseCap: numeric("sg_quarterly_contribution_base_cap", { precision: 19, scale: 4 }),
+  /** Phase 8 Slice 4(g): `QUARTERLY` (the long-standing cadence; also the labelled LEGACY path) or `PAYDAY` (Payday Super: SG per payday, annual contribution base). */
+  sgCadence: text("sg_cadence").notNull().default("QUARTERLY"),
+  /** Phase 8 Slice 4(g): the ANNUAL maximum contribution base used by a `PAYDAY` rule set ($270,830 for 2026-27). Null for QUARTERLY rule sets. */
+  sgAnnualContributionBaseCap: numeric("sg_annual_contribution_base_cap", { precision: 19, scale: 4 }),
+  /** Phase 8 Slice 4: new regulatory understanding is added as a NEW VERSION covering the same dates, never by editing a seeded row. The resolver picks the highest version unless the legacy path is asked for. */
+  version: integer("version").notNull().default(1),
   /** Non-null flags that this specific rule set has a known-unresolved regulatory detail (the FY2026-27 Payday Super cadence) that a tax agent must confirm before real payroll relies on it — surfaced in the STP-shaped report and payslip UI, not buried in a comment only developers see. */
   requiresVerificationNote: text("requires_verification_note"),
   /** Free text recording where each figure on this row came from — reproduced in docs/roadmap.md too, but kept here as well so the data is self-documenting if the docs ever drift. */
@@ -4231,6 +4259,8 @@ export const payrollTaxRuleSets = pgTable("payroll_tax_rule_sets", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   jurisdictionRangeIdx: index("payroll_tax_rule_sets_jurisdiction_idx").on(table.jurisdiction, table.effectiveFrom),
+  rangeVersionUnique: uniqueIndex("payroll_tax_rule_sets_range_version_unique").on(table.jurisdiction, table.effectiveFrom, table.version),
+  cadenceCheck: check("payroll_tax_rule_sets_cadence_check", sql`${table.sgCadence} IN ('QUARTERLY', 'PAYDAY')`),
 }));
 
 /**
@@ -4259,8 +4289,11 @@ export const payrollTaxBrackets = pgTable("payroll_tax_brackets", {
   threshold: numeric("threshold", { precision: 19, scale: 4 }).notNull(),
   /** Decimal string, e.g. "0.3000" for 30%. */
   marginalRate: numeric("marginal_rate", { precision: 6, scale: 4 }).notNull(),
+  /** Phase 8 Slice 4(c): `RESIDENT` (the original schedule) or `FOREIGN_RESIDENT` (no tax-free threshold). */
+  category: text("category").notNull().default("RESIDENT"),
 }, (table) => ({
-  ruleSetSequenceUnique: uniqueIndex("payroll_tax_brackets_rule_set_sequence_unique").on(table.ruleSetId, table.sequence),
+  ruleSetCategorySequenceUnique: uniqueIndex("payroll_tax_brackets_rule_set_category_sequence_unique").on(table.ruleSetId, table.category, table.sequence),
+  categoryCheck: check("payroll_tax_brackets_category_check", sql`${table.category} IN ('RESIDENT', 'FOREIGN_RESIDENT')`),
 }));
 
 export const employmentBasisEnum = pgEnum("employment_basis", ["SALARY", "HOURLY"]);
@@ -4304,6 +4337,8 @@ export const employees = pgTable("employees", {
   payFrequency: payFrequencyEnum("pay_frequency").notNull(),
   /** Whether this employee has claimed the tax-free threshold on their (not separately modeled) TFN declaration — the one flag this slice reads; see `PaygCalculations`'s doc comment for what "not claimed" approximates and does not attempt. */
   taxFreeThresholdClaimed: boolean("tax_free_threshold_claimed").notNull().default(true),
+  /** Phase 8 Slice 4(c): `RESIDENT` or `FOREIGN_RESIDENT` for tax purposes. A foreign resident is withheld at the foreign resident rates (approximation) with no Medicare levy. */
+  taxResidency: text("tax_residency").notNull().default("RESIDENT"),
   startDate: timestamp("start_date", { withTimezone: true, mode: "date" }).notNull(),
   terminationDate: timestamp("termination_date", { withTimezone: true, mode: "date" }),
   status: employeeStatusEnum("status").notNull().default("ACTIVE"),
@@ -4338,7 +4373,8 @@ export const employees = pgTable("employees", {
   orgUserIdx: index("employees_org_user_idx").on(table.organizationId, table.userId),
 }));
 
-export const payRunStatusEnum = pgEnum("pay_run_status", ["DRAFT", "POSTED"]);
+/** `REVERSED` (Phase 8 Slice 3): a POSTED run whose journal was reversed; terminal. Its lines are kept as history. */
+export const payRunStatusEnum = pgEnum("pay_run_status", ["DRAFT", "POSTED", "REVERSED"]);
 
 /**
  * One on-demand "run payroll for period X" action (master spec §8) — the
@@ -4381,6 +4417,11 @@ export const payRuns = pgTable("pay_runs", {
   journalEntryId: uuid("journal_entry_id").references((): AnyPgColumn => journalEntries.id),
   postedAt: timestamp("posted_at", { withTimezone: true }),
   postedById: uuid("posted_by_id"),
+  /** Phase 8 Slice 3: set once when `PayRunService.reverse` reverses the posting journal; the original lines are never edited. */
+  reversalJournalEntryId: uuid("reversal_journal_entry_id").references((): AnyPgColumn => journalEntries.id),
+  reversedAt: timestamp("reversed_at", { withTimezone: true }),
+  reversedById: uuid("reversed_by_id"),
+  reversalReason: text("reversal_reason"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   createdById: uuid("created_by_id"),
@@ -4438,11 +4479,102 @@ export const payRunLines = pgTable("pay_run_lines", {
   annualLeaveAccrued: numeric("annual_leave_accrued", { precision: 10, scale: 4 }).notNull(),
   /** Decimal string — NES personal/carer's leave accrued by this run. */
   personalLeaveAccrued: numeric("personal_leave_accrued", { precision: 10, scale: 4 }).notNull(),
+  /** Phase 8 Slice 3: hours of APPROVED leave requests deducted from the balance when this run is POSTED (selected at create(), frozen). Balance-only: gross pay is NOT changed by it. */
+  annualLeaveTaken: numeric("annual_leave_taken", { precision: 10, scale: 4 }).notNull().default("0"),
+  personalLeaveTaken: numeric("personal_leave_taken", { precision: 10, scale: 4 }).notNull().default("0"),
+  /** Phase 8 Slice 3: the employee's leave balances immediately after this run posted (for the payslip). NULL on a DRAFT and on runs posted before this column existed. */
+  /** Phase 8 Slice 4(g): which SG cadence produced this line (`QUARTERLY` legacy or `PAYDAY`). Under PAYDAY, `quarter_to_date_ote` holds the financial-year-to-date figure. */
+  superCadence: text("super_cadence").notNull().default("QUARTERLY"),
+  /** Phase 8 Slice 4(g): conservative date by which the fund should have RECEIVED this line's SG (PAYDAY only): six weekdays after payday. Not the legal deadline. */
+  superSafeByDate: timestamp("super_safe_by_date", { withTimezone: true, mode: "date" }),
+  annualLeaveBalanceAfter: numeric("annual_leave_balance_after", { precision: 10, scale: 4 }),
+  personalLeaveBalanceAfter: numeric("personal_leave_balance_after", { precision: 10, scale: 4 }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   orgPayRunIdx: index("pay_run_lines_org_pay_run_idx").on(table.organizationId, table.payRunId),
   orgEmployeeIdx: index("pay_run_lines_org_employee_idx").on(table.organizationId, table.employeeId),
   payRunEmployeeUnique: uniqueIndex("pay_run_lines_pay_run_employee_unique").on(table.payRunId, table.employeeId),
+}));
+
+export const leaveTypeEnum = pgEnum("leave_type", ["ANNUAL", "PERSONAL"]);
+export const leaveRequestStatusEnum = pgEnum("leave_request_status", ["PENDING", "APPROVED", "REJECTED", "CANCELLED"]);
+
+/**
+ * Phase 8 Slice 3: a leave request. An employee (an `employees` row linked by `user_id` to the requester) asks for hours
+ * of ANNUAL or PERSONAL leave; someone else with `leave:approve` decides it (never the requester). An APPROVED request is
+ * deducted from the employee's balance when the next pay run covering its start date is POSTED (`applied_pay_run_id` is
+ * then set; reversing that run unsets it). The hours are entered by the requester - no public-holiday or roster logic.
+ */
+export const leaveRequests = pgTable("leave_requests", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  employeeId: uuid("employee_id")
+    .notNull()
+    .references(() => employees.id),
+  leaveType: leaveTypeEnum("leave_type").notNull(),
+  startDate: timestamp("start_date", { withTimezone: true, mode: "date" }).notNull(),
+  endDate: timestamp("end_date", { withTimezone: true, mode: "date" }).notNull(),
+  hours: numeric("hours", { precision: 10, scale: 4 }).notNull(),
+  reason: text("reason"),
+  status: leaveRequestStatusEnum("status").notNull().default("PENDING"),
+  requestedById: uuid("requested_by_id").notNull(),
+  decidedById: uuid("decided_by_id"),
+  decidedAt: timestamp("decided_at", { withTimezone: true }),
+  decisionNote: text("decision_note"),
+  appliedPayRunId: uuid("applied_pay_run_id").references((): AnyPgColumn => payRuns.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  orgEmployeeIdx: index("leave_requests_org_employee_idx").on(table.organizationId, table.employeeId),
+  orgStatusIdx: index("leave_requests_org_status_idx").on(table.organizationId, table.status),
+  hoursPositive: check("leave_requests_hours_positive", sql`${table.hours} > 0`),
+  dateOrder: check("leave_requests_date_order", sql`${table.endDate} >= ${table.startDate}`),
+}));
+
+export const payrollPaymentKindEnum = pgEnum("payroll_payment_kind", ["NET_WAGES", "SUPER", "PAYG"]);
+export const payrollPaymentStatusEnum = pgEnum("payroll_payment_status", ["POSTED", "REVERSED"]);
+
+/**
+ * Phase 8 Slice 3: money paid OUT against a payroll liability, posted through PostingService (Dr liability / Cr bank).
+ * NET_WAGES settles a pay run's Net Wages Payable; SUPER and PAYG are RECORD-ONLY remittance entries against
+ * Superannuation Payable / PAYG Withholding Payable (no clearing house, no ATO payment, no bank transfer is made by
+ * Money Matters). A REVERSED payment keeps its row; the ledger effect is undone by a reversing journal.
+ */
+export const payrollPayments = pgTable("payroll_payments", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  kind: payrollPaymentKindEnum("kind").notNull(),
+  /** Required for NET_WAGES; null for SUPER / PAYG, which settle the liability account as a whole. */
+  payRunId: uuid("pay_run_id").references((): AnyPgColumn => payRuns.id),
+  amount: numeric("amount", { precision: 19, scale: 4 }).notNull(),
+  paymentDate: timestamp("payment_date", { withTimezone: true, mode: "date" }).notNull(),
+  /** The liability account debited (the pay run's Net Wages / Super / PAYG payable account). */
+  liabilityAccountId: uuid("liability_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  /** The bank (asset) GL account credited. */
+  bankAccountId: uuid("bank_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  reference: text("reference"),
+  status: payrollPaymentStatusEnum("status").notNull().default("POSTED"),
+  journalEntryId: uuid("journal_entry_id")
+    .notNull()
+    .references((): AnyPgColumn => journalEntries.id),
+  reversalJournalEntryId: uuid("reversal_journal_entry_id").references((): AnyPgColumn => journalEntries.id),
+  reversedAt: timestamp("reversed_at", { withTimezone: true }),
+  reversedById: uuid("reversed_by_id"),
+  reversalReason: text("reversal_reason"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id").notNull(),
+}, (table) => ({
+  orgKindIdx: index("payroll_payments_org_kind_idx").on(table.organizationId, table.kind, table.status),
+  orgPayRunIdx: index("payroll_payments_org_pay_run_idx").on(table.organizationId, table.payRunId),
+  amountPositive: check("payroll_payments_amount_positive", sql`${table.amount} > 0`),
 }));
 
 export const employeesRelations = relations(employees, ({ one, many }) => ({
@@ -4455,6 +4587,62 @@ export const employeesRelations = relations(employees, ({ one, many }) => ({
     references: [users.id],
   }),
   payRunLines: many(payRunLines),
+}));
+
+/**
+ * Phase 8 Slice 2: a prepared Business Activity Statement. PREPARATION ONLY - nothing is ever transmitted to the ATO.
+ * A DRAFT is recomputed live from the posted ledger/sub-ledger every time it is viewed; FINALISE (a human, `bas:finalise`)
+ * snapshots the full report into `report` with a SHA-256 `content_hash` and the row becomes immutable (enforced by the
+ * RLS UPDATE policy, which only matches DRAFT rows, and by the absence of any DELETE on a finalised row).
+ */
+export const basStatements = pgTable("bas_statements", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  periodStart: timestamp("period_start", { withTimezone: true, mode: "date" }).notNull(),
+  periodEnd: timestamp("period_end", { withTimezone: true, mode: "date" }).notNull(),
+  frequency: basFrequencyEnum("frequency").notNull(),
+  /** Only ACCRUAL is supported; CASH is refused (fail closed) - see docs/accounting-engine.md. */
+  basis: text("basis").notNull().default("ACCRUAL"),
+  status: basStatusEnum("status").notNull().default("DRAFT"),
+  /** Human note (e.g. which agent will review). */
+  note: text("note"),
+  /** Snapshot of the full prepared report, set only at FINALISE. */
+  report: jsonb("report"),
+  contentHash: text("content_hash"),
+  /** True when the human finalised with outstanding warnings (unclassified amounts, unlocked period) acknowledged. */
+  warningsAcknowledged: boolean("warnings_acknowledged").notNull().default(false),
+  periodLockAtFinalise: text("period_lock_at_finalise"),
+  finalisedAt: timestamp("finalised_at", { withTimezone: true }),
+  finalisedById: uuid("finalised_by_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+}, (table) => ({
+  orgPeriodIdx: index("bas_statements_org_period_idx").on(table.organizationId, table.periodStart),
+  idOrgUnique: uniqueIndex("bas_statements_id_org_unique").on(table.id, table.organizationId),
+  periodOrder: check("bas_statements_period_order", sql`${table.periodEnd} >= ${table.periodStart}`),
+}));
+
+/**
+ * APPEND-ONLY record that a finalised BAS was lodged OUTSIDE Money Matters (by the business or its registered agent).
+ * Money Matters does not lodge anything and cannot verify the reference; this is a bookkeeping note only.
+ */
+export const basLodgementRecords = pgTable("bas_lodgement_records", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  basStatementId: uuid("bas_statement_id")
+    .notNull()
+    .references(() => basStatements.id),
+  lodgedOn: timestamp("lodged_on", { withTimezone: true, mode: "date" }).notNull(),
+  reference: text("reference").notNull(),
+  recordedById: uuid("recorded_by_id").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  statementIdx: index("bas_lodgement_records_statement_idx").on(table.organizationId, table.basStatementId),
 }));
 
 export const payRunsRelations = relations(payRuns, ({ one, many }) => ({

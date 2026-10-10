@@ -36,7 +36,8 @@ describe("Payroll — pay run flow (Phase 8 Slice 1)", () => {
     expect(bracket1?.marginalRate).toBe("0.1600");
 
     const fy2627 = await TaxRuleService.resolve("AU", new Date("2026-10-05"));
-    expect(fy2627.label).toBe("FY2026-27");
+    expect(fy2627.label).toBe("FY2026-27 (Payday Super)");
+    expect(fy2627.version).toBe(2);
     const bracket1b = fy2627.brackets.find((b) => b.sequence === 1);
     expect(bracket1b?.marginalRate).toBe("0.1500");
   });
@@ -76,7 +77,9 @@ describe("Payroll — pay run flow (Phase 8 Slice 1)", () => {
 
     // SG: 12% of 4000 = 480.00 (well under the $62,500 quarterly cap).
     expect(line.superGuarantee).toBe("480.0000");
-    expect(line.taxRuleSetLabel).toBe("FY2026-27");
+    expect(line.taxRuleSetLabel).toBe("FY2026-27 (Payday Super)");
+    expect(line.superCadence).toBe("PAYDAY");
+    expect(line.superSafeByDate).toBe("2026-10-22"); // Wed 14 Oct + six weekdays
 
     // Leave: full-time (38h) fortnightly salary -> 152/26 and 76/26.
     expect(Number(line.annualLeaveAccrued)).toBeCloseTo(152 / 26, 3);
@@ -161,7 +164,7 @@ describe("Payroll — pay run flow (Phase 8 Slice 1)", () => {
     expect(line.grossPay).toBe("1520.0000"); // 38 * 40
   });
 
-  it("tracks quarter-to-date OTE across pay runs and correctly applies/stops applying the SG cap", async () => {
+  it("LEGACY quarterly path: tracks quarter-to-date OTE across pay runs and correctly applies/stops applying the SG cap", async () => {
     const employee = await EmployeeService.create(owner, {
       name: "Sam HighEarner",
       employmentBasis: "SALARY",
@@ -179,10 +182,14 @@ describe("Payroll — pay run flow (Phase 8 Slice 1)", () => {
         periodEnd: new Date("2026-10-14"),
         payDate: new Date("2026-10-14"),
         employeeIds: [employee.id],
+        legacyQuarterlySuper: true,
       },
       gl,
     );
     const line1 = run1.lines[0]!;
+    expect(line1.taxRuleSetLabel).toBe("FY2026-27");
+    expect(line1.superCadence).toBe("QUARTERLY");
+    expect(line1.superSafeByDate).toBeNull();
     expect(line1.grossPay).toBe("61538.4615");
     // Full period OTE is under the $62,500 cap -> full 12% SG this period.
     expect(line1.superGuarantee).toBe("7384.6154"); // 61538.4615 * 0.12 rounds to this
@@ -196,6 +203,7 @@ describe("Payroll — pay run flow (Phase 8 Slice 1)", () => {
         periodEnd: new Date("2026-10-28"),
         payDate: new Date("2026-10-28"),
         employeeIds: [employee.id],
+        legacyQuarterlySuper: true,
       },
       gl,
     );
@@ -206,6 +214,94 @@ describe("Payroll — pay run flow (Phase 8 Slice 1)", () => {
     // full period.
     expect(line2.superGuarantee).toBe("115.3846");
     expect(Number(line2.quarterToDateOte)).toBeCloseTo(61538.4615 * 2, 1);
+  });
+
+
+  it("PAYDAY (Payday Super) path: SG is on every payday against the ANNUAL base $270,830 (max SG $32,499.60), with a safe-by date per line", async () => {
+    const employee = await EmployeeService.create(owner, {
+      name: "Sam HighEarner",
+      employmentBasis: "SALARY",
+      annualSalary: "1600000.00", // 61,538.4615 per fortnight
+      payFrequency: "FORTNIGHTLY",
+      startDate: new Date("2026-01-01"),
+    });
+    const payDates = ["2026-10-14", "2026-10-28", "2026-11-11", "2026-11-25", "2026-12-09", "2026-12-23"];
+    const lines = [];
+    for (const [i, d] of payDates.entries()) {
+      const start = new Date(new Date(d).getTime() - 13 * 86400000);
+      const run = await PayRunService.create(
+        owner,
+        { payFrequency: "FORTNIGHTLY", periodStart: start, periodEnd: new Date(d), payDate: new Date(d), employeeIds: [employee.id] },
+        gl,
+      );
+      await PayRunService.post(owner, run.id);
+      lines.push(run.lines[0]!);
+      expect(run.lines[0]!.superCadence, `run ${i + 1}`).toBe("PAYDAY");
+    }
+    // Run 2 would have been capped at 115.3846 under the legacy quarterly cap; under Payday Super it is the full 12%.
+    expect(lines[0]!.superGuarantee).toBe("7384.6154");
+    expect(lines[1]!.superGuarantee).toBe("7384.6154");
+    expect(lines[3]!.superGuarantee).toBe("7384.6154"); // before run 4: 3 x 61,538.4615 = 184,615.3845 < 270,830
+    // Before run 5: 4 x 61,538.4615 = 246,153.8460; room = 270,830 - 246,153.8460 = 24,676.1540; x 12% = 2,961.13848 -> 2,961.1385
+    expect(lines[4]!.superGuarantee).toBe("2961.1385");
+    // Before run 6 the annual base is exhausted: no more SG this financial year.
+    expect(lines[5]!.superGuarantee).toBe("0.0000");
+    const total = lines.reduce((s, l) => s + Number(l.superGuarantee), 0);
+    // Each payday rounds to four decimal places, so the yearly total can differ from 12% x 270,830 by a sub-cent amount.
+    expect(total).toBeLessThanOrEqual(32499.6 + 0.001);
+    expect(total).toBeCloseTo(32499.6, 3);
+    // Financial-year-to-date earnings are what the line records under PAYDAY.
+    expect(Number(lines[5]!.quarterToDateOte)).toBeCloseTo(61538.4615 * 6, 2);
+    // Safe-by: Wed 14 Oct -> Thu 22 Oct; Wed 28 Oct -> Thu 5 Nov.
+    expect(lines[0]!.superSafeByDate).toBe("2026-10-22");
+    expect(lines[1]!.superSafeByDate).toBe("2026-11-05");
+  });
+
+  it("a foreign resident is withheld at the foreign resident rates with no Medicare levy (approximation), and a resident is unaffected", async () => {
+    const fr = await EmployeeService.create(owner, {
+      name: "Fran Foreign",
+      employmentBasis: "SALARY",
+      annualSalary: "104000.00",
+      payFrequency: "FORTNIGHTLY",
+      startDate: new Date("2026-01-01"),
+      taxResidency: "FOREIGN_RESIDENT",
+    });
+    const res = await EmployeeService.create(owner, {
+      name: "Rae Resident",
+      employmentBasis: "SALARY",
+      annualSalary: "104000.00",
+      payFrequency: "FORTNIGHTLY",
+      startDate: new Date("2026-01-01"),
+    });
+    expect(fr.taxResidency).toBe("FOREIGN_RESIDENT");
+    const run = await PayRunService.create(
+      owner,
+      { payFrequency: "FORTNIGHTLY", periodStart: new Date("2026-10-01"), periodEnd: new Date("2026-10-14"), payDate: new Date("2026-10-14"), employeeIds: [fr.id, res.id] },
+      gl,
+    );
+    const frLine = run.lines.find((l) => l.employeeId === fr.id)!;
+    const resLine = run.lines.find((l) => l.employeeId === res.id)!;
+    expect(frLine.paygWithholding).toBe("1200.0000"); // 104,000 x 30% = 31,200 / 26
+    expect(frLine.netPay).toBe("2800.0000");
+    expect(resLine.paygWithholding).toBe("915.3846");
+  });
+
+  it("rule set versions: the highest version wins by default, the seeded version-1 row is untouched and selectable as the legacy path", async () => {
+    const v2 = await TaxRuleService.resolve("AU", new Date("2026-10-05"));
+    expect(v2).toMatchObject({ version: 2, sgCadence: "PAYDAY", sgAnnualContributionBaseCap: "270830.0000", sgQuarterlyContributionBaseCap: null, sgRate: "0.1200" });
+    expect(v2.requiresVerificationNote).toMatch(/Medicare levy low-income thresholds/);
+    expect(v2.brackets.map((b) => b.marginalRate)).toEqual(["0.0000", "0.1500", "0.3000", "0.3700", "0.4500"]);
+    expect(v2.foreignResidentBrackets.map((b) => [b.threshold, b.marginalRate])).toEqual([
+      ["0.0000", "0.3000"],
+      ["135000.0000", "0.3700"],
+      ["190000.0000", "0.4500"],
+    ]);
+    const legacy = await TaxRuleService.resolve("AU", new Date("2026-10-05"), { legacyQuarterlySuper: true });
+    expect(legacy).toMatchObject({ version: 1, label: "FY2026-27", sgCadence: "QUARTERLY", sgQuarterlyContributionBaseCap: "62500.0000", sgAnnualContributionBaseCap: null });
+    expect(legacy.requiresVerificationNote).toMatch(/UNRESOLVED/); // the seeded v1 wording is preserved verbatim
+    const fy2526 = await TaxRuleService.resolve("AU", new Date("2025-12-01"));
+    expect(fy2526).toMatchObject({ version: 1, label: "FY2025-26", sgCadence: "QUARTERLY" });
+    expect((await TaxRuleService.list("AU")).map((r) => `${r.label}#${r.version}`)).toEqual(["FY2025-26#1", "FY2026-27#1", "FY2026-27 (Payday Super)#2"]);
   });
 
   it("refuses to run a second pay run for the same employee over an overlapping period", async () => {

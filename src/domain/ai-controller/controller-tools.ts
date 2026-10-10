@@ -17,6 +17,8 @@ import { formatDateParam } from "@/domain/reporting/period-presets";
 import { Money } from "@/domain/money/money";
 import { describeUnscheduledKnown } from "@/domain/forecasting/forecast-summary";
 import { CashForecastService } from "@/domain/forecasting/cash-forecast-service";
+import { BasService } from "@/domain/tax/bas-service";
+import { BAS_LABELS, BAS_LABEL_TITLES } from "@/domain/tax/bas-calculations";
 import { CloseChecklistService } from "@/domain/close/checklist-service";
 import { checklistFacts } from "@/domain/close/checklist-summary";
 import { monthKey, previousMonth } from "@/domain/close/period-ref";
@@ -328,6 +330,50 @@ export function buildControllerTools(dimensions: DimensionWithValues[]): Control
               description: "Month-end close status",
               periodLabel: key,
               drillDownHref: `/accounting/close/${key}`,
+            },
+          };
+        }),
+    },
+    {
+      name: "bas_summary",
+      description:
+        "Read-only summary of a PREPARED Business Activity Statement worksheet (BAS labels G1, G2, G3, G10, G11, 1A, 1B, W1, W2, the net GST, the reconciliation variance to the GST control accounts and any warnings). " +
+        "Use for 'what is the GST position for last quarter's BAS', 'why does the BAS not match the GST account'. Defaults to the most recent prepared worksheet. " +
+        "You can only EXPLAIN what was prepared: you can never create, change, finalise or lodge a BAS, and every figure you give must come from this tool, never from your own calculation. " +
+        "Always say it is prepared for review by a registered tax agent or BAS agent and has NOT been lodged with the ATO.",
+      inputSchema: {
+        type: "object",
+        properties: { basId: { type: "string", description: "The id of a prepared BAS worksheet. Omit for the most recent." } },
+      },
+      argsSchema: z.object({ basId: z.string().uuid().optional() }),
+      permission: "bas:read",
+      execute: (actor, rawArgs) =>
+        guarded(async () => {
+          const args = z.object({ basId: z.string().uuid().optional() }).parse(rawArgs);
+          let id = args.basId;
+          if (!id) {
+            const statements = await BasService.list(actor);
+            id = statements[0]?.id;
+          }
+          if (!id) return { ok: false, error: "No BAS worksheet has been prepared yet." };
+          const view = await BasService.get(actor, id);
+          const f = view.report.figures;
+          const lines = [
+            `BAS worksheet ${view.report.periodStart} to ${view.report.periodEnd} (${view.statement.status}, ${view.report.basis} basis). Prepared for review by a registered tax agent or BAS agent; NOT lodged with the ATO.`,
+            ...BAS_LABELS.map((l) => `${l} ${BAS_LABEL_TITLES[l]}: ${f.labels[l]}`),
+            `Net GST (1A minus 1B; positive = payable): ${f.netGst}`,
+            `Reconciliation variance to GST control accounts (ledger minus BAS): ${view.report.reconciliation.variance}`,
+            `Unclassified lines excluded: ${f.unclassified.sales.count} sales, ${f.unclassified.purchases.count} purchases`,
+            ...view.report.warnings.map((w) => `Warning: ${w}`),
+          ];
+          return {
+            ok: true,
+            summary: lines.join("\n"),
+            citation: {
+              tool: "bas_summary",
+              description: "BAS worksheet (prepared, not lodged)",
+              periodLabel: `${view.report.periodStart} to ${view.report.periodEnd}`,
+              drillDownHref: `/accounting/bas/${id}`,
             },
           };
         }),

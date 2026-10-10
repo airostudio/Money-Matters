@@ -6,7 +6,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { createTaxCodeAction } from "./actions";
+import { classifyTaxCodeAction, createTaxCodeAction } from "./actions";
+
+const TREATMENT_OPTIONS: Array<[string, string]> = [
+  ["TAXABLE", "Taxable (GST charged / claimed)"],
+  ["GST_FREE", "GST-free"],
+  ["EXPORT", "Export (GST-free)"],
+  ["INPUT_TAXED", "Input-taxed"],
+  ["NOT_REPORTED", "Not reported on BAS"],
+];
 
 export default async function TaxCodesPage({ params }: { params: { orgSlug: string } }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
@@ -19,7 +27,7 @@ export default async function TaxCodesPage({ params }: { params: { orgSlug: stri
   const boundCreate = createTaxCodeAction.bind(null, org.slug);
 
   return (
-    <div className="max-w-2xl space-y-6">
+    <div className="max-w-5xl space-y-6">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Tax Codes</h1>
         <p className="text-sm text-muted-foreground">
@@ -41,6 +49,7 @@ export default async function TaxCodesPage({ params }: { params: { orgSlug: stri
                   <th className="px-6 py-2 text-right font-medium">Rate</th>
                   <th className="px-6 py-2 font-medium">Payable account</th>
                   <th className="px-6 py-2 font-medium">Receivable account</th>
+                  <th className="px-6 py-2 font-medium">BAS treatment</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
@@ -58,6 +67,28 @@ export default async function TaxCodesPage({ params }: { params: { orgSlug: stri
                       </td>
                       <td className="px-6 py-2.5 text-muted-foreground">
                         {receivableAccount ? `${receivableAccount.code} · ${receivableAccount.name}` : "Not configured"}
+                      </td>
+                      <td className="px-6 py-2.5">
+                        <form action={classifyTaxCodeAction.bind(null, org.slug, tc.id)} className="flex items-center gap-2">
+                          <select
+                            name="basTreatment"
+                            defaultValue={tc.basTreatment ?? ""}
+                            className="h-8 rounded-md border border-input bg-background px-2 text-xs"
+                          >
+                            <option value="">Unclassified</option>
+                            {TREATMENT_OPTIONS.map(([v, l]) => (
+                              <option key={v} value={v}>
+                                {l}
+                              </option>
+                            ))}
+                          </select>
+                          <label className="flex items-center gap-1 text-xs">
+                            <input type="checkbox" name="basCapital" defaultChecked={tc.basCapital} /> capital
+                          </label>
+                          <Button type="submit" size="sm" variant="outline">
+                            Save
+                          </Button>
+                        </form>
                       </td>
                     </tr>
                   );
@@ -124,6 +155,28 @@ export default async function TaxCodesPage({ params }: { params: { orgSlug: stri
               </select>
               <p className="text-xs text-muted-foreground">
                 Tax paid under this code (input tax credit) is debited here on a posted bill — required before this code can be used on one.
+              </p>
+            </div>
+            <div className="col-span-2 space-y-2">
+              <Label htmlFor="basTreatment">BAS treatment</Label>
+              <select
+                id="basTreatment"
+                name="basTreatment"
+                className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+              >
+                <option value="">Unclassified (excluded from the BAS until classified)</option>
+                {TREATMENT_OPTIONS.map(([v, l]) => (
+                  <option key={v} value={v}>
+                    {l}
+                  </option>
+                ))}
+              </select>
+              <label className="flex items-center gap-2 text-xs">
+                <input type="checkbox" name="basCapital" /> Purchases under this code are capital purchases (BAS label G10)
+              </label>
+              <p className="text-xs text-muted-foreground">
+                Used only to prepare a BAS worksheet for review by a registered tax agent or BAS agent. Nothing is lodged
+                with the ATO. Lines using an unclassified code are never guessed at.
               </p>
             </div>
           </CardContent>

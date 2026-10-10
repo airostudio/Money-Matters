@@ -501,6 +501,72 @@ asset registered against the wrong pair), never a rounding footnote.
   only, never recalled from training data" is the binding constraint, not
   just double-entry correctness.
 
+## 12a. Phase 8 Slice 2 — BAS / GST preparation (preparation only; NOT lodged with the ATO)
+
+Everything in this section requires registered tax agent / BAS agent review. Money Matters prepares a Business
+Activity Statement **worksheet**; it never transmits anything to the ATO and has no lodgement integration.
+
+**Where the figures come from.** GST is recorded on the SUB-LEDGER lines (`invoice_lines`, `bill_lines`,
+`supplier_credit_note_lines`, `expense_claim_lines`: `lineAmount`/`amount` is GST-exclusive, `taxAmount` the GST), and the
+posting journals carry only the control-account totals (the invoice journal lines have no `tax_code_id`). So the BAS reads
+the sub-ledger lines of documents whose posting journal is dated in the period. Nothing else is read.
+
+**Basis.** ACCRUAL (invoice / bill basis) only: a document counts in the period its posting journal is dated; a void or
+reversal is a NEGATIVE contribution in the period the reversal journal is dated (exactly how the ledger itself treats
+it), found through `journal_entries.reversal_of_id`. **CASH basis is refused** (`BasBasisNotSupportedError`): it needs
+payment-level GST allocation (apportioning each part-payment's GST), which is not built. Failing closed was chosen over
+approximating.
+
+**Classification** (`tax_codes.bas_treatment`, `tax_codes.bas_capital`; NULL treatment = UNCLASSIFIED, never guessed):
+
+| Treatment | Sales | Purchases |
+|---|---|---|
+| TAXABLE | G1 (GST-inclusive), 1A | G11 (or G10 when `bas_capital`), GST-inclusive, 1B |
+| GST_FREE | G1, G3 | disclosed memo, excluded |
+| EXPORT | G1, G2 | disclosed memo, excluded |
+| INPUT_TAXED | G1 only (memo) | disclosed memo, excluded |
+| NOT_REPORTED | excluded (memo) | excluded (memo) |
+
+A line is **unclassified** (in no label, counted and shown) when it has no tax code, an unclassified code, a
+foreign-currency document, or GST on a non-TAXABLE code. Supplier credit notes are negative purchases. Labels implemented:
+G1, G2, G3, G10, G11, 1A, 1B, W1, W2 (each cross-confirmed from two independent sources; see `docs/roadmap.md`). 8A/8B/9 are
+deliberately NOT implemented (sources conflict on the PAYG/summary flow); "1A - 1B + W2" is shown as a clearly-labelled
+Money Matters summary, not an ATO label. W1/W2 are the sums of `pay_run_lines.gross_pay` / `payg_withholding` of non-DRAFT
+pay runs by pay date. Nothing is rounded (4-dp exact sums); whole-dollar rounding is left to the preparing agent.
+
+**Ledger gaps flagged, not guessed.** (1) Bank-coded transactions (`ReconciliationService.createJournalFromTransaction`) set
+a `tax_code_id` on the journal line but post the GROSS amount to one account with no GST split; the BAS cannot know how much
+was GST in the ledger, so those lines are listed as "tax-coded journal lines with no GST split" and excluded.
+(2) Purchases under GST-free/input-taxed codes: their placement at G11 is not verified, so they are disclosed and excluded.
+
+**Reconciliation to the GST control accounts** shows, per account, period debits/credits (the payable account of every tax
+code = "GST on sales", the receivable account = "GST on purchases") against 1A/1B and a net **variance** (ledger minus
+BAS). It is never plugged; control-account postings that are not invoices/bills/credits/claims (manual journals, BAS
+payments to the ATO) are listed as the usual explanation.
+
+**Lifecycle.** `BasService`: `createDraft` (`bas:manage`) → live recomputation on every view → `finalise` (`bas:finalise`,
+HUMAN actors only) which stores the full report JSON plus a SHA-256 `content_hash` over a canonical (sorted-key) JSON and
+makes the row immutable (the RLS UPDATE/DELETE policies only match DRAFT rows). Outstanding warnings (unclassified lines,
+no-split lines, variance, a period whose months are not all `ADVISOR_LOCKED` or stricter) must be acknowledged. A FINALISED
+view re-verifies the hash and shows "live drift" if the ledger moved afterwards; a revision is a new statement.
+`bas_lodgement_records` (append-only) holds "lodged outside Money Matters" (date + reference, unverified).
+
+## 12b. Phase 8 Slice 3 — payroll operations: settlement, remittances, reversal, leave
+
+All postings go through `PostingService`; nothing here moves real money (Money Matters pays no one and lodges nothing).
+
+- **Net wages settlement** (`PayrollPaymentService.payNetWages`): Dr Net Wages Payable / Cr the chosen bank (ASSET) account, for what is still owed on one POSTED run (net of earlier unreversed payments). Recorded in `payroll_payments` (kind `NET_WAGES`). The ABA (Direct Entry) file is generated separately and generating it records nothing.
+- **Super and PAYG remittances** (`recordSuperRemittance` / `recordPaygRemittance`): Dr Superannuation Payable (or PAYG Withholding Payable) / Cr bank, capped at `accrued on POSTED runs - remitted` (computed from the pay run sub-ledger in `liabilities.ts`, not from the GL balance). Record-only: no clearing house, no payment to the ATO.
+- **Reversal** (`PayRunService.reverse`, `payrun:reverse`, reason of 10+ characters): reverses the posting journal via `PostingService.reverseEntry` (original untouched), sets the run `REVERSED`, unwinds each employee's leave balance (accrual removed, leave taken restored), releases the leave requests the run consumed, and drops the run out of quarter-to-date OTE and the duplicate-period check so a corrected run can cover the same period. Refused while net wages are recorded as paid, or when removing the run would leave more super/PAYG remitted than owed. The BAS treats a reversed run as a negative in the period its reversal journal is dated.
+- **Leave** (`LeaveService`): an employee (login linked to an ACTIVE employee record) requests hours of ANNUAL or PERSONAL leave; a different person with `leave:approve` decides it; approval is refused when hours exceed the balance after other approved-but-undeducted leave. A draft pay run freezes the approved hours on each line (`annual_leave_taken`, `personal_leave_taken`); `post()` re-checks them (a stale draft refuses to post), deducts them from the balance, stores the balances after the run for the payslip, and marks the requests applied. Leave is **balance-only**: gross pay is not changed, so for an HOURLY employee the paid hours must still be entered by the payroll manager. Hours are typed by the requester: no roster, public-holiday or entitlement logic.
+- **Payslips** (`PayslipService`): one per employee per POSTED run: gross, PAYG, net, SG accrued, leave accrued/taken/balance after, year to date from 1 July (the Australian financial year start) up to and including the run. No TFN; bank account masked. Human-only. See docs/security.md section 13b for who may read what.
+- **Reports** (`PayrollReportService`): payroll summary, PAYG summary (withheld vs remitted by month), super liability by calendar quarter (SG due dates not modelled), and an annual-leave liability estimate (hours x base hourly rate; no loading, on-costs or award rates; personal leave in hours only). Each has a CSV export with the same permissions.
+- **ABA file** (`aba-file.ts`): layout verified against two sources (Westpac Corporate Online "Import format for Australian Direct Entry files", January 2018 PDF, and the Cemtex ABA specification). Credits only (transaction code 53 "pay"); no balancing debit record (bank-specific, unverified). Amounts are whole cents per employee, so the file total differs from the ledger payable by the reported sub-cent rounding; the ledger payment clears the exact payable.
+
+**Phase 8 Slice 4 changes to the payroll maths** (verification detail in docs/roadmap.md): for pay dates in FY2026-27 the default rule set is now version 2 (Payday Super): SG is 12% of qualifying earnings on EVERY payday, accumulated from 1 July against the annual maximum contribution base ($270,830, so at most $32,499.60 a year), and each line records a conservative `super_safe_by_date` (six weekdays after payday; not the legal deadline, public holidays and clearing-house time are not modelled). The quarterly mechanism survives as the labelled legacy option (`legacyQuarterlySuper`). A `FOREIGN_RESIDENT` employee is withheld with the foreign resident brackets, no tax-free threshold and no Medicare levy, by the same annualised-bracket approximation; if a rule set has no foreign resident brackets the calculation refuses rather than using resident rates. The Medicare levy shade-in (10 cents per dollar over the lower threshold, capped at 2%) is now a verified mechanism; the 2026-27 thresholds themselves are still the 2025-26 figures, flagged on the rule set.
+
+Known limitation found while building this (pre-existing, not changed here): `PostingService` requires `journal:post`, which `PAYROLL_MANAGER`, `ACCOUNTS_RECEIVABLE` and `ACCOUNTS_PAYABLE` do not hold, so a service that posts on their behalf fails for those roles in practice. In practice payroll posting, settlement and reversal therefore work only for roles that hold both the payroll permission and `journal:post` / `journal:reverse` (OWNER, ADMINISTRATOR, ACCOUNTANT); a PAYROLL_MANAGER can prepare and review but is refused at the ledger. Resolving this needs a deliberate decision about system-initiated postings, so it is reported rather than silently widened.
+
 ## 13. Phase 9 Slice 1 — budgets never touch the ledger; Budget vs. Actual reuses the P&L's own aggregation
 
 - **A budget is planning data, full stop.** No table in `src/domain/
@@ -994,5 +1060,6 @@ ends; months after; due day, clamped to the month's length), turned into tasks o
 by pure date arithmetic (`src/domain/practice/tax-calendar.ts`); generation is idempotent
 per (rule, period end). Nothing is taken from tax law: starter rules are editable form
 prefills labelled "suggestion — verify at ato.gov.au". The dashboard's BAS/Tax indicator
-shows only the practice's own deadline and the client's tax-lock; **there is no BAS/GST
-preparation, lodgement or ATO integration** (a later Phase 8 item).
+shows only the practice's own deadline and the client's tax-lock; **the practice
+layer does no BAS/GST preparation itself, and there is no lodgement or ATO integration**
+(BAS worksheet preparation, preparation only, is Phase 8 Slice 2 - section 12a).

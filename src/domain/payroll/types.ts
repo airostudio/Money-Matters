@@ -16,6 +16,8 @@ export interface CreateEmployeeInput {
   standardHoursPerWeek?: string;
   payFrequency: PayFrequencyDb;
   taxFreeThresholdClaimed?: boolean;
+  /** Phase 8 Slice 4(c). Defaults to RESIDENT. A FOREIGN_RESIDENT is withheld at the foreign resident rates (approximation), with no Medicare levy. */
+  taxResidency?: "RESIDENT" | "FOREIGN_RESIDENT";
   startDate: Date;
   userId?: string;
   tfn?: string;
@@ -38,6 +40,7 @@ export interface EmployeeView {
   standardHoursPerWeek: string;
   payFrequency: PayFrequencyDb;
   taxFreeThresholdClaimed: boolean;
+  taxResidency: "RESIDENT" | "FOREIGN_RESIDENT";
   startDate: string;
   terminationDate: string | null;
   status: EmployeeStatus;
@@ -64,6 +67,8 @@ export interface CreatePayRunInput {
   employeeIds: string[];
   /** Decimal string hours, keyed by employeeId — required for an HOURLY employee with no linked `userId` (no timesheets to pull from); optional override for one that does have timesheets (explicit always wins over the timesheet sum). */
   manualHoursByEmployeeId?: Record<string, string>;
+  /** Phase 8 Slice 4(g): use the version-1 quarterly SG path (the labelled LEGACY option) instead of the current Payday Super rule set. */
+  legacyQuarterlySuper?: boolean;
 }
 
 export interface PayRunLineView {
@@ -80,7 +85,12 @@ export interface PayRunLineView {
   netPay: string;
   annualLeaveAccrued: string;
   personalLeaveAccrued: string;
+  annualLeaveTaken: string;
+  personalLeaveTaken: string;
   taxRuleSetLabel: string;
+  superCadence: "QUARTERLY" | "PAYDAY";
+  /** Conservative date by which the fund should have RECEIVED this line's super (PAYDAY only); not the legal deadline. */
+  superSafeByDate: string | null;
 }
 
 /** Totals-only view of one POSTED pay run — see `PayRunService.listPostedSummaries`. */

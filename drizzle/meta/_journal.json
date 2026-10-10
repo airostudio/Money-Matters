@@ -351,6 +351,41 @@
       "when": 1791628177416,
       "tag": "0049_automation_slice3_row_level_security",
       "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1791700000000,
+      "tag": "0052_bas_slice2_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1791700012000,
+      "tag": "0053_bas_slice2_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1791700024000,
+      "tag": "0054_payroll_slice3_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1791700036000,
+      "tag": "0055_payroll_slice3_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1791700048000,
+      "tag": "0056_payroll_slice4_payday_super",
+      "breakpoints": true
     }
   ]
 }

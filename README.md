@@ -96,6 +96,33 @@ verified vs. deferred, and note that a registered tax agent or payroll
 provider should verify this software's output before it is used for real
 employee payroll.
 
+Phase 8 Slice 2 adds BAS / GST preparation (preparation only - nothing is
+lodged with the ATO, and every output requires registered tax agent / BAS agent
+review): tax codes are classified for the BAS, and a month/quarter BAS worksheet
+(G1, G2, G3, G10, G11, 1A, 1B, W1, W2) is derived from posted invoices, bills,
+supplier credits, expense claims and pay runs on an accrual basis, with
+drill-down to every source transaction, a reconciliation to the GST control
+accounts (variance shown, never plugged), a human-only finalise that snapshots
+the figures immutably with a content hash, a "lodged outside Money Matters"
+record, and a CSV export. Unclassified items are listed, never guessed.
+
+Phase 8 Slice 3 completes payroll operations: printable payslips (an employee
+sees only their own; payroll managers see all), "pay the net wages" settlement,
+record-only super and PAYG remittances, pay run reversal, a leave request and
+approval workflow (approved leave is deducted when the pay run posts), payroll
+summary / PAYG / super-liability / leave-liability reports with CSV, and an ABA
+(Direct Entry) bank file generator whose layout was verified against two
+sources. Nothing is paid or lodged by Money Matters itself.
+
+Phase 8 Slice 4 resolves the FY2026-27 Payday Super mechanics (a new version of
+the rule set: super calculated every payday against an annual contribution base,
+with a conservative per-payday "received by the fund" date; the quarterly path
+stays as a labelled legacy option), verifies the Medicare levy shade-in, and adds
+foreign resident withholding rates. HELP/STSL, LITO, working holiday makers,
+the no-TFN rate, the no-tax-free-threshold schedule and the ATO per-period
+coefficient tables were NOT built because their figures could not be
+cross-verified; `docs/roadmap.md` lists exactly what is missing for each.
+
 Phase 9 Slice 1 adds the budgeting core: baseline/revised-forecast/
 rolling-forecast budgets with monthly line items by GL account (optionally
 scoped to a dimension value), a Budget vs. Actual report built on the

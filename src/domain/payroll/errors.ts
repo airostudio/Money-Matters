@@ -52,6 +52,41 @@ export class PayRunNotDraftError extends Error {
   }
 }
 
+export class PayRunNotPostedError extends Error {
+  constructor(id: string, status: string) {
+    super(`Pay run ${id} is ${status}, not POSTED - this action only applies to a posted pay run.`);
+    this.name = "PayRunNotPostedError";
+  }
+}
+
+export class PayRunHasPaymentsError extends Error {
+  constructor(detail: string) {
+    super(`This pay run cannot be reversed yet: ${detail}`);
+    this.name = "PayRunHasPaymentsError";
+  }
+}
+
+export class PayrollPaymentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PayrollPaymentError";
+  }
+}
+
+export class PayslipNotFoundError extends Error {
+  constructor() {
+    super("That payslip was not found.");
+    this.name = "PayslipNotFoundError";
+  }
+}
+
+export class LeaveRequestError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LeaveRequestError";
+  }
+}
+
 export class DuplicatePayRunPeriodError extends Error {
   constructor(employeeName: string) {
     super(

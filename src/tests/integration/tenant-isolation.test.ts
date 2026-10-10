@@ -28,7 +28,10 @@ import {
   employees,
   payRuns,
   payRunLines,
+  basStatements,
+  basLodgementRecords,
 } from "@/db/schema";
+import { BasService } from "@/domain/tax/bas-service";
 import { db } from "@/db/client";
 import { withTenant } from "@/db/tenant";
 import { AccountService } from "@/domain/accounts/account-service";
@@ -200,6 +203,10 @@ describe("Tenant isolation", () => {
       "employees",
       "pay_runs",
       "pay_run_lines",
+      "bas_statements",
+      "bas_lodgement_records",
+      "leave_requests",
+      "payroll_payments",
       "budgets",
       "budget_lines",
       "scenarios",
@@ -604,6 +611,24 @@ describe("Tenant isolation", () => {
     expect(await db.select().from(employees)).toHaveLength(0);
     expect(await db.select().from(payRuns)).toHaveLength(0);
     expect(await db.select().from(payRunLines)).toHaveLength(0);
+  });
+
+  it("a BAS statement and its lodgement record created under org A are invisible to org B, even by direct query with no filter", async () => {
+    const draft = await BasService.createDraft(orgA.owner, {
+      periodStart: "2026-07-01",
+      periodEnd: "2026-09-30",
+      frequency: "QUARTERLY",
+    });
+    await BasService.finalise(orgA.owner, draft.id, { acknowledgeWarnings: true });
+    await BasService.markLodgedOutside(orgA.owner, draft.id, { lodgedOn: "2026-10-20", reference: "REF-TEST-1" });
+
+    await expect(BasService.get(orgB.owner, draft.id)).rejects.toThrow();
+    const asB = await withTenant(orgB.organizationId, (tx) => tx.select().from(basStatements));
+    expect(asB.some((r) => r.id === draft.id)).toBe(false);
+    const lodgedAsB = await withTenant(orgB.organizationId, (tx) => tx.select().from(basLodgementRecords));
+    expect(lodgedAsB).toHaveLength(0);
+    expect(await db.select().from(basStatements)).toHaveLength(0);
+    expect(await db.select().from(basLodgementRecords)).toHaveLength(0);
   });
 
   it("a budget (and its lines) created under org A is invisible to org B, even by direct query with no filter", async () => {

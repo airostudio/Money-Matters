@@ -2057,7 +2057,7 @@ row itself — the data is self-documenting, not just this doc):**
 **Explicitly UNRESOLVED — do not treat as settled, and don't let a future
 session paper over this:**
 
-- **FY2026-27 "Payday Super"**: the ATO's own material signals a move to
+- **(Superseded by Slice 4(g) below: resolved and modelled as rule set version 2; the text in this bullet describes the state when Slice 1 shipped and what the version-1 row still carries.) FY2026-27 "Payday Super"**: the ATO's own material signals a move to
   calculating/remitting SG per payday rather than quarterly, with a
   $270,830 ANNUAL contribution-base figure mentioned instead of a quarterly
   one, starting around this financial year. The exact mechanics were **not
@@ -2196,6 +2196,128 @@ session paper over this:**
   balance a pay run correctly accrues is this slice's deliverable; a
   request/approval UI is a reasonable future addition), and any
   scheduled/automatic pay run (on-demand only, no job queue exists).
+
+### Slice 2 — BAS / GST preparation (complete; preparation only, NOT lodged with the ATO)
+
+Everything here requires registered tax agent / BAS agent review. Design: `docs/accounting-engine.md` section 12a;
+security: `docs/security.md` section 13a; schema: `docs/database.md` section 2w (migrations 0052, 0053).
+
+**Built:** tax-code BAS classification (`tax_codes.bas_treatment` / `bas_capital`, editable on the Tax Codes page, audited);
+`BasService` (`src/domain/tax/bas-service.ts`) preparing G1, G2, G3, G10, G11, 1A, 1B, W1, W2 for a month/quarter from
+posted invoices, bills, supplier credits, expense claims and pay runs, on an ACCRUAL basis (CASH refused, fail closed);
+drill-down from every label to its source lines (and pay runs); reconciliation to the GST control accounts with the variance
+shown, never plugged; DRAFT to FINALISED (human-only, `bas:finalise`) with an immutable snapshot, SHA-256 content hash,
+drift detection, and warning acknowledgement (unclassified lines, no-split tax-coded journal lines, variance, unlocked
+months); append-only "lodged outside Money Matters" record; CSV export; read-only AI `bas_summary` tool (permission parity);
+`/accounting/bas` UI. Tests: pure unit tests of the arithmetic, and a real-Postgres integration suite whose expected values
+were worked out independently by hand (see the header of `src/tests/integration/tax/bas.test.ts`).
+
+**Verified label definitions (each cross-confirmed from at least two independent sources via web search; ato.gov.au blocks
+direct fetching, so ATO pages were seen through search snippets only):**
+
+| Label / concept | Definition used | Sources |
+|---|---|---|
+| G1 | Total sales: every sale incl. GST-free and input-taxed, GST-inclusive; ATO: input-taxed and GST-free sales must be reported at G1 | ATO "Step 1: Sales" and "Completing your BAS for GST" (ato.gov.au); Smart Biz Australia; paygcalculator.au |
+| G2 / G3 | Export sales / other GST-free sales; amounts at G2 and G3 are also reported in G1 | ATO "Step 1: Sales"; paygcalculator.au; smartbizaustralia.com |
+| G10 / G11 | Capital purchases / non-capital purchases; amounts reported at G10 and G11 include GST | ATO "Step 3: Purchases"; geekbooks.com.au; myaccountant Help Centre; bascalc.com.au |
+| 1A / 1B | GST on sales / GST on purchases | ATO "Business activity statements (BAS)"; Smart Biz Australia; gstcalculatorau.com |
+| W1 / W2 | W1 total gross salary, wages and other payments; W2 amounts withheld from payments shown at W1 | ATO "Pay as you go (PAYG) withholding" and "ATO PAYG withholding pre-fill for activity statements"; itp.com.au; jtwaccountants.com.au |
+| GST mechanics | 10% of the GST-exclusive price, one-eleventh of the GST-inclusive price; GST-free sales still carry credits, input-taxed sales do not | ATO "Input-taxed sales"; bristax.com.au; emumoney.com.au (the 10% is not hardcoded: each tax code holds its rate) |
+
+**Deliberately NOT implemented (unverified, listed as "deferred - unverified"):** labels 8A / 8B / 9 and W3 / W4 / W5 / 5A /
+5B / 7 / G4 / G13 / G14 / G15 (sources conflict on how the PAYG total flows into the payment section; only 1A, 1B, W1, W2 are
+filled in, with "1A - 1B + W2" shown as a Money Matters summary, not an ATO label); where purchases under GST-free /
+input-taxed codes are reported (excluded and disclosed); whole-dollar rounding rules on the lodged form (figures are exact
+4-dp sums); the simpler-BAS vs full-reporting threshold and BAS due dates (not hardcoded or computed); cash-basis GST;
+foreign-currency documents (flagged unclassified, never converted). The ledger cannot distinguish capital vs non-capital
+per line (it is per tax code) and bank-coded transactions have no GST split, so those are flagged rather than guessed.
+
+### Slice 3 — Payroll operations completion (complete; no new regulatory figures except the ABA layout)
+
+Design: `docs/accounting-engine.md` section 12b, security section 13b, database section 2x (migrations 0054, 0055).
+
+**Built:** payslips (per employee per POSTED run, printable, own-record only via the linked login, payroll managers read all);
+"pay the net wages" settlement (Dr Net Wages Payable / Cr bank through `PostingService`); record-only super and PAYG
+remittances capped at the outstanding liability; pay run reversal (reversing journal, `REVERSED` status, leave balances
+unwound, leave requests released, corrected run allowed for the same period); leave request / approval workflow
+(approved leave deducted at pay run post, balance-only); payroll summary, PAYG summary, super liability by quarter and
+annual-leave liability reports with CSV; ABA (Direct Entry) file generation. BAS now counts a reversed run as a negative.
+
+**ABA (Direct Entry) layout - verified from two independent sources:** Westpac Corporate Online "Import format for
+Australian Direct Entry files" (PDF, effective January 2018, read in full) and the Cemtex ABA file format specification
+(cemtexaba.com); BOQ and NAB Direct Entry specifications were seen to use the same three records. 120-character records:
+type 0 descriptive (reel 01, FI abbreviation, user name 26, APCA user id 6, description 12, DDMMYY), type 1 detail (BSB
+nnn-nnn, account 9 right-justified, indicator, transaction code, amount in cents 10, account title 32, lodgement
+reference 18, trace BSB and account, remitter 16, withholding 8), type 7 total (999-999, net, credit, debit totals, count of
+type 1). Transaction code 53 = "pay" (both sources). **Not verified, so not done:** whether a bank requires a balancing debit
+record (none is added); the APCA user id and bank abbreviation are supplied by the person generating the file, never invented
+or stored.
+
+**Finding (pre-existing, reported not changed):** `PostingService` demands `journal:post`, which `PAYROLL_MANAGER`,
+`ACCOUNTS_RECEIVABLE` and `ACCOUNTS_PAYABLE` do not hold, so those roles cannot actually trigger the postings their own
+permissions describe (including Slice 1's pay run post). Payroll postings work for OWNER / ADMINISTRATOR / ACCOUNTANT.
+
+**Deferred:** a leave calendar / entitlement logic (hours are typed by the requester); leave loading and leave pay for hourly
+employees (leave is balance-only); super clearing-house or SuperStream integration; paying the ATO; scheduled pay runs.
+
+### Slice 4 — Withholding refinements (partly built: only what cleared the cross-verification bar)
+
+Verification standard: every rate, threshold and mechanism needed two independent sources (ATO pages as seen through web
+search snippets, since ato.gov.au blocks direct fetching with 403, plus accounting-firm, super-fund or government-adjacent
+sources). Anything that did not clear it was NOT coded.
+
+**Built**
+
+- **(g) FY2026-27 Payday Super - resolved and modelled** (migration 0056; the "unresolved" note on the seeded FY2026-27 row is
+  superseded by a NEW version of that rule set, `FY2026-27 (Payday Super)`, version 2; the seeded row is untouched and remains
+  selectable as the labelled **legacy quarterly path** via `legacyQuarterlySuper` on pay run creation). Verified facts:
+  | Fact | Sources |
+  |---|---|
+  | Payday Super legislation passed Parliament (November 2025), Royal Assent, commencing 1 July 2026 | ATO "ATO calls on employers to prepare for Payday Super"; SmartCompany "Payday super legislation passes Parliament; new system to start July 1, 2026"; Alvarez & Marsal; RSM; BDO |
+  | SG must be RECEIVED, with allocation information, by the fund within 7 business days of the qualifying earnings (QE) day, generally payday | ATO newsroom and "Payment deadlines for Payday Super"; RSM; Clayton Utz FAQ; AustralianSuper; Pitcher Partners |
+  | Business day = not a Saturday, Sunday or a public holiday for the whole of any Australian state or territory | ATO "Payment deadlines for Payday Super" as quoted in search results; AustralianSuper (Hobart Show Day example) |
+  | Qualifying earnings = OTE + commissions + salary-sacrificed super (overtime still excluded) | REST; taxbne.com.au; AustralianSuper; Reckon |
+  | Maximum contribution base is ANNUAL: $270,830 for 2026-27 ($32,500 concessional cap x 100 / 12); maximum compulsory SG $32,499.60; SG rate 12% | REST; AustralianSuper; taxbne.com.au; ATO "Maximum contribution base" page (seen in search results); the arithmetic is re-derived in a unit test |
+  Mechanism: `sg_cadence = PAYDAY` rule sets track qualifying earnings year-to-date from 1 July against the annual base (the
+  column `quarter_to_date_ote` then holds the financial-year-to-date figure; `super_cadence` on each line records which path
+  produced it) and record a per-payday **safe-by date** (`super_safe_by_date`): six weekdays after the payday. It is a
+  conservative lower bound, never the legal deadline: public holidays and the exact day-count convention cannot make the real
+  deadline earlier. Not modelled and flagged on the rule set: clearing-house time, commissions, salary sacrifice, the
+  first-contribution (new employee / stapled fund) timing, and any holiday calendar.
+- **(f) Medicare levy shade-in - verified.** 10 cents per dollar over the lower threshold, capped at the standard 2%; 2025-26
+  singles thresholds $28,011 (lower) and $35,013 (upper) (ATO "Medicare levy reduction" pages as seen in search results;
+  pay-calculator-australia.com; canstar.com.au; money-snap.com; etax; a further source gives the 2025-26 increase from $27,222).
+  **The 2026-27 thresholds were not published** when checked, so the FY2026-27 rule sets still carry the 2025-26 figures and the
+  v2 row says so in `requires_verification_note`.
+- **(c) Foreign resident withholding.** Annual foreign resident rates (30% to $135,000, 37% to $190,000, 45% above; no tax-free
+  threshold; no Medicare levy): ATO "About foreign resident tax rates" (seen in search results), ozcalc.com.au, austax.tools,
+  taxbne.com.au; unchanged for 2026-27. Added as `FOREIGN_RESIDENT` bracket rows on every rule set and an
+  `employees.tax_residency` field. Withholding uses the same annualised-bracket **approximation** as residents (not the ATO
+  foreign resident coefficients) and refuses, rather than falling back to resident rates, if no foreign resident brackets exist.
+
+**Deferred - unverified (exactly what is missing)**
+
+| Item | Why it was not built |
+|---|---|
+| (a) HELP / STSL repayment withholding | The 2026-27 annual marginal bands ($69,528 / $129,717 / $186,050, 15% / 17% / 10%) appear in several sources, but the withholding itself follows ATO Schedule 8 (NAT 3539) coefficient tables (a, b per weekly earnings band, separate no-threshold tables, rounding and period-conversion rules). Only one search snippet quoting the 2026-27 coefficients was found, from a secondary source, and the ATO page cannot be fetched. Missing: the Schedule 8 tables verbatim from two independent sources. |
+| (b) LITO effect on withholding | The ATO's per-period coefficients embed LITO inside their bands; there is no verified separate "LITO adjustment" to apply to an annualised calculation. Missing: the method the ATO prescribes for reflecting LITO in withholding. |
+| (c) Working holiday maker withholding | WHM annual rates (15% to $45,000, 30% to $135,000, 37% to $190,000, 45% above) are confirmed by the ATO "Tax rates - working holiday makers" snippet and others, but withholding depends on the employer's WHM registration and on ATO Schedule 15, whose rates were not found. Missing: Schedule 15 and the unregistered-employer rates. |
+| (d) No-TFN rate | 47% (resident) / 45% (foreign resident) was confirmed only from ATO pages on super benefits and employment termination payments, not for ordinary wages; the 28-day TFN declaration rule was found only on commercial sites. Missing: the ATO wording for salary and wages, and the declaration timing. |
+| (e) Not-claiming-the-tax-free-threshold schedule | Needs the Schedule 1 (NAT 1004) coefficients for that scale. The existing "drop the nil band" approximation stays, with its disclaimer. |
+| (h) NAT 1004 per-period coefficients | Searches returned third-party tables that disagree with each other (weekly bands and coefficients differ), and the ATO PDF cannot be fetched. Missing: the Schedule 1 tables verbatim from two independent sources. The annualised approximation and its disclaimer remain. |
+
+### Slice 5 — termination payments, long service leave, salary sacrifice, state payroll tax (all deferred)
+
+Deferred by default and not researched to a build, per the standing rule that nothing regulatory is guessed:
+
+- **Termination payments / ETP caps and tax**: needs the whole-of-income and ETP cap amounts, the genuine-redundancy and
+  early-retirement-scheme tables and the Schedule 11 withholding rates (the ATO Schedule 11 page surfaced in searching, but
+  its tables were not read), each cross-verified; and a termination workflow (unused leave payout, notice) this app lacks.
+- **Long service leave accrual**: state-specific legislation and award coverage; no single verified rule exists to encode.
+- **Salary sacrifice**: affects ordinary time earnings and, under Payday Super, qualifying earnings (QE = OTE + commissions +
+  salary-sacrificed super). Needs an employee-level sacrifice model and reportable-employer-super-contribution rules; the
+  v2 FY2026-27 rule set's verification note already flags that QE is OTE here.
+- **State payroll tax**: thresholds, rates and grouping rules differ by state and change yearly; none was verified.
 
 ## Phase 9 — Advanced Finance — **complete** (Slices 1-5)
 
@@ -2977,8 +3099,8 @@ permission-checked: the consent record, `client_requests` and informational audi
   period-close exclusions unchanged and re-asserted.
 
 **Explicitly deferred (and why)**
-- **Automated BAS/GST preparation and ATO lodgement**: needs the later Phase 8 tax
-  features and ATO credentials; the calendar is user-entered.
+- **ATO lodgement**: needs ATO credentials; the calendar is user-entered. (BAS/GST
+  worksheet preparation now exists as Phase 8 Slice 2 and is preparation only.)
 - **Email/SMS notifications** for requests and deadlines, and **scheduled/automatic snapshot
   refresh**: no messaging infrastructure and no job queue.
 - **A client portal for non-members**: needs a different auth model (Phase 3's customer-portal
@@ -3019,8 +3141,8 @@ permission-checked: the consent record, `client_requests` and informational audi
   available); only the rendered markup and behaviour above were checked. The Anthropic API itself is
   only exercised through the mocked SDK, as in earlier slices.
 
-**Phase 9 is complete.** Remaining on the roadmap: **Phase 8's later slices** (BAS/GST,
-STP lodgement, award interpretation and the other compliance features) and **Phase 10**
+**Phase 9 is complete.** Remaining on the roadmap: **Phase 8's later items** (BAS/GST preparation and payroll operations are now built, see
+Phase 8 Slices 2-3; STP lodgement, award interpretation and the withholding refinements listed in Slice 4 remain) and **Phase 10**
 (public API, webhooks, integration marketplace, advanced automation centre).
 
 ## Platform admin & seat limit — complete

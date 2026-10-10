@@ -156,6 +156,10 @@ the same transaction.
 - Object storage (receipts, documents): deferred to Phase 2 (Document AI).
 - Background jobs/queue: deferred to Phase 2.
 
+## 9a. BAS preparation (Phase 8 Slice 2): per-view database budget
+
+`src/domain/tax/bas-calculations.ts` is pure (classification, label sums, reconciliation, canonical hash). `bas-service.ts` reads inside ONE `withTenant` transaction, strictly sequentially (no `Promise.all`, no extra connections, nothing added to the shared layout or `withTenant`). Measured at the driver (`src/tests/integration/tax/query-budget.test.ts`, BEGIN / set_config / COMMIT included, one scoped transaction, `maxActive` 1): a BAS view (draft OR finalised - a finalised view recomputes once for the drift check) is **17 statements**, the BAS list **4**, a payslip list **4**, one payslip **6**, the payroll summary report **4**, the leave list **4**. The test asserts these counts do **not** change when the data grows from 1 to 13 invoice/bill pairs. CSV export = one BAS view. The pay run detail page adds the payment list, the net wages position and the bank-account list (three short transactions, run one after another).
+
 ## 10. What Phase 1 deliberately does not include
 
 Banking, invoicing, payroll, inventory, AI agents, reporting engine, and

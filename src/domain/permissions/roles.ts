@@ -74,6 +74,24 @@ export const PERMISSIONS = [
   "payrun:read",
   "payrun:manage",
   "payrun:post",
+  // Phase 8 Slice 2 (BAS / GST preparation). `bas:read` views prepared statements, drill-downs and the CSV;
+  // `bas:manage` prepares/discards DRAFTs; `bas:finalise` snapshots a BAS immutably and records a lodgement made
+  // OUTSIDE Money Matters (human-only, never reachable by AI/API/automation actors).
+  "bas:read",
+  "bas:manage",
+  "bas:finalise",
+  // Phase 8 Slice 3 (payroll operations). `payslip:read` lets any member read THEIR OWN payslips (the service matches
+  // the linked employee record's user id; only `employee:manage` holders see anyone else's). `leave:request` files
+  // leave for oneself, `leave:read` sees everyone's requests, `leave:approve` decides them (never one's own).
+  // `payroll_payment:manage` records net-wage settlements and super/PAYG remittances and generates the ABA file;
+  // `payrun:reverse` reverses a posted pay run.
+  "payslip:read",
+  "leave:request",
+  "leave:read",
+  "leave:approve",
+  "payroll_payment:read",
+  "payroll_payment:manage",
+  "payrun:reverse",
   "budget:read",
   "budget:manage",
   "forecast:read",
@@ -217,6 +235,15 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     // ADMINISTRATOR — see docs/security.md.
     "employee:read",
     "payrun:read",
+    "bas:read",
+    "bas:manage",
+    "bas:finalise",
+    "payslip:read",
+    "leave:request",
+    "leave:read",
+    "payroll_payment:read",
+    "payroll_payment:manage",
+    "payrun:reverse",
     "budget:read",
     "budget:manage",
     "forecast:read",
@@ -293,6 +320,12 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "fixed_asset:manage",
     "employee:read",
     "payrun:read",
+    // A bookkeeper prepares a BAS draft for the accountant but cannot finalise it.
+    "bas:read",
+    "bas:manage",
+    "payslip:read",
+    "leave:request",
+    "payroll_payment:read",
     "budget:read",
     "budget:manage",
     "forecast:read",
@@ -308,6 +341,8 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "automation:read",
   ]),
   ACCOUNTS_RECEIVABLE: new Set<Permission>([
+    "payslip:read",
+    "leave:request",
     "account:read",
     "journal:read",
     "contact:read",
@@ -333,6 +368,8 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "inventory:read",
   ]),
   ACCOUNTS_PAYABLE: new Set<Permission>([
+    "payslip:read",
+    "leave:request",
     "account:read",
     "journal:read",
     "contact:read",
@@ -387,8 +424,19 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "payrun:read",
     "payrun:manage",
     "payrun:post",
+    "payrun:reverse",
+    "payslip:read",
+    "leave:request",
+    "leave:read",
+    "leave:approve",
+    "payroll_payment:read",
+    "payroll_payment:manage",
   ]),
   MANAGER: new Set<Permission>([
+    "payslip:read",
+    "leave:request",
+    "leave:read",
+    "leave:approve",
     "account:read",
     "journal:read",
     "financial_report:read",
@@ -427,6 +475,8 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "automation:read",
   ]),
   EMPLOYEE: new Set<Permission>([
+    "payslip:read",
+    "leave:request",
     "expense_claim:read",
     "expense_claim:manage",
     "expense_receipt:manage",
@@ -435,6 +485,7 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "timesheet:manage",
   ]),
   READ_ONLY: new Set<Permission>([
+    "payslip:read",
     "account:read",
     "journal:read",
     "financial_report:read",
