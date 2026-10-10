@@ -4,9 +4,275 @@ The financial operating system for business — an AI-assisted accounting
 platform combining accounting, banking, payroll, tax, billing, expenses,
 inventory, projects, and forecasting in one product.
 
-This repository is at **Phase 1: Financial Foundation** — see
-[`docs/roadmap.md`](docs/roadmap.md) for what's built and what's next, and
-[`docs/architecture.md`](docs/architecture.md) for how it's put together.
+Phase 1 (Financial Foundation), Phase 2 (banking — bank import/
+reconciliation/rules plus AI-assisted fuzzy reconciliation, Document AI
+receipt/invoice capture, employee expense claims), Phase 3 (sales —
+customer invoicing & AR core plus quotes, recurring invoicing, and a
+deterministic Collection Priority Score), and Phase 4 (purchases —
+supplier bills & Accounts Payable core plus purchase orders with
+three-way matching, recurring bills, supplier credits, and payment runs
+with segregation-of-duties approval) are all complete, each as a core
+slice plus one extension slice, and Phase 5 (Reporting) has two slices:
+Profit & Loss, Balance Sheet, and a Cash Flow Statement (indirect method),
+each with comparison periods, CSV export, and drill-down from every line
+down to its source invoice/bill/expense claim; plus dimensional reporting
+(tag a journal line with a project/location/department and filter any
+report by it), a configurable Report Builder (rows/columns/measures/
+filters/comparison periods, saved as personal or organization-wide
+queries that always re-run against fresh data), natural-language
+reporting (ask a plain-English question — Claude translates it into a
+structured query, the same deterministic report-builder engine computes
+the answer, it never calculates anything itself), and an on-demand
+management report pack (all three statements plus a short AI commentary).
+Phase 6 Slice 1 adds the AI Financial Controller — a conversational
+assistant over a fixed set of read-only, permission-checked tools (trial
+balance, P&L, balance sheet, aged receivables/payables, invoice/bill/
+expense-claim lookup, and the report builder) — and an on-demand Daily
+Finance Brief (cash position, money in/out due in the next 7 days, overdue
+receivables/payables, payments awaiting approval). Phase 6 Slice 2 adds an
+org-level AI autonomy setting (master spec §8; Level 0/1 information-only
+by default, Level 2 "prepare" an explicit opt-in), three write-capable
+tools that PREPARE — never create or post — a draft invoice, bill, or
+journal entry, always behind a separate, explicit human confirmation step
+before anything is written to the database, and four specialist agent
+modes (Bookkeeping, AR, AP, FP&A) as scoped tool subsets/system prompts
+over the same Controller loop. Phase 6 Slice 3 extends the autonomy
+setting to the full 0-4 range: Levels 3-4 let the AI auto-execute (no
+confirmation click) a narrow, organization-whitelisted set of actions —
+auto-generating a due recurring invoice/bill, or auto-confirming an exact,
+same-day bank reconciliation match — while supplier payments, bank
+details, payroll, tax, unusual journals, and period closes stay
+human-gated at every level, with no exception. Phase 7 Slice 1 adds
+Projects/Jobs & Time Tracking: projects with a budget and a default billing
+rate, flat per-project tasks, a start/stop timer and manual time entry on
+the same underlying row, a single-approver submit/approve/reject workflow,
+and the integration master spec §23 asks for — "create invoice from
+unbilled time" pulls approved, billable, not-yet-invoiced hours straight
+into a draft invoice through the exact same `InvoiceService.create` path as
+any other invoice, marking each entry INVOICED so a second run can never
+double-bill it — plus a live Estimated-vs-Actual project profitability view
+computed from posted invoice/bill/expense-claim lines, never cached data.
+Phase 7 Slice 2 adds a scoped-down Inventory core: a product catalog
+(tracked-inventory vs. non-inventory/service items sharing one catalog and
+line-item UI), single-location perpetual weighted-average costing — buying
+stock via a bill recomputes the average cost, selling stock via an invoice
+posts COGS in the SAME journal entry as the sale's revenue (never a
+separate periodic process), an oversell is always refused rather than
+back-ordered, manual stock adjustments always post a journal and require a
+reason, an Inventory Valuation report that reconciles exactly against the
+GL's own inventory-asset balance, and deterministic reorder-point
+alerting. Multi-warehouse tracking, FIFO costing, serial/lot tracking,
+landed costs, bundles/kits, and sales-velocity stockout forecasting are
+explicitly deferred — see `docs/roadmap.md` for the full list and why.
+Phase 7 Slice 3 — the last piece of Phase 7 — adds Fixed Assets: an asset
+register (asset classes as simple depreciation-default templates, assets
+registered either standalone or from a posted bill line already coded to
+the asset account — the register itself never posts the acquisition, since
+whichever path was used already did), on-demand straight-line depreciation
+runs (one combined journal per calendar month, idempotent per asset per
+period — running the same month twice never double-posts), and one-way
+disposal/write-off that recognizes a gain or loss via the normal posting
+path. A Fixed Asset Register report reconciles exactly against the GL, the
+same correctness-check discipline as inventory's valuation report.
+Declining-balance and other depreciation methods, asset-transfer workflows,
+and automatic/scheduled depreciation runs are explicitly deferred — see
+`docs/roadmap.md` for the full list and why.
+
+Phase 8 Slice 1 adds the AU payroll foundation: an effective-date-controlled
+tax/super rule engine (two seeded financial years, FY2025-26 and
+FY2026-27, with every rate/threshold verified against ato.gov.au and cited
+in the data itself), employee records with TFN/bank details handled like a
+password (redacted from the audit log, masked to last-4 for any role
+without `employee:manage`), PAYG withholding via the ATO's acknowledged
+annualized-bracket approximation method, superannuation guarantee with the
+quarterly contribution-base cap correctly tracked across pay runs, NES
+annual/personal leave accrual, on-demand DRAFT-then-POST pay runs that post
+one combined journal through `PostingService`, and an STP Phase 2-shaped
+report that is clearly labelled as never actually submitted to the ATO.
+Payday Super's FY2026-27 mechanics and the ATO's published NAT 1004
+per-period coefficient tables were explicitly left unresolved rather than
+guessed at — see `docs/roadmap.md` for the full, honest list of what was
+verified vs. deferred, and note that a registered tax agent or payroll
+provider should verify this software's output before it is used for real
+employee payroll.
+
+Phase 8 Slice 2 adds BAS / GST preparation (preparation only - nothing is
+lodged with the ATO, and every output requires registered tax agent / BAS agent
+review): tax codes are classified for the BAS, and a month/quarter BAS worksheet
+(G1, G2, G3, G10, G11, 1A, 1B, W1, W2) is derived from posted invoices, bills,
+supplier credits, expense claims and pay runs on an accrual basis, with
+drill-down to every source transaction, a reconciliation to the GST control
+accounts (variance shown, never plugged), a human-only finalise that snapshots
+the figures immutably with a content hash, a "lodged outside Money Matters"
+record, and a CSV export. Unclassified items are listed, never guessed.
+
+Phase 8 Slice 3 completes payroll operations: printable payslips (an employee
+sees only their own; payroll managers see all), "pay the net wages" settlement,
+record-only super and PAYG remittances, pay run reversal, a leave request and
+approval workflow (approved leave is deducted when the pay run posts), payroll
+summary / PAYG / super-liability / leave-liability reports with CSV, and an ABA
+(Direct Entry) bank file generator whose layout was verified against two
+sources. Nothing is paid or lodged by Money Matters itself.
+
+Phase 8 Slice 4 resolves the FY2026-27 Payday Super mechanics (a new version of
+the rule set: super calculated every payday against an annual contribution base,
+with a conservative per-payday "received by the fund" date; the quarterly path
+stays as a labelled legacy option), verifies the Medicare levy shade-in, and adds
+foreign resident withholding rates. HELP/STSL, LITO, working holiday makers,
+the no-TFN rate, the no-tax-free-threshold schedule and the ATO per-period
+coefficient tables were NOT built because their figures could not be
+cross-verified; `docs/roadmap.md` lists exactly what is missing for each.
+
+Phase 9 Slice 1 adds the budgeting core: baseline/revised-forecast/
+rolling-forecast budgets with monthly line items by GL account (optionally
+scoped to a dimension value), a Budget vs. Actual report built on the
+exact same GL-aggregation query every other financial statement uses (so
+it reconciles correctly, including an account with a budget line and no
+actual activity, or actual activity with no budget line), an on-demand
+rolling-forecast action that copies a budget's lines forward from a
+chosen cutoff date, and a real Budget vs. Actual section in the
+Management Report Pack.
+
+Phase 9 Slice 2 adds cash flow intelligence and scenario modelling. The
+Cash Forecast projects your cash balance 7/30/60/90 days and 12 months out
+as TWO separate series — known commitments only (open invoices and bills,
+payment runs, recurring templates) and including statistical projections
+(simple averages like a customer's own historical lateness) — and warns,
+with a date, when either dips below a threshold you set. Scenarios model
+hiring someone, changing prices, or losing a customer as Best / Expected /
+Worst built from explicit, editable assumptions (never predictions). Both
+are analysis only and never post to the ledger; the AI Financial Controller
+gains a read-only `cash_forecast` tool.
+
+Phase 9 Slice 3 adds the Month-End Close workspace and the period-lock
+override workflow. Periods carry a lock level (open, soft, advisor, tax,
+hard); a soft lock can be posted into inline by an accountant-level role with a
+recorded reason, tax and hard locks only through the audited reopen workflow
+(reason required; only an owner or administrator can reopen those), and every
+lock change is appended to a history table the application role cannot edit.
+`/accounting/close` shows a live checklist per month — bank reconciliation,
+draft documents, depreciation, inventory and fixed-asset reconciliation, trial
+balance and Balance Sheet checks, suspense accounts — plus manual sign-offs that
+are always labelled as a person's attestation, never system verification.
+Closing is human-only: the AI Financial Controller gains a read-only
+`close_status` tool but no way to close, lock or reopen anything.
+
+Phase 9 Slice 4 adds multi-entity accounting and consolidation. A user who
+belongs to several organizations can build an *entity group* (up to 10
+entities) and view a consolidated Profit & Loss, Balance Sheet and cash
+position at `/app/groups`, with a column per entity, a combined column, an
+eliminations-and-adjustments column and the consolidated total; drill-down
+lands on each entity's own account page. Intercompany accounts are matched with
+a named counterparty and eliminated, and any mismatch is reported rather than
+forced to zero. Consolidation never weakens row-level security: it is computed
+in the application, one entity at a time, using the user's real role in each
+entity — an entity they cannot read is left out and reported as "N entities
+excluded — no access", including from the AI Financial Controller's new
+read-only `consolidated_report` tool. A topbar switcher lets a multi-company
+user jump between companies. Groups of mixed base currencies are refused (no
+translation yet).
+
+Phase 9 Slice 5 adds accountant practice management and workpapers, which
+**closes out Phase 9**. Any registered user can set up a *practice* at
+`/practice` (partner / manager / staff roles) and link client organizations
+through a two-sided handshake: the practice proposes by organization slug and
+the client's owner or administrator accepts — and can revoke at any moment,
+effective on the very next read. A link grants no access by itself; staff read
+a client only as real members of it, with their own role there, one client at a
+time. The practice dashboard (Client | Books | Reconciliation | BAS/Tax |
+Payroll | Issues | Assigned to | Snapshot age, worst first, 10 per page) is read
+from saved snapshots that a Refresh updates sequentially, so it stays inside the
+database connection budget. Also built: client groups, staff assignment, bulk
+actions, practice tasks, a tax calendar of rules the practice writes itself (no
+ATO dates are hardcoded and there is no BAS/GST feature yet), client queries and
+document requests that appear in the client's own "Requests from your
+accountant" inbox, and digital workpapers (balance-sheet account
+reconciliation with an exact-decimal difference, evidence, review notes,
+preparer and reviewer sign-off with segregation of duties, immutability once
+signed off, and carry-forward) that never write to the client's ledger. A
+Business | Accountant toggle changes terminology and shows the Practice entry
+points (presentation only), and the AI Financial Controller gains read-only
+`practice_overview` and `workpaper_status` tools. See `docs/security.md` §13
+and `docs/roadmap.md`.
+
+Phase 10 Slice 1 adds the **public developer API foundation**: versioned REST
+endpoints under `/api/v1` for approved server-to-server integrations, authenticated
+by **API keys** (Settings -> API access; Owner/Administrator only). A key reads
+customers, suppliers, accounts, invoices, bills, payments, journal entries and the P&L,
+balance sheet and trial balance, and can create **draft** invoices, bills, customers
+and suppliers - it can never post, approve, void, pay or delete anything, and it
+cannot reach payroll, period close, team/role management, AI settings or key
+management. A key's power is its scopes **intersected with its creator's current
+role**, re-evaluated on every request (demote or remove the creator and the key
+shrinks or dies at once). Every request runs inside `withTenant(<the key's
+organization>)` as the restricted database role - no RLS change. Cursor
+pagination, `Idempotency-Key` (required for invoice/bill creation; two simultaneous
+identical POSTs create one invoice), per-key rate limits with `X-RateLimit-*` /
+`Retry-After`, RFC 7807 errors, and a generated OpenAPI 3.1 document at
+`/api/v1/openapi.json`. (OAuth for third-party apps arrived in Slice 4, below.) See [`docs/api.md`](docs/api.md), `docs/security.md` section 15 and
+`docs/roadmap.md`.
+
+Phase 10 Slice 2 adds **webhooks on a durable transactional outbox**: business events
+(`customer.created`, `supplier.created`, `invoice.created`, `invoice.sent`,
+`invoice.paid`, `payment.received`, `bill.created`, `bill.approved`) are written to a
+`domain_events` table in the **same transaction** as the change, and delivered to
+subscriber URLs (Settings -> Webhooks; Owner/Administrator humans only) as signed
+(HMAC-SHA256, timestamped) JSON that is exactly the public API's object for the
+resource. Delivery is at-least-once with exponential backoff, a circuit breaker, a
+delivery log, replay and a test event. There is **no scheduler**: retries run on demand
+("Send now") and best-effort right after the request that caused the event. Every
+delivery goes through an SSRF guard (https/443 only, every resolved address must be
+public, the connection is pinned to the validated IP, no redirects, TLS verified).
+Signing secrets are AES-256-GCM encrypted with `WEBHOOK_SECRET_ENCRYPTION_KEY` (see
+below) and webhooks are simply off without it. See [`docs/api.md`](docs/api.md)
+(Webhooks), `docs/architecture.md` section 12 and `docs/security.md` section 16.
+
+Phase 10 Slice 3 adds the **Automation Centre and the integration framework**. Settings -> Automation lets an Owner or
+Administrator define rules of the form *WHEN something happens AND conditions hold THEN a safe action runs* from **closed
+lists** (11 triggers - the eight webhook events plus overdue invoices, bills due soon and stock at its reorder point - and four
+actions: an in-app notification, a short message to a connected Slack channel, an `automation.triggered` webhook event, and a
+**draft** purchase order). There is no scripting, no expression language and no scheduler: rules run on demand ("Run automations
+now"), right after a change, and whenever webhook events are sent. Automations run as a separate non-human actor whose permissions
+are the action's needs intersected with the approving person's *current* role, so they can never post, approve, void, pay, close a
+period or change access; each run is logged (append-only), every rule can be paused, "Pause all automations" is an emergency
+switch, and a rule whose approver leaves is switched off by itself. Notifications have their own page (`/<org>/notifications`).
+Settings -> Integrations holds the provider framework: one real provider (a Slack incoming webhook, restricted to `hooks.slack.com`
+on top of the SSRF guard, credential stored encrypted and never shown again) and an honest "coming soon" list for the rest. See
+`docs/security.md` sections 18-19, `docs/architecture.md` section 13 and `docs/roadmap.md`.
+
+**Organisation lifecycle & joining.** A signed-in user can **create another company** under the same login (chooser or
+company switcher; up to 5 active owned companies) and **join a company with an invite code**. An Owner or Administrator
+creates the invite in Settings -> Team (an email + role; the one-time `mmj_...` code is shown once and passed on out of band -
+there is no email delivery or verification, so codes, not email-bound invites, are the safe design); the invitee enters it on
+the chooser ("Join a company") or the sign-up form, and it works once, only for the matching email, within 7 days. An Owner can
+**archive** a company (Settings -> Danger zone; type the company name, acknowledge, give a reason) and restore it from the
+chooser; the platform admin can archive/restore with a reason. Archive is **reversible and deletes nothing** - while archived
+nobody (including API keys, webhooks and automations) can reach the company, and a restore returns it exactly as it was.
+**Permanent deletion is deliberately not built**: it is a manual, DBA-level procedure outside the app, described with strong
+warnings (and no script) in [`docs/operations.md`](docs/operations.md). See `docs/security.md` section 17.
+
+**OAuth 2.0 for third-party apps (Phase 10 Slice 4).** Instead of handing an app an API key, an Owner or Administrator registers it under
+Settings -> Connected apps (a name, exact redirect URIs, the most scopes it may ask for; public or confidential, with a client secret
+shown once) and each person who wants to use it approves it on a **consent screen** - the authorization-code grant with **PKCE (S256,
+required)**, `state`, one-hour opaque access tokens and 30-day **rotating** refresh tokens (reusing a rotated one revokes the whole
+authorisation), RFC 7009 revocation and RFC 8414 discovery at `/.well-known/oauth-authorization-server`. The scopes are the same ten as API
+keys; a token can do **only what its scopes allow and the approving person's current role allows**, recomputed on every request (demote,
+remove or suspend them and it shrinks or stops at once), creates **drafts only**, and can never post, approve, void, pay, delete or reach
+anything administrative. An app belongs to one company and can only be authorised into it. People see and remove the apps they have
+authorised under "Authorised apps" (`/app/authorised-apps`); Owners and Administrators can revoke any. No new environment variable.
+See [`docs/api.md`](docs/api.md) section 1a, `docs/security.md` section 20, `docs/architecture.md` section 14 and `docs/roadmap.md`.
+
+See
+[`docs/roadmap.md`](docs/roadmap.md) for exactly what's built
+vs. explicitly deferred in each phase (a customer portal, AI-drafted
+collection reminders, a live bank feed provider, Stripe, a background job
+queue, a Redis cache, real bank-file/payment-rail integration, full
+inventory-backed goods receiving, PDF/Excel export, and a configurable
+fiscal-year start all need either infrastructure that doesn't exist yet,
+external accounts/credentials this environment doesn't have, or are next up
+on top of what's built so far).
+See [`docs/architecture.md`](docs/architecture.md) for how it's put
+together.
 
 ## Stack
 
@@ -78,6 +344,7 @@ read Production-scoped variables):
 | `DIRECT_DATABASE_URL` | The Supabase **Session pooler** connection string (admin role). Migrations use it. |
 | `MM_APP_DB_PASSWORD` | Any password you choose for the restricted `mm_app` role. Alphanumeric avoids all URL-encoding questions. |
 | `NEXTAUTH_SECRET` | `openssl rand -base64 32`. Keep it stable — changing it invalidates every session. |
+| `PLATFORM_ADMIN_EMAILS` | Comma-separated emails allowed into the platform admin section (`/admin`) — for this deployment `typhoon.tall69@gmail.com`. Compared case-insensitively. **Unset or empty means nobody is an admin.** Register that account yourself first: there is no email verification (see `docs/security.md` §10). |
 
 Leave `DATABASE_URL` **unset**. The application's connection is derived from
 `MM_APP_DB_PASSWORD` plus the host and database in `DIRECT_DATABASE_URL`, so
@@ -91,6 +358,47 @@ but while `MM_APP_DB_PASSWORD` is set the role and password are always
 `mm_app`'s: an admin connection string here would run the whole application
 with row-level security disabled, so it is redirected rather than honoured,
 with a warning in the build log saying so.
+
+Optionally, set `ANTHROPIC_API_KEY` to turn on every AI-assisted feature in
+this codebase: the onboarding wizard's chart-of-accounts classification,
+AI-assisted fuzzy bank reconciliation, Document AI receipt/invoice
+extraction, natural-language reporting, the management report pack's
+commentary, the AI Financial Controller, and the Daily Finance Brief's
+summary paragraph (see `docs/ai-agents.md`). All of these are entirely
+optional — with it unset, each falls back silently (a deterministic
+classifier, no AI suggestions section, a blank draft to fill in manually,
+"natural-language reporting/the AI Financial Controller isn't available
+right now", no commentary/summary paragraph) with no loss of core
+functionality and no network call:
+
+| Variable | Value |
+|---|---|
+| `ANTHROPIC_API_KEY` | An Anthropic API key. Server-side only — never exposed to the client. |
+| `ANTHROPIC_ONBOARDING_MODEL` | Defaults to `claude-haiku-4-5-20251001` if unset. |
+| `ANTHROPIC_RECONCILIATION_MODEL` | Defaults to `claude-haiku-4-5-20251001` if unset. |
+| `ANTHROPIC_DOCUMENT_AI_MODEL` | Defaults to `claude-sonnet-4-5-20250929` if unset (vision extraction benefits from a stronger model than the other two classification-only calls). |
+| `ANTHROPIC_NL_REPORTING_MODEL` | Defaults to `claude-haiku-4-5-20251001` if unset. |
+| `ANTHROPIC_MANAGEMENT_PACK_MODEL` | Defaults to `claude-haiku-4-5-20251001` if unset. |
+| `ANTHROPIC_CONTROLLER_MODEL` | Defaults to `claude-sonnet-4-5-20250929` if unset (the Financial Controller's multi-turn tool-use reasoning benefits from a stronger model than the single-shot classification calls above). |
+| `ANTHROPIC_DAILY_BRIEF_MODEL` | Defaults to `claude-haiku-4-5-20251001` if unset. |
+
+Optionally, set `WEBHOOK_SECRET_ENCRYPTION_KEY` to turn on **webhooks** (Phase 10
+Slice 2) **and integration connections** (Slice 3 - the same key also encrypts, e.g., a
+Slack incoming-webhook URL; no new variable). Webhook signing secrets and integration
+credentials must be stored recoverably (signing and sending need the raw value), so they
+are encrypted at rest under this key, which lives only in the environment. **Fail
+closed:** unset or invalid means webhooks and integrations are disabled with a clear
+message in Settings -> Webhooks / Integrations; the build and the rest of the app,
+including automations that do not send to a channel, are unaffected (the build log shows
+an optional-feature *note*, not a warning). Keep it stable - changing
+or losing it makes stored secrets undecryptable (rotate each subscription's secret to
+recover):
+
+| Variable | Value |
+|---|---|
+| `WEBHOOK_SECRET_ENCRYPTION_KEY` | 32 random bytes, base64: `openssl rand -base64 32`. Server-side only. |
+| `WEBHOOK_SECRET_ENCRYPTION_KEY_VERSION` | Optional, 1-255 (default 1): the version stamped on new ciphertexts, for key rotation. |
+| `WEBHOOK_SECRET_ENCRYPTION_KEY_V<n>` | Optional: an older key (version `n`) kept so existing ciphertexts still decrypt after a rotation. |
 
 Deploy. `npm run build` runs `npm run db:migrate:ci` first, which applies the
 schema and RLS policies, provisions the `mm_app` role, and then **connects
@@ -183,7 +491,28 @@ application code forgets a filter — see
 - [`docs/architecture.md`](docs/architecture.md) — system architecture
 - [`docs/accounting-engine.md`](docs/accounting-engine.md) — the double-entry posting engine's invariants
 - [`docs/database.md`](docs/database.md) — schema conventions, RLS, a Drizzle/Postgres pitfall worth reading before touching money-bearing queries
-- [`docs/security.md`](docs/security.md) — tenant isolation, auth, threat model
-- [`docs/ai-agents.md`](docs/ai-agents.md) — the AI layer's architecture (not yet implemented)
+- [`docs/security.md`](docs/security.md) — tenant isolation, auth, threat model (section 15: API keys; section 20: OAuth)
+- [`docs/api.md`](docs/api.md) — the public developer API (v1): authentication (API keys and OAuth 2.0), scopes, pagination, idempotency, errors, endpoints
+- [`docs/ai-agents.md`](docs/ai-agents.md) — the AI layer's architecture: the AI Financial Controller foundation (Phase 6 Slice 1), the autonomy-level gate, prepare/confirm write tools, and specialist-agent modes (Phase 6 Slice 2), and the full 0-4 autonomy dial with whitelisted auto-execution, undo, and an emergency stop (Phase 6 Slice 3). Payroll/Tax specialist agents are not yet built — see that doc and `docs/roadmap.md` for why
 - [`docs/roadmap.md`](docs/roadmap.md) — phase-by-phase status
 - [`docs/decisions/`](docs/decisions/) — ADRs for the non-obvious technical calls
+
+## Platform admin and seat limit
+
+- `/admin` (platform dashboard, organization/user directory, seat-limit and
+  plan-tier controls, member role changes, user suspension, admin audit log)
+  is visible only to the email(s) in `PLATFORM_ADMIN_EMAILS`; everyone else
+  gets a 404. It reads platform-level tables only and never any customer's
+  books. Details: `docs/security.md` §10, `docs/roadmap.md`.
+- Each account (organization) can currently be shared by **2 people** (its
+  `seat_limit`); more will be a paid add-on later. A platform admin can raise
+  an organization's limit from `/admin/organizations/<id>`.
+
+## Sharing a company file
+
+To let a second person look at the books at the same time as you, open **Settings -> Team**,
+add their email (they must already have registered) and keep the default role **Read only**:
+they can open invoices, reports and accounts but cannot change anything, and a banner tells
+them so. Giving a role that can edit asks for an explicit confirmation. Each company file
+has 2 seats by default; the platform administrator can raise that. See
+`docs/security.md` section 14.

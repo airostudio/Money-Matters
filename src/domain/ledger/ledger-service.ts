@@ -3,7 +3,8 @@ import { accounts, contacts, journalEntries, journalLines, organizations, taxCod
 import { withTenant, type TenantDb } from "@/db/tenant";
 import { Money } from "@/domain/money/money";
 import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
-import type { AccountType } from "@/domain/accounts/account-service";
+import { AccountNotFoundError, type AccountType } from "@/domain/accounts/account-service";
+import { sumPostedActivityByAccount } from "./gl-aggregation";
 
 /**
  * Loads lines for a set of entries via an explicit join, NOT Drizzle's
@@ -65,74 +66,104 @@ export function normalBalanceSide(type: AccountType): "DEBIT" | "CREDIT" {
   return type === "ASSET" || type === "EXPENSE" ? "DEBIT" : "CREDIT";
 }
 
+async function trialBalanceWithCurrency(
+  actor: Actor,
+  asOfDate: Date,
+): Promise<{ currency: string; rows: TrialBalanceRow[] }> {
+  assertPermission(actor, "journal:read");
+  return withTenant(actor.organizationId, async (tx) => {
+    const [org] = await tx
+      .select({ baseCurrency: organizations.baseCurrency })
+      .from(organizations)
+      .where(eq(organizations.id, actor.organizationId));
+    const baseCurrency = org?.baseCurrency ?? "AUD";
+
+    // A REVERSED entry is still permanent ledger history — its lines stay
+    // in every balance calculation. Only its NEW reversal entry's
+    // opposite postings cancel the effect out. See
+    // docs/accounting-engine.md §1 and `sumPostedActivityByAccount`'s own
+    // comment, the shared helper this and every Phase 5 financial
+    // statement query build on.
+    const aggregated = await sumPostedActivityByAccount(tx, actor.organizationId, { to: asOfDate });
+
+    const rows = aggregated.map((row) => {
+      const debit = Money.of(row.totalDebit, baseCurrency);
+      const credit = Money.of(row.totalCredit, baseCurrency);
+      const side = normalBalanceSide(row.type);
+      const balance = side === "DEBIT" ? debit.subtract(credit) : credit.subtract(debit);
+      return {
+        accountId: row.accountId,
+        code: row.code,
+        name: row.name,
+        type: row.type,
+        balance: balance.toString(),
+        totalDebit: debit.toString(),
+        totalCredit: credit.toString(),
+      };
+    });
+    return { currency: baseCurrency, rows };
+  });
+}
+
 export const LedgerService = {
   /**
-   * Every account in the organization with its posted, as-of-date activity
-   * summed in the base currency — the foundation for the Trial Balance
-   * report and for account balance displays throughout the UI.
+   * ONE account's posted balance as at `asOfDate`, in the base currency and in the account's
+   * normal direction (positive = in the direction it normally carries), with the same rules as
+   * the Trial Balance (every non-DRAFT entry counts, REVERSED included). A single set-based
+   * aggregate over that account's lines — the cheap check an accountant's workpaper uses to see
+   * whether the ledger has moved since a snapshot. Gated on `journal:read`.
    */
-  async getTrialBalance(actor: Actor, asOfDate: Date = new Date()): Promise<TrialBalanceRow[]> {
+  async getAccountBalance(
+    actor: Actor,
+    accountId: string,
+    asOfDate: Date,
+  ): Promise<{ accountId: string; code: string; name: string; type: AccountType; currency: string; balance: string }> {
     assertPermission(actor, "journal:read");
     return withTenant(actor.organizationId, async (tx) => {
+      const [account] = await tx
+        .select({ id: accounts.id, code: accounts.code, name: accounts.name, type: accounts.type })
+        .from(accounts)
+        .where(and(eq(accounts.id, accountId), eq(accounts.organizationId, actor.organizationId)));
+      if (!account) throw new AccountNotFoundError(accountId);
       const [org] = await tx
         .select({ baseCurrency: organizations.baseCurrency })
         .from(organizations)
         .where(eq(organizations.id, actor.organizationId));
-      const baseCurrency = org?.baseCurrency ?? "AUD";
-
-      const postedLines = tx
+      const currency = org?.baseCurrency ?? "AUD";
+      const [sums] = await tx
         .select({
-          accountId: journalLines.accountId,
-          baseDebit: journalLines.baseDebit,
-          baseCredit: journalLines.baseCredit,
+          debit: sql<string>`coalesce(sum(${journalLines.baseDebit}), 0)`,
+          credit: sql<string>`coalesce(sum(${journalLines.baseCredit}), 0)`,
         })
         .from(journalLines)
         .innerJoin(journalEntries, eq(journalEntries.id, journalLines.journalEntryId))
         .where(
           and(
             eq(journalEntries.organizationId, actor.organizationId),
-            // A REVERSED entry is still permanent ledger history — its
-            // lines stay in every balance calculation. Only its NEW
-            // reversal entry's opposite postings cancel the effect out.
-            // DRAFT is the only status with no ledger effect. See
-            // docs/accounting-engine.md §1.
+            eq(journalLines.accountId, accountId),
             ne(journalEntries.status, "DRAFT"),
             lte(journalEntries.postingDate, asOfDate),
           ),
-        )
-        .as("posted_lines");
-
-      const aggregated = await tx
-        .select({
-          accountId: accounts.id,
-          code: accounts.code,
-          name: accounts.name,
-          type: accounts.type,
-          totalDebit: sql<string>`coalesce(sum(${postedLines.baseDebit}), 0)`,
-          totalCredit: sql<string>`coalesce(sum(${postedLines.baseCredit}), 0)`,
-        })
-        .from(accounts)
-        .leftJoin(postedLines, eq(postedLines.accountId, accounts.id))
-        .where(eq(accounts.organizationId, actor.organizationId))
-        .groupBy(accounts.id, accounts.code, accounts.name, accounts.type)
-        .orderBy(accounts.code);
-
-      return aggregated.map((row) => {
-        const debit = Money.of(row.totalDebit, baseCurrency);
-        const credit = Money.of(row.totalCredit, baseCurrency);
-        const side = normalBalanceSide(row.type);
-        const balance = side === "DEBIT" ? debit.subtract(credit) : credit.subtract(debit);
-        return {
-          accountId: row.accountId,
-          code: row.code,
-          name: row.name,
-          type: row.type,
-          balance: balance.toString(),
-          totalDebit: debit.toString(),
-          totalCredit: credit.toString(),
-        };
-      });
+        );
+      const debit = Money.of(sums?.debit ?? "0", currency);
+      const credit = Money.of(sums?.credit ?? "0", currency);
+      const balance = normalBalanceSide(account.type) === "DEBIT" ? debit.subtract(credit) : credit.subtract(debit);
+      return { accountId: account.id, code: account.code, name: account.name, type: account.type, currency, balance: balance.toString() };
     });
+  },
+
+  /**
+   * Every account in the organization with its posted, as-of-date activity
+   * summed in the base currency — the foundation for the Trial Balance
+   * report and for account balance displays throughout the UI.
+   */
+  async getTrialBalance(actor: Actor, asOfDate: Date = new Date()): Promise<TrialBalanceRow[]> {
+    return (await trialBalanceWithCurrency(actor, asOfDate)).rows;
+  },
+
+  /** The same trial balance together with the base currency its amounts are in (the public API needs both in one transaction). */
+  async getTrialBalanceWithCurrency(actor: Actor, asOfDate: Date = new Date()) {
+    return trialBalanceWithCurrency(actor, asOfDate);
   },
 
   async listJournalEntries(actor: Actor, opts: { limit?: number; offset?: number } = {}) {

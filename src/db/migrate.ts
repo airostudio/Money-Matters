@@ -9,7 +9,8 @@ import {
   resolveConnection,
   type ResolvedConnection,
 } from "./connection";
-import { checkRuntimeEnv, formatEnvProblems } from "@/lib/runtime-env";
+import { auditTableSecurity } from "./isolation-audit";
+import { checkOptionalFeatures, checkRuntimeEnv, formatEnvProblems, formatOptionalFeatureNotes } from "@/lib/runtime-env";
 
 const SAFE_PASSWORD_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -118,104 +119,6 @@ async function ensureAppRolePassword(pool: Pool, connection: ResolvedConnection)
   console.log("Prefer not to have a password in a build log? Set MM_APP_DB_PASSWORD to a");
   console.log("value you choose instead and redeploy — it is applied without being printed.");
   console.log("=========================================================\n");
-}
-
-/**
- * Tables that legitimately carry `organization_id` without a tenant-isolation
- * policy.
- *
- * `organization_memberships` is the join that *answers* "which organizations
- * is this user in?", and the session has no current organization until it has
- * been answered — a policy keyed on `app.current_org_id` would make the
- * lookup that establishes the org depend on the org already being
- * established. Isolation for it is enforced in the application layer (a
- * session only ever reads its own memberships) and covered by
- * src/tests/integration/tenant-isolation.test.ts.
- */
-const RLS_EXEMPT_TABLES = new Set(["organization_memberships"]);
-
-interface TableSecurityRow {
-  table_name: string;
-  tenant_scoped: boolean;
-  rls_enabled: boolean;
-  rls_forced: boolean;
-  policies: number;
-  app_can_select: boolean;
-}
-
-/**
- * Audits every table for the two properties tenant isolation actually rests
- * on, rather than trusting that migration 0001/0002 were kept in step with
- * the schema.
- *
- * Adding a table is a one-line change in src/db/schema.ts; giving it an RLS
- * policy, FORCE, and an mm_app grant is three separate edits in a different
- * file. Forgetting any of them produces no error — just a table that is either
- * invisible to the application (missing grant) or visible to every tenant at
- * once (missing policy). Both deserve to be named in the build log the first
- * time they happen, not discovered later.
- */
-async function auditTableSecurity(pool: Pool): Promise<void> {
-  const { rows } = await pool.query<TableSecurityRow>(`
-    SELECT c.relname AS table_name,
-           EXISTS (
-             SELECT 1 FROM pg_catalog.pg_attribute a
-             WHERE a.attrelid = c.oid AND a.attname = 'organization_id' AND a.attnum > 0
-               AND NOT a.attisdropped
-           ) AS tenant_scoped,
-           c.relrowsecurity AS rls_enabled,
-           c.relforcerowsecurity AS rls_forced,
-           (SELECT count(*) FROM pg_catalog.pg_policy p WHERE p.polrelid = c.oid) AS policies,
-           has_table_privilege('mm_app', c.oid, 'SELECT') AS app_can_select
-    FROM pg_catalog.pg_class c
-    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relname NOT LIKE '\\_\\_%'
-    ORDER BY c.relname
-  `);
-
-  const problems: string[] = [];
-  for (const row of rows) {
-    if (!row.app_can_select) {
-      problems.push(
-        `${row.table_name}: mm_app has no SELECT grant — the application cannot read it ` +
-          `("permission denied for table ${row.table_name}"). Add a GRANT in a migration.`,
-      );
-    }
-    if (!row.tenant_scoped || RLS_EXEMPT_TABLES.has(row.table_name)) continue;
-    if (!row.rls_enabled) {
-      problems.push(
-        `${row.table_name}: has organization_id but row-level security is NOT enabled — ` +
-          `every organization can read every other's rows. Add ` +
-          `ALTER TABLE ${row.table_name} ENABLE ROW LEVEL SECURITY plus a policy.`,
-      );
-    } else if (Number(row.policies) === 0) {
-      problems.push(
-        `${row.table_name}: row-level security is enabled but no policy exists, so the ` +
-          `table denies everything to mm_app. Add a tenant_isolation policy.`,
-      );
-    }
-    if (row.rls_enabled && !row.rls_forced) {
-      problems.push(
-        `${row.table_name}: row-level security is enabled but not FORCEd, so the table's ` +
-          `owner still bypasses it. Add ALTER TABLE ${row.table_name} FORCE ROW LEVEL SECURITY.`,
-      );
-    }
-  }
-
-  if (problems.length === 0) {
-    const scoped = rows.filter((r) => r.tenant_scoped && !RLS_EXEMPT_TABLES.has(r.table_name));
-    console.log(
-      `[db] Tenant isolation audit: ${scoped.length} of ${rows.length} tables are ` +
-        `organization-scoped, and all have FORCEd row-level security with a policy.`,
-    );
-    return;
-  }
-
-  console.warn("\n[db] WARNING: tenant isolation audit found problems.");
-  for (const problem of problems) {
-    console.warn(`     - ${problem}`);
-  }
-  console.warn("");
 }
 
 /**
@@ -406,6 +309,11 @@ async function main() {
     const envProblems = checkRuntimeEnv(process.env);
     if (envProblems.length > 0) {
       console.warn(formatEnvProblems(envProblems));
+    }
+    // Optional features that are switched off (fail closed) are noted, never treated as a failure of the build.
+    const optionalNotes = checkOptionalFeatures(process.env);
+    if (optionalNotes.length > 0) {
+      console.log(formatOptionalFeatureNotes(optionalNotes));
     }
   } finally {
     if (lockHeld) {

@@ -1,5 +1,7 @@
 import { requireOrgAndActor } from "@/lib/session";
+import { deniedViewUnless } from "@/lib/permission-gate";
 import { AccountService } from "@/domain/accounts/account-service";
+import { DimensionService } from "@/domain/dimensions/dimension-service";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -15,7 +17,13 @@ export default async function NewJournalEntryPage({
   searchParams: { error?: string };
 }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
+  const denied = deniedViewUnless(actor, "journal:post", org.slug);
+  if (denied) return denied;
   const accounts = await AccountService.list(actor);
+  const dimensions = await DimensionService.listActive(actor);
+  const dimensionOptions = dimensions.flatMap((d) =>
+    d.values.map((v) => ({ id: v.id, label: `${d.name}: ${v.label}` })),
+  );
 
   const boundPost = postJournalAction.bind(null, org.slug);
   const boundDraft = saveDraftAction.bind(null, org.slug);
@@ -54,6 +62,7 @@ export default async function NewJournalEntryPage({
               <JournalLineEditor
                 accounts={accounts.map((a) => ({ id: a.id, code: a.code, name: a.name }))}
                 currency={org.baseCurrency}
+                dimensionOptions={dimensionOptions}
               />
             )}
           </CardContent>

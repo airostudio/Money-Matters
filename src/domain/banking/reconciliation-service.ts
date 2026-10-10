@@ -26,6 +26,33 @@ async function loadBankTransaction(tx: TenantDb, organizationId: string, bankTra
 }
 
 export const ReconciliationService = {
+  /**
+   * Counts only (no amounts, no descriptions): how many bank transactions on ACTIVE bank
+   * accounts are still UNMATCHED, and how many of those have no categorisation suggestion.
+   * One set-based query — used by the accountant practice dashboard (Phase 9 Slice 5), which
+   * calls it with the staff member's real role in the client. Gated on `bank_account:read`.
+   */
+  async getSummary(actor: Actor): Promise<{ unreconciled: number; uncategorised: number }> {
+    assertPermission(actor, "bank_account:read");
+    return withTenant(actor.organizationId, async (tx) => {
+      const [row] = await tx
+        .select({
+          unreconciled: sql<number>`count(*)::int`,
+          uncategorised: sql<number>`(count(*) filter (where ${bankTransactions.categorizedAccountId} is null))::int`,
+        })
+        .from(bankTransactions)
+        .innerJoin(bankAccounts, eq(bankAccounts.id, bankTransactions.bankAccountId))
+        .where(
+          and(
+            eq(bankTransactions.organizationId, actor.organizationId),
+            eq(bankTransactions.status, "UNMATCHED"),
+            eq(bankAccounts.isActive, true),
+          ),
+        );
+      return { unreconciled: Number(row?.unreconciled ?? 0), uncategorised: Number(row?.uncategorised ?? 0) };
+    });
+  },
+
   async listUnreconciled(actor: Actor, bankAccountId: string) {
     assertPermission(actor, "bank_transaction:reconcile");
     return withTenant(actor.organizationId, (tx) =>
@@ -262,6 +289,48 @@ export const ReconciliationService = {
       });
 
       return { ...updated!, journalEntry: posted };
+    });
+  },
+
+  /**
+   * Reverts a transaction matched via `confirmMatch` back to UNMATCHED — the
+   * undo mechanism Phase 6 Slice 3's auto-execution needs (master spec §77:
+   * every auto-executed action must be trivially undoable). This NEVER
+   * reaches a transaction that was reconciled via `createJournalFromTransaction`
+   * (`categorizedAccountId` would be set): that path posted a real new
+   * journal entry, and undoing a posted entry must go through
+   * `PostingService.reverseEntry`, never a status flip — `unmatch` refuses
+   * with `BankTransactionAlreadyMatchedError`'s sibling check below rather
+   * than silently detaching a posted entry's own bank-side link. A plain
+   * `confirmMatch`, by contrast, never posted anything — it only linked this
+   * transaction to an already-existing, already-posted journal line — so
+   * reverting that link is not a destructive ledger edit at all.
+   */
+  async unmatch(actor: Actor, bankTransactionId: string) {
+    assertPermission(actor, "bank_transaction:reconcile");
+    return withTenant(actor.organizationId, async (tx) => {
+      const { transaction } = await loadBankTransaction(tx, actor.organizationId, bankTransactionId);
+      if (transaction.status !== "RECONCILED" || transaction.categorizedAccountId) {
+        throw new Error(
+          `Bank transaction ${bankTransactionId} cannot be unmatched this way — it either isn't reconciled, or it was reconciled by posting a new journal entry (use PostingService.reverseEntry for that).`,
+        );
+      }
+
+      const [updated] = await tx
+        .update(bankTransactions)
+        .set({ status: "UNMATCHED", matchedJournalLineId: null, matchedById: null, matchedAt: null })
+        .where(eq(bankTransactions.id, bankTransactionId))
+        .returning();
+
+      await AuditService.record(tx, actor, {
+        action: "bank_transaction.unmatched",
+        entityType: "BankTransaction",
+        entityId: bankTransactionId,
+        before: { matchedJournalLineId: transaction.matchedJournalLineId },
+        after: { status: "UNMATCHED" },
+      });
+
+      return updated;
     });
   },
 

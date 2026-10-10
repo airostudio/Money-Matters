@@ -1,8 +1,9 @@
 import { and, asc, eq } from "drizzle-orm";
 import { contacts, type contactKindEnum } from "@/db/schema";
-import { withTenant } from "@/db/tenant";
+import { withTenant, type TenantDb } from "@/db/tenant";
 import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
 import { AuditService } from "@/domain/audit/audit-service";
+import { DomainEventService } from "@/domain/webhooks/domain-events";
 
 export type ContactKind = (typeof contactKindEnum.enumValues)[number];
 
@@ -33,6 +34,39 @@ export interface UpdateContactInput {
   billingAddress?: Record<string, unknown>;
 }
 
+async function insertContact(tx: TenantDb, actor: Actor, input: CreateContactInput) {
+  const [contact] = await tx
+    .insert(contacts)
+    .values({
+      organizationId: actor.organizationId,
+      kind: input.kind,
+      displayName: input.displayName,
+      currency: input.currency,
+      legalName: input.legalName ?? null,
+      email: input.email ?? null,
+      phone: input.phone ?? null,
+      taxNumber: input.taxNumber ?? null,
+      billingAddress: input.billingAddress ?? null,
+      createdById: actor.userId,
+      updatedById: actor.userId,
+    })
+    .returning();
+
+  if (!contact) throw new Error("Failed to create contact.");
+
+  await AuditService.record(tx, actor, {
+    action: "contact.created",
+    entityType: "Contact",
+    entityId: contact.id,
+    after: contact,
+  });
+
+  // Phase 10 Slice 2: customer.created / supplier.created commit (or roll back) with the contact.
+  await DomainEventService.emitContactCreatedIn(tx, actor.organizationId, contact);
+
+  return contact;
+}
+
 export const ContactService = {
   async list(actor: Actor, opts: { kind?: ContactKind; includeInactive?: boolean } = {}) {
     assertPermission(actor, "contact:read");
@@ -61,35 +95,13 @@ export const ContactService = {
 
   async create(actor: Actor, input: CreateContactInput) {
     assertPermission(actor, "contact:manage");
-    return withTenant(actor.organizationId, async (tx) => {
-      const [contact] = await tx
-        .insert(contacts)
-        .values({
-          organizationId: actor.organizationId,
-          kind: input.kind,
-          displayName: input.displayName,
-          currency: input.currency,
-          legalName: input.legalName ?? null,
-          email: input.email ?? null,
-          phone: input.phone ?? null,
-          taxNumber: input.taxNumber ?? null,
-          billingAddress: input.billingAddress ?? null,
-          createdById: actor.userId,
-          updatedById: actor.userId,
-        })
-        .returning();
+    return withTenant(actor.organizationId, (tx) => insertContact(tx, actor, input));
+  },
 
-      if (!contact) throw new Error("Failed to create contact.");
-
-      await AuditService.record(tx, actor, {
-        action: "contact.created",
-        entityType: "Contact",
-        entityId: contact.id,
-        after: contact,
-      });
-
-      return contact;
-    });
+  /** `create` inside a transaction the caller already opened with `withTenant` - see `InvoiceService.createIn`. */
+  async createIn(tx: TenantDb, actor: Actor, input: CreateContactInput) {
+    assertPermission(actor, "contact:manage");
+    return insertContact(tx, actor, input);
   },
 
   async update(actor: Actor, contactId: string, input: UpdateContactInput) {

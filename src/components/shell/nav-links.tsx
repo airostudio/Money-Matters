@@ -5,14 +5,18 @@ import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { roleHasPermission, type MembershipRole } from "@/domain/permissions/roles";
 import { NAV_ITEMS } from "./nav-config";
+import { labelForMode, type UiMode } from "./ui-mode";
 
 export function NavLinks({
   orgSlug,
   role,
+  mode = "BUSINESS",
   onNavigate,
 }: {
   orgSlug: string;
   role: MembershipRole;
+  /** Presentation only: terminology and which entry points show. Never affects what a role may do. */
+  mode?: UiMode;
   onNavigate?: () => void;
 }) {
   const pathname = usePathname();
@@ -20,10 +24,15 @@ export function NavLinks({
 
   return (
     <nav className="flex flex-col gap-0.5 px-2">
-      {NAV_ITEMS.filter((item) => !item.permission || roleHasPermission(role, item.permission)).map(
+      {NAV_ITEMS.filter(
+        (item) =>
+          (!item.onlyInMode || item.onlyInMode === mode) &&
+          (!item.permission || roleHasPermission(role, item.permission)) &&
+          (!item.anyPermission || item.anyPermission.some((p) => roleHasPermission(role, p))),
+      ).map(
         (item) => {
-          const href = `${basePath}${item.href}`;
-          const isActive = item.href === "" ? pathname === basePath : pathname.startsWith(href);
+          const href = item.absoluteHref ?? `${basePath}${item.href}`;
+          const isActive = item.absoluteHref ? pathname.startsWith(href) : item.href === "" ? pathname === basePath : pathname.startsWith(href);
           const visibleChildren = item.children?.filter(
             (child) => !child.permission || roleHasPermission(role, child.permission),
           );
@@ -41,7 +50,7 @@ export function NavLinks({
                 )}
               >
                 <item.icon className="size-4 shrink-0" />
-                {item.label}
+                {labelForMode(item.label, mode)}
               </Link>
               {isActive && visibleChildren && visibleChildren.length > 0 && (
                 <div className="ml-6 mt-0.5 flex flex-col gap-0.5 border-l border-border pl-3">
@@ -60,7 +69,7 @@ export function NavLinks({
                             : "text-muted-foreground hover:text-foreground",
                         )}
                       >
-                        {child.label}
+                        {labelForMode(child.label, mode)}
                       </Link>
                     );
                   })}

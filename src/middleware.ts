@@ -4,10 +4,104 @@ import type { NextRequest } from "next/server";
 
 const PUBLIC_PATHS = ["/login", "/register"];
 
+/** The public developer API (docs/api.md). Authenticated by API key inside the route, never by the browser session. */
+const API_PREFIX = "/api/v1";
+const API_METHODS = new Set(["GET", "HEAD", "POST"]);
+
+function isApiPath(pathname: string): boolean {
+  return pathname === API_PREFIX || pathname.startsWith(`${API_PREFIX}/`);
+}
+
+/**
+ * `/api/v1/*`: NextAuth is bypassed entirely - no redirect to /login, no session lookup - because the API
+ * authenticates itself with `Authorization: Bearer <api key>` (src/domain/api/api-auth.ts). Two structural
+ * guarantees are enforced HERE, before any route code runs:
+ *  - the browser's cookies are removed from the request the route sees, so no session cookie can ever act on the
+ *    API (cookie-borne CSRF has nothing to ride on) - the route handlers never read cookies and set none;
+ *  - only GET, HEAD and POST exist in v1: PUT / PATCH / DELETE / OPTIONS get a 405 problem response. OPTIONS in
+ *    particular means no CORS preflight is ever answered and no `Access-Control-*` header is ever sent - the API
+ *    is for servers, not browsers.
+ */
+function handleApi(request: NextRequest): NextResponse {
+  if (!API_METHODS.has(request.method)) {
+    const requestId = crypto.randomUUID();
+    return new NextResponse(
+      JSON.stringify({
+        type: "urn:moneymatters:problem:method_not_allowed",
+        title: "Method not allowed",
+        status: 405,
+        code: "method_not_allowed",
+        detail: "The v1 API supports GET, HEAD and POST only. There is no PUT, PATCH or DELETE.",
+        requestId,
+      }),
+      {
+        status: 405,
+        headers: {
+          "Content-Type": "application/problem+json",
+          Allow: "GET, HEAD, POST",
+          "Cache-Control": "no-store",
+          "X-Request-Id": requestId,
+        },
+      },
+    );
+  }
+  const headers = new Headers(request.headers);
+  headers.delete("cookie");
+  return NextResponse.next({ request: { headers } });
+}
+
+/**
+ * OAuth 2.0 (Phase 10 Slice 4, docs/security.md section 20).
+ *  - `/api/oauth/*` (token, revocation): authenticated by CLIENT credentials inside the route, never by the browser
+ *    session, so NextAuth is bypassed (no redirect to /login) and cookies are stripped from the request the route sees.
+ *    POST only: GET / OPTIONS / anything else is answered 405 here, so no CORS preflight is ever answered and no
+ *    `Access-Control-*` header is ever sent for these endpoints.
+ *  - `/.well-known/*` (RFC 8414 metadata) is public.
+ *  - `/oauth/*` (consent screen + decision) are real pages: the page sends a signed-out visitor to /login ITSELF (keeping
+ *    the full query string, which this middleware's generic redirect would drop) and the decision route checks the session.
+ */
+const OAUTH_API_PREFIX = "/api/oauth/";
+
+function isOAuthApiPath(pathname: string): boolean {
+  return pathname.startsWith(OAUTH_API_PREFIX);
+}
+
+function handleOAuthApi(request: NextRequest): NextResponse {
+  if (request.method !== "POST") {
+    return new NextResponse(JSON.stringify({ error: "invalid_request", error_description: "Use POST." }), {
+      status: 405,
+      headers: { "Content-Type": "application/json", Allow: "POST", "Cache-Control": "no-store" },
+    });
+  }
+  const headers = new Headers(request.headers);
+  headers.delete("cookie");
+  return NextResponse.next({ request: { headers } });
+}
+
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
+  if (isApiPath(pathname)) {
+    return handleApi(request);
+  }
+
+  if (isOAuthApiPath(pathname)) {
+    return handleOAuthApi(request);
+  }
+
+  if (pathname.startsWith("/.well-known/") || pathname === "/oauth" || pathname.startsWith("/oauth/")) {
+    return NextResponse.next();
+  }
+
   if (PUBLIC_PATHS.some((path) => pathname.startsWith(path)) || pathname.startsWith("/api/auth")) {
+    return NextResponse.next();
+  }
+
+  // The platform admin section must 404 for signed-out visitors too (not
+  // redirect to /login), so its existence isn't revealed. Authorisation is
+  // NOT done here — every admin page, route handler and server action calls
+  // requirePlatformAdmin() itself (src/lib/platform-admin.ts).
+  if (pathname === "/admin" || pathname.startsWith("/admin/")) {
     return NextResponse.next();
   }
 

@@ -39,7 +39,9 @@ export function LoginForm() {
       setError("Invalid email or password.");
       return;
     }
-    router.push("/app");
+    const next = searchParams.get("next");
+    const isSafeRelativePath = !!next && next.startsWith("/") && !next.startsWith("//");
+    router.push(isSafeRelativePath ? next : "/app");
     router.refresh();
   }
 
@@ -54,6 +56,11 @@ export function LoginForm() {
           {searchParams.get("registered") && (
             <p className="rounded-md bg-success/10 px-3 py-2 text-sm text-success">
               Account created — sign in to continue.
+            </p>
+          )}
+          {searchParams.get("notice") && (
+            <p role="status" className="rounded-md bg-muted px-3 py-2 text-sm text-foreground">
+              {searchParams.get("notice")!.slice(0, 400)}
             </p>
           )}
           {error && (

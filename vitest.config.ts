@@ -2,6 +2,9 @@ import { defineConfig } from "vitest/config";
 import path from "node:path";
 
 export default defineConfig({
+  // Next.js compiles JSX with the automatic runtime (no `import React`); match it so a component can be
+  // rendered to static markup in a unit test (see src/tests/unit/forecasting/forecast-chart.test.ts).
+  esbuild: { jsx: "automatic" },
   test: {
     environment: "node",
     include: ["src/tests/**/*.test.ts"],

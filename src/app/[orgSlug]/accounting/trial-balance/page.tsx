@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { requireOrgAndActor } from "@/lib/session";
 import { LedgerService } from "@/domain/ledger/ledger-service";
 import { resolveTrialBalanceColumn } from "@/domain/ledger/trial-balance-presentation";
@@ -65,7 +66,12 @@ export default async function TrialBalancePage({
                 {nonZeroRows.map(({ row, column, magnitude }) => (
                   <tr key={row.accountId}>
                     <td className="px-6 py-2.5">
-                      <span className="font-mono text-xs text-muted-foreground">{row.code}</span> {row.name}
+                      <Link
+                        href={`/${org.slug}/accounting/accounts/${row.accountId}/transactions?to=${asOfDate.toISOString().slice(0, 10)}`}
+                        className="text-primary hover:underline"
+                      >
+                        <span className="font-mono text-xs text-muted-foreground">{row.code}</span> {row.name}
+                      </Link>
                     </td>
                     <td className="px-6 py-2.5 text-right">
                       {column === "DEBIT" && (

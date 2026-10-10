@@ -1,39 +1,59 @@
-# 0001 — Prisma as the database access layer
+# 0001 — Drizzle ORM as the database access layer
 
 ## Status
-Accepted
+Accepted. Originally recorded as "Prisma"; superseded in Phase 1 by Drizzle
+before any Prisma code shipped, and corrected here. The codebase has never
+used Prisma and must not (the master build prompt forbids it).
 
 ## Context
 The database must remain portable PostgreSQL (not tied to Supabase-specific
 APIs), while still giving strong typing for a financial-integrity-critical
 codebase and a migration workflow that produces reviewable, versioned SQL.
+Row-Level Security, CHECK constraints, partial indexes, triggers and role
+grants are central to the design (tenant isolation, immutable posted history)
+and must be first-class, not escape hatches.
 
 ## Decision
-Use Prisma ORM against a plain `DATABASE_URL` PostgreSQL connection. Row-
-Level Security policies (which Prisma cannot express natively) are added as
-hand-written SQL inside Prisma migration files, so they version alongside
-schema changes rather than living in a separate, easy-to-forget place.
+Use Drizzle ORM (`drizzle-orm/node-postgres`, `pg` pool) against a plain
+PostgreSQL connection, with `drizzle-kit` generating schema snapshots and
+hand-written SQL migrations in `drizzle/NNNN_*.sql`. The schema lives in
+`src/db/schema.ts`; migrations are applied by `src/db/migrate.ts`, which
+records each file's SHA-256 in `drizzle.__drizzle_migrations`.
+
+RLS policies, FORCE ROW LEVEL SECURITY, CHECK constraints, grants to the
+restricted `mm_app` role and immutability policies are written as plain SQL
+in the same migration files, so they version alongside schema changes.
+Tenant scoping is applied per transaction via `withTenant`
+(`app.current_org_id`) and `withUserScope` (`app.current_user_id`). A
+build-time audit (`src/db/isolation-audit.ts`) fails if any tenant table
+lacks forced RLS and a policy.
 
 ## Alternatives considered
+- **Prisma** — the original choice. Rejected: it cannot express RLS, CHECK
+  constraints or per-transaction session settings natively, so most of the
+  integrity model would live in raw SQL outside its type system; its
+  `Decimal` handling and migration diffing also fought the hand-written SQL
+  workflow. Prohibited outright by the project's requirements.
 - **Supabase JS client with PostgREST** — fast to start, but pushes query
-  logic into ad-hoc client calls scattered across the app rather than a
-  typed repository layer, and couples the codebase to Supabase's REST
+  logic into ad-hoc client calls and couples the codebase to Supabase's REST
   surface. Rejected: conflicts with "database should remain portable
   Postgres."
-- **Raw SQL / Kysely** — maximal control, no ORM overhead, but higher
-  boilerplate for a schema this size in Phase 1 and no migration diffing.
-  Reconsider if Prisma's `Decimal`/RLS limitations become a real blocker.
-- **Drizzle ORM** — comparable portability story to Prisma; Prisma was
-  chosen for more mature migration tooling and ecosystem familiarity. Not a
-  strong rejection — revisit if Prisma's `Decimal` column CHECK support
-  remains too limited for invariants we want enforced at the DB layer.
+- **Raw SQL / Kysely** — maximal control, but more boilerplate for a schema
+  this size and no schema-derived types. Drizzle gives typed queries while
+  still allowing raw SQL where needed.
 
 ## Consequences
-- `DATABASE_URL` can point at Supabase Postgres, local Postgres, or any
-  other Postgres — no code change required.
-- Debit/credit-is-exactly-one-nonzero and balance invariants are enforced in
-  the domain layer (`PostingService`), not as a Postgres CHECK constraint,
-  because Prisma's raw-SQL migration escape hatch makes this possible but
-  not ergonomic to keep in sync with the Prisma schema. Covered instead by
-  property-based tests hitting the real database (see
-  `docs/accounting-engine.md` §6).
+- `DATABASE_URL` can point at Supabase Postgres, local Postgres, or any other
+  Postgres — no code change required. Migrations use `DIRECT_DATABASE_URL`
+  (schema owner); the app runs as the non-superuser `mm_app` role so RLS is
+  never bypassed.
+- Money is stored as `numeric` and handled in the domain layer by the `Money`
+  type, never as floating point (see ADR 0003).
+- Ledger invariants (balanced entries, one nonzero side per line, immutable
+  posted history) are enforced both in the domain layer (`PostingService`)
+  and, where practical, by database constraints and policies, and are
+  covered by property-based tests against a real database (see
+  `docs/accounting-engine.md`).
+- Migrations are forward-only, hand-reviewed SQL; some (for example the
+  Phase 8 and Phase 10 additions) have no drizzle-kit snapshot, which is
+  accepted because `migrate.ts` applies files directly.

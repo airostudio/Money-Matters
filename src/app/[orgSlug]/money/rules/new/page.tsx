@@ -1,4 +1,5 @@
 import { requireOrgAndActor } from "@/lib/session";
+import { deniedViewUnless } from "@/lib/permission-gate";
 import { AccountService } from "@/domain/accounts/account-service";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,7 +14,9 @@ export default async function NewBankRulePage({
   params: { orgSlug: string };
   searchParams: { error?: string };
 }) {
-  const { actor } = await requireOrgAndActor(params.orgSlug);
+  const { actor, org } = await requireOrgAndActor(params.orgSlug);
+  const denied = deniedViewUnless(actor, "bank_rule:manage", org.slug);
+  if (denied) return denied;
   const accounts = await AccountService.list(actor);
   const boundCreate = createBankRuleAction.bind(null, params.orgSlug);
 

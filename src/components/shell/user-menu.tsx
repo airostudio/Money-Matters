@@ -2,10 +2,19 @@
 
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { signOut } from "next-auth/react";
-import { LogOut } from "lucide-react";
+import Link from "next/link";
+import { Layers, LogOut, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-export function UserMenu({ name, email }: { name: string; email: string }) {
+export function UserMenu({
+  name,
+  email,
+  showAdminLink = false,
+}: {
+  name: string;
+  email: string;
+  showAdminLink?: boolean;
+}) {
   const initial = (name || email || "?").charAt(0).toUpperCase();
 
   return (
@@ -32,6 +41,24 @@ export function UserMenu({ name, email }: { name: string; email: string }) {
             <p className="truncate text-xs text-muted-foreground">{email}</p>
           </div>
           <DropdownMenu.Separator className="my-1 h-px bg-border" />
+          <DropdownMenu.Item asChild>
+            <Link
+              href="/app/groups"
+              className="flex cursor-pointer items-center gap-2 rounded-sm px-3 py-2 text-sm outline-none hover:bg-accent"
+            >
+              <Layers className="size-4" /> Entity groups
+            </Link>
+          </DropdownMenu.Item>
+          {showAdminLink && (
+            <DropdownMenu.Item asChild>
+              <Link
+                href="/admin"
+                className="flex cursor-pointer items-center gap-2 rounded-sm px-3 py-2 text-sm outline-none hover:bg-accent"
+              >
+                <ShieldCheck className="size-4" /> Platform admin
+              </Link>
+            </DropdownMenu.Item>
+          )}
           <DropdownMenu.Item
             className="flex cursor-pointer items-center gap-2 rounded-sm px-3 py-2 text-sm text-destructive outline-none hover:bg-destructive/10"
             onSelect={() => signOut({ callbackUrl: "/login" })}

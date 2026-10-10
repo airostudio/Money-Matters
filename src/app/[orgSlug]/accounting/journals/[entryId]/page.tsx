@@ -2,22 +2,28 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireOrgAndActor } from "@/lib/session";
 import { LedgerService } from "@/domain/ledger/ledger-service";
+import { ReportingService } from "@/domain/reporting/reporting-service";
+import { sourceDocumentHref, SOURCE_DOCUMENT_LABEL } from "@/domain/reporting/source-document-links";
 import { roleHasPermission } from "@/domain/permissions/roles";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatusBadge } from "@/components/accounting/status-badge";
 import { MoneyDisplay } from "@/components/accounting/money-display";
+import { PostAnywayForm } from "@/components/accounting/post-anyway";
 import { deleteDraftAction, postDraftAction, reverseEntryAction } from "../actions";
 
 export default async function JournalEntryDetailPage({
   params,
+  searchParams,
 }: {
   params: { orgSlug: string; entryId: string };
+  searchParams: { error?: string; lock?: string };
 }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
   const entry = await LedgerService.getJournalEntry(actor, params.entryId);
   if (!entry) notFound();
+  const sourceDocument = await ReportingService.getSourceDocumentForJournalEntry(actor, entry.id);
 
   const canPost = roleHasPermission(actor.role, "journal:post");
   const canReverse = roleHasPermission(actor.role, "journal:reverse");
@@ -42,6 +48,22 @@ export default async function JournalEntryDetailPage({
             })}
             {entry.memo && <> · {entry.memo}</>}
           </p>
+          {sourceDocument && (
+            <p className="mt-1 text-sm">
+              Source document:{" "}
+              {(() => {
+                const href = sourceDocumentHref(org.slug, sourceDocument);
+                const label = `${SOURCE_DOCUMENT_LABEL[sourceDocument.type]} ${sourceDocument.label}`;
+                return href ? (
+                  <Link href={href} className="text-primary hover:underline">
+                    {label}
+                  </Link>
+                ) : (
+                  <span className="text-muted-foreground">{label}</span>
+                );
+              })()}
+            </p>
+          )}
           {entry.reversalOf && (
             <p className="mt-1 text-sm">
               Reverses{" "}
@@ -83,6 +105,19 @@ export default async function JournalEntryDetailPage({
           )}
         </div>
       </div>
+
+      {searchParams.error && (
+        <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">{searchParams.error}</p>
+      )}
+      {entry.status === "DRAFT" && searchParams.lock === "override" && canPost && (
+        <PostAnywayForm action={boundPostDraft} />
+      )}
+      {entry.status === "POSTED" && entry.lockOverrideLevel && (
+        <p className="rounded-md bg-warning/10 px-3 py-2 text-sm text-warning">
+          Posted into a {entry.lockOverrideLevel.toLowerCase().replace("_", " ")} period under an authorised override
+          {entry.lockOverrideReason ? <>: &ldquo;{entry.lockOverrideReason}&rdquo;</> : "."}
+        </p>
+      )}
 
       <Card>
         <CardContent className="p-0">

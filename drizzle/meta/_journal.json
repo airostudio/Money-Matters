@@ -36,6 +36,370 @@
       "when": 1787486073576,
       "tag": "0004_bank_feed_row_level_security",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1789967645146,
+      "tag": "0005_huge_jasper_sitwell",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1789967646146,
+      "tag": "0006_sales_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1790121122728,
+      "tag": "0007_adorable_manta",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1790121123728,
+      "tag": "0008_purchases_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1790205950625,
+      "tag": "0009_kind_tag",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1790205951625,
+      "tag": "0010_expenses_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1790208132048,
+      "tag": "0011_motionless_robin_chapel",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1790208133048,
+      "tag": "0012_sales_slice2_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1790210091412,
+      "tag": "0013_purchases_slice2_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1790210091413,
+      "tag": "0014_purchases_slice2_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1790946412268,
+      "tag": "0015_reporting_slice2_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1790946413268,
+      "tag": "0016_reporting_slice2_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1790974525142,
+      "tag": "0017_ai_controller_slice2_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1790974525143,
+      "tag": "0018_ai_controller_slice2_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1790976708531,
+      "tag": "0019_ai_controller_slice3_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1790976708532,
+      "tag": "0020_ai_controller_slice3_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1790979125600,
+      "tag": "0021_projects_slice1_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1790979125601,
+      "tag": "0022_projects_slice1_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1791104153951,
+      "tag": "0023_inventory_slice2_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1791104153952,
+      "tag": "0024_inventory_slice2_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1791106576456,
+      "tag": "0025_fixed_assets_slice3_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1791106576457,
+      "tag": "0026_fixed_assets_slice3_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1791168820886,
+      "tag": "0027_payroll_slice1_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1791168851938,
+      "tag": "0028_payroll_slice1_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1791168864683,
+      "tag": "0029_payroll_slice1_seed_au_rule_sets",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1791170016195,
+      "tag": "0030_payroll_slice1_payrun_accounts",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1791174665039,
+      "tag": "0031_budgeting_slice1_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1791174665040,
+      "tag": "0032_budgeting_slice1_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1791178138240,
+      "tag": "0033_forecasting_slice2_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1791178138241,
+      "tag": "0034_forecasting_slice2_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1791264538240,
+      "tag": "0035_platform_admin_and_seat_limit",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1791350938240,
+      "tag": "0036_close_slice3_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1791350938241,
+      "tag": "0037_close_slice3_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1791437338240,
+      "tag": "0038_consolidation_slice4_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1791437338241,
+      "tag": "0039_consolidation_slice4_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1791437338242,
+      "tag": "0040_practice_slice5_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1791437338243,
+      "tag": "0041_practice_slice5_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1791437338244,
+      "tag": "0042_public_api_slice1_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1791437338245,
+      "tag": "0043_public_api_slice1_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1791437338246,
+      "tag": "0044_webhooks_slice2_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1791437338247,
+      "tag": "0045_webhooks_slice2_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1791623973329,
+      "tag": "0046_organisation_lifecycle_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1791623976846,
+      "tag": "0047_organisation_lifecycle_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1791628165402,
+      "tag": "0048_automation_slice3_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1791628177416,
+      "tag": "0049_automation_slice3_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1791670074606,
+      "tag": "0050_oauth_slice4_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1791670076065,
+      "tag": "0051_oauth_slice4_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1791700000000,
+      "tag": "0052_bas_slice2_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1791700012000,
+      "tag": "0053_bas_slice2_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1791700024000,
+      "tag": "0054_payroll_slice3_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1791700036000,
+      "tag": "0055_payroll_slice3_row_level_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1791700048000,
+      "tag": "0056_payroll_slice4_payday_super",
+      "breakpoints": true
     }
   ]
 }

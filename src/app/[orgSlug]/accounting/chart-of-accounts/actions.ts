@@ -1,5 +1,6 @@
 "use server";
 
+import { rethrowPermissionDenied } from "@/lib/action-errors";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
@@ -17,35 +18,39 @@ const CreateAccountSchema = z.object({
 });
 
 export async function createAccountAction(orgSlug: string, formData: FormData): Promise<void> {
-  const { actor, org } = await requireOrgAndActor(orgSlug);
-
-  const parsed = CreateAccountSchema.safeParse({
-    code: formData.get("code"),
-    name: formData.get("name"),
-    type: formData.get("type"),
-    subType: formData.get("subType") || undefined,
-  });
-
-  if (!parsed.success) {
-    const message = parsed.error.issues[0]?.message ?? "Invalid input.";
-    redirect(`/${orgSlug}/accounting/chart-of-accounts/new?error=${encodeURIComponent(message)}`);
-  }
-
   try {
-    await AccountService.create(actor, {
-      code: parsed.data.code,
-      name: parsed.data.name,
-      type: parsed.data.type as (typeof accountTypes)[number],
-      subType: parsed.data.subType,
-      currency: org.baseCurrency,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to create account.";
-    redirect(`/${orgSlug}/accounting/chart-of-accounts/new?error=${encodeURIComponent(message)}`);
-  }
+    const { actor, org } = await requireOrgAndActor(orgSlug);
 
-  revalidatePath(`/${orgSlug}/accounting/chart-of-accounts`);
-  redirect(`/${orgSlug}/accounting/chart-of-accounts`);
+    const parsed = CreateAccountSchema.safeParse({
+      code: formData.get("code"),
+      name: formData.get("name"),
+      type: formData.get("type"),
+      subType: formData.get("subType") || undefined,
+    });
+
+    if (!parsed.success) {
+      const message = parsed.error.issues[0]?.message ?? "Invalid input.";
+      redirect(`/${orgSlug}/accounting/chart-of-accounts/new?error=${encodeURIComponent(message)}`);
+    }
+
+    try {
+      await AccountService.create(actor, {
+        code: parsed.data.code,
+        name: parsed.data.name,
+        type: parsed.data.type as (typeof accountTypes)[number],
+        subType: parsed.data.subType,
+        currency: org.baseCurrency,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to create account.";
+      redirect(`/${orgSlug}/accounting/chart-of-accounts/new?error=${encodeURIComponent(message)}`);
+    }
+
+    revalidatePath(`/${orgSlug}/accounting/chart-of-accounts`);
+    redirect(`/${orgSlug}/accounting/chart-of-accounts`);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }
 
 export async function setAccountActiveAction(
@@ -53,7 +58,11 @@ export async function setAccountActiveAction(
   accountId: string,
   isActive: boolean,
 ): Promise<void> {
-  const { actor } = await requireOrgAndActor(orgSlug);
-  await AccountService.setActive(actor, accountId, isActive);
-  revalidatePath(`/${orgSlug}/accounting/chart-of-accounts`);
+  try {
+    const { actor } = await requireOrgAndActor(orgSlug);
+    await AccountService.setActive(actor, accountId, isActive);
+    revalidatePath(`/${orgSlug}/accounting/chart-of-accounts`);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
 }

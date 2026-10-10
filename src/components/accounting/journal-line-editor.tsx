@@ -11,16 +11,23 @@ export interface AccountOption {
   name: string;
 }
 
+/** A single dimension value, flattened with its parent dimension's name for display — "Project: Website Rebuild". */
+export interface DimensionValueOption {
+  id: string;
+  label: string;
+}
+
 interface Row {
   key: number;
   accountId: string;
   debit: string;
   credit: string;
   memo: string;
+  dimensionValueId: string;
 }
 
 let nextKey = 0;
-const emptyRow = (): Row => ({ key: nextKey++, accountId: "", debit: "", credit: "", memo: "" });
+const emptyRow = (): Row => ({ key: nextKey++, accountId: "", debit: "", credit: "", memo: "", dimensionValueId: "" });
 
 /**
  * Client-side line editor for a journal entry. The running total shown here
@@ -28,8 +35,28 @@ const emptyRow = (): Row => ({ key: nextKey++, accountId: "", debit: "", credit:
  * user has typed so far) — the actual balance check is re-done server-side
  * in PostingService against Decimal amounts before anything is persisted.
  * See docs/accounting-engine.md §4.
+ *
+ * `dimensionOptions`, when non-empty, adds a per-line dimension picker —
+ * Phase 5 Slice 2's minimal, production-quality entry point for tagging a
+ * journal line with a dimension value (master spec §4's "Universal
+ * Dimension Engine"; see `src/domain/dimensions/dimension-service.ts`'s doc
+ * comment for why this entry point and not invoice/bill lines). One
+ * dimension value per line, not one per configured dimension — if an
+ * organization defines more than one dimension (e.g. both "Project" and
+ * "Location"), only one can be attached to a given line from this picker;
+ * tagging a line with more than one dimension at once is possible at the
+ * `PostingService` layer already (`dimensionValueIds: string[]`) but isn't
+ * exposed in this UI yet, a documented limitation, not a bug.
  */
-export function JournalLineEditor({ accounts, currency }: { accounts: AccountOption[]; currency: string }) {
+export function JournalLineEditor({
+  accounts,
+  currency,
+  dimensionOptions = [],
+}: {
+  accounts: AccountOption[];
+  currency: string;
+  dimensionOptions?: DimensionValueOption[];
+}) {
   const [rows, setRows] = useState<Row[]>([emptyRow(), emptyRow()]);
 
   const { totalDebit, totalCredit } = useMemo(() => {
@@ -56,17 +83,23 @@ export function JournalLineEditor({ accounts, currency }: { accounts: AccountOpt
     setRows((prev) => (prev.length > 2 ? prev.filter((r) => r.key !== key) : prev));
   }
 
+  const hasDimensions = dimensionOptions.length > 0;
+  const gridCols = hasDimensions
+    ? "sm:grid-cols-[1fr_140px_140px_1fr_1fr_36px]"
+    : "sm:grid-cols-[1fr_140px_140px_1fr_36px]";
+
   return (
     <div className="space-y-3">
-      <div className="hidden grid-cols-[1fr_140px_140px_1fr_36px] gap-2 px-1 text-xs font-medium text-muted-foreground sm:grid">
+      <div className={`hidden gap-2 px-1 text-xs font-medium text-muted-foreground sm:grid ${gridCols}`}>
         <span>Account</span>
         <span>Debit</span>
         <span>Credit</span>
         <span>Memo</span>
+        {hasDimensions && <span>Dimension</span>}
         <span />
       </div>
       {rows.map((row) => (
-        <div key={row.key} className="grid grid-cols-2 gap-2 sm:grid-cols-[1fr_140px_140px_1fr_36px]">
+        <div key={row.key} className={`grid grid-cols-2 gap-2 ${gridCols}`}>
           <select
             name="lineAccountId"
             required
@@ -104,6 +137,21 @@ export function JournalLineEditor({ accounts, currency }: { accounts: AccountOpt
             onChange={(e) => updateRow(row.key, { memo: e.target.value })}
             className="col-span-2 sm:col-span-1"
           />
+          {hasDimensions && (
+            <select
+              name="lineDimensionValueId"
+              value={row.dimensionValueId}
+              onChange={(e) => updateRow(row.key, { dimensionValueId: e.target.value })}
+              className="col-span-2 h-9 rounded-md border border-input bg-background px-3 text-sm sm:col-span-1"
+            >
+              <option value="">No dimension</option>
+              {dimensionOptions.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.label}
+                </option>
+              ))}
+            </select>
+          )}
           <Button
             type="button"
             variant="ghost"

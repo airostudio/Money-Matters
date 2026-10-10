@@ -1,8 +1,13 @@
 import "server-only";
+import * as React from "react";
 import { getServerSession } from "next-auth";
+import { UserService } from "@/domain/auth/user-service";
 import { authOptions } from "./auth";
 import { OrganizationService } from "@/domain/organizations/organization-service";
 import type { Actor } from "@/domain/permissions/permission-service";
+import { OrganizationArchivedError } from "@/domain/organizations/archive-rules";
+
+export { OrganizationArchivedError };
 
 export interface CurrentUser {
   id: string;
@@ -10,17 +15,35 @@ export interface CurrentUser {
   name: string;
 }
 
-export async function getCurrentUser(): Promise<CurrentUser | null> {
+/**
+ * React's per-request memoiser where it exists (server components/actions),
+ * a pass-through elsewhere (scripts, unit tests). A layout and its page both
+ * resolving the current user then cost ONE database lookup, not two — see the
+ * connection-pool note in src/db/client.ts.
+ */
+const memoizePerRequest: <T extends () => Promise<unknown>>(fn: T) => T =
+  (React as unknown as { cache?: <T>(fn: T) => T }).cache ?? ((fn) => fn);
+
+async function resolveCurrentUser(): Promise<CurrentUser | null> {
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) return null;
-  return {
-    id: session.user.id,
-    email: session.user.email ?? "",
-    name: session.user.name ?? "",
-  };
+
+  // JWT sessions are self-contained, so on their own they would keep working
+  // after a platform admin suspends the account. Every request therefore
+  // re-checks the user row (one primary-key lookup, deduped per request
+  // above): a suspended or deleted user resolves to "not signed in" on the
+  // very next request, and the email/name come from the database rather than
+  // from the token. See the "Suspended users" section of the security doc.
+  return UserService.getActiveIdentity(session.user.id);
 }
 
-/** Resolves the authenticated user's Actor for a specific organization, or null if not a member. */
+export const getCurrentUser: () => Promise<CurrentUser | null> = memoizePerRequest(resolveCurrentUser);
+
+/**
+ * Resolves the authenticated user's Actor for a specific organization, or null if not a member. An ARCHIVED
+ * organization also resolves to null (`getMembership` excludes it - docs/security.md section 17), so route handlers
+ * built on this answer 404 for it.
+ */
 export async function getActorForOrganization(organizationId: string): Promise<Actor | null> {
   const user = await getCurrentUser();
   if (!user) return null;
@@ -66,8 +89,12 @@ export async function requireOrgAndActor(orgSlug: string) {
   const org = await OrganizationService.getBySlug(orgSlug);
   if (!org) throw new OrganizationNotFoundError(orgSlug);
 
-  const membership = await OrganizationService.getMembership(user.id, org.id);
-  if (!membership) throw new NotAMemberError();
+  const found = await OrganizationService.getMembershipWithState(user.id, org.id);
+  if (!found) throw new NotAMemberError();
+  // A member of an archived company gets the explicit, friendly "archived" state (the org error boundary renders it,
+  // and the [orgSlug] layout renders it for page navigations). A non-member sees exactly what they saw before: nothing.
+  if (found.archivedAt) throw new OrganizationArchivedError(org.id);
+  const membership = found.membership;
 
   return {
     org,
@@ -81,8 +108,9 @@ export async function requireActor(organizationId: string): Promise<Actor> {
   const user = await getCurrentUser();
   if (!user) throw new NotAuthenticatedError();
 
-  const membership = await OrganizationService.getMembership(user.id, organizationId);
-  if (!membership) throw new NotAMemberError();
+  const found = await OrganizationService.getMembershipWithState(user.id, organizationId);
+  if (!found) throw new NotAMemberError();
+  if (found.archivedAt) throw new OrganizationArchivedError(organizationId);
 
-  return { userId: user.id, organizationId, role: membership.role };
+  return { userId: user.id, organizationId, role: found.membership.role };
 }

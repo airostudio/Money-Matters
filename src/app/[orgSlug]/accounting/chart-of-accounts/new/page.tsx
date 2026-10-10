@@ -1,3 +1,5 @@
+import { requireOrgAndActor } from "@/lib/session";
+import { deniedViewUnless } from "@/lib/permission-gate";
 import { accountTypeEnum } from "@/db/schema";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -5,13 +7,16 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { createAccountAction } from "../actions";
 
-export default function NewAccountPage({
+export default async function NewAccountPage({
   params,
   searchParams,
 }: {
   params: { orgSlug: string };
   searchParams: { error?: string };
 }) {
+  const { actor, org } = await requireOrgAndActor(params.orgSlug);
+  const denied = deniedViewUnless(actor, "account:manage", org.slug);
+  if (denied) return denied;
   const boundCreate = createAccountAction.bind(null, params.orgSlug);
 
   return (
