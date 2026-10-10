@@ -373,6 +373,36 @@ describe("BAS / GST preparation (integration)", () => {
     }
   });
 
+  it("expense claims count as purchases (G11 and 1B) when approved, and a void is a negative in the period of the reversal", async () => {
+    const { createExpenseFixtures } = await import("../../helpers/expenses");
+    const { ExpenseClaimService } = await import("@/domain/expenses/expense-claim-service");
+    const exp = await createExpenseFixtures(owner, currency);
+    await TaxCodeService.setBasClassification(owner, exp.taxCodeId, { basTreatment: "TAXABLE", basCapital: false });
+    const claim = await ExpenseClaimService.create(owner, {
+      employeeUserId: owner.userId,
+      claimDate: new Date("2026-08-12"),
+      description: "Taxi",
+      currency,
+      payableAccountId: exp.payableAccountId,
+      lines: [{ description: "Taxi fare", amount: "100.00", expenseAccountId: exp.expenseAccountId, taxCodeId: exp.taxCodeId }],
+    });
+    await ExpenseClaimService.submit(owner, claim.id);
+    await ExpenseClaimService.approve(owner, claim.id);
+    const q3 = await BasService.preview(owner, { periodStart: "2026-07-01", periodEnd: "2026-09-30", frequency: "QUARTERLY" });
+    expect(q3.figures.labels.G11).toBe("110.0000");
+    expect(q3.figures.labels["1B"]).toBe("10.0000");
+    expect(q3.sources.map((s) => s.docType)).toEqual(["EXPENSE_CLAIM"]);
+    await ExpenseClaimService.voidClaim(owner, claim.id, "Duplicate claim entered");
+    const q3After = await BasService.preview(owner, { periodStart: "2026-07-01", periodEnd: "2026-09-30", frequency: "QUARTERLY" });
+    expect(q3After.figures.labels.G11).toBe("110.0000"); // the void is dated today, outside Q3
+    const today = new Date();
+    const start = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1)).toISOString().slice(0, 10);
+    const end = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 1, 0)).toISOString().slice(0, 10);
+    const now = await BasService.preview(owner, { periodStart: start, periodEnd: end, frequency: "MONTHLY" });
+    expect(now.figures.labels.G11).toBe("-110.0000");
+    expect(now.figures.labels["1B"]).toBe("-10.0000");
+  });
+
   it("the CSV export carries the disclaimer, the labels and every source line", async () => {
     await seedQ3();
     const draft = await BasService.createDraft(owner, { periodStart: "2026-07-01", periodEnd: "2026-09-30", frequency: "QUARTERLY" });

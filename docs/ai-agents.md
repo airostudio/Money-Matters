@@ -570,6 +570,15 @@ timeout, and `null` — the page simply omits the card — when there is no
 source of figures. As with every AI feature in this codebase, the real
 Anthropic API is only exercised through a mocked SDK in tests.
 
+## 0f-bis. The read-only `bas_summary` tool (Phase 8 Slice 2)
+
+A Financial Controller read tool (`bas:read`, permission parity: a role without it is refused exactly as the BAS page is)
+that returns the labels, net GST, reconciliation variance, unclassified counts and warnings of the most recent prepared BAS
+worksheet (or one by id) as plain text for the model to EXPLAIN. It cannot create, change, finalise or lodge anything - there
+is no BAS write tool, `bas:finalise` is human-only (an AI actor is refused even with an OWNER role), and the tool text tells
+the model every figure must come from the tool and that the worksheet is prepared for registered tax agent / BAS agent review
+and NOT lodged with the ATO. Payroll remains structurally excluded from auto-execution; no payroll tool exists.
+
 ## 0g. Ninth integration: the read-only `close_status` tool and checklist commentary (Phase 9 Slice 3)
 
 Month-end close is a **permanently human-gated critical action** (master spec

@@ -2319,6 +2319,27 @@ Deferred by default and not researched to a build, per the standing rule that no
   v2 FY2026-27 rule set's verification note already flags that QE is OTE here.
 - **State payroll tax**: thresholds, rates and grouping rules differ by state and change yearly; none was verified.
 
+### Phase 8 Slices 2-5 - validation
+
+- `npm run typecheck` and `npm run lint` clean; `npx next build` succeeds with all new routes. Migrations 0052-0056 apply from an
+  empty database (renumbered after the OAuth slice took 0050/0051) and the build-time isolation audit reports 92
+  organization-scoped tables (the four new ones, `bas_statements`, `bas_lodgement_records`, `leave_requests`, `payroll_payments`,
+  all FORCE-RLS). Full suite on the merged tip: 190 files, 2,359 tests, 2,358 passing; the one failure is
+  `consolidation/isolation-audit.test.ts` complaining about the OAuth slice's `oauth_access_tokens` table (not a Phase 8 table; that
+  test's tenant-policy expectation does not account for the OAuth slice's lookup table, and I did not run it against the bare
+  OAuth tip). New tests: 13 BAS arithmetic unit tests, 13 BAS integration (hand-worked figures,
+  reversals, reconciliation, immutability as `mm_app`, permissions, AI tool, CSV, expense claims), 15 payroll-operations
+  integration, 1 query-budget, 5 ABA layout, 5 Payday Super and 5 foreign resident / Medicare unit tests, 3 rule-set / Payday
+  pay run integration tests.
+- Real-HTTP smoke test against `next start` (second scratch database): login, prepare a BAS draft, view it (G1 1,100.00, 1A
+  100.00, 1B 40.00, G11 440.00, W1 6,000.00, W2 1,190.77 - hand-worked), drill down on 1A, CSV, finalise refused without
+  acknowledgement then accepted with a verified hash, record a lodgement made outside Money Matters, an employee reads only their own
+  payslip (another employee gets 404; the bank account is masked), record net wages as paid, download an ABA file (4 records of
+  120 characters, total 480924 cents), payroll report and CSV, and a role without `bas:read` is denied the page (200 denied view)
+  and the CSV (403). 30/30 checks passed.
+- **Not verified:** visual layout and print styling of any page (no browser was used), the deployed Vercel environment, behaviour
+  under a real Supabase pooler, ABA acceptance by any real bank, and every regulatory item listed as deferred above.
+
 ## Phase 9 — Advanced Finance — **complete** (Slices 1-5)
 
 ### Slice 1 — Budgeting & Budget vs. Actual (complete, scoped per this slice's brief)
