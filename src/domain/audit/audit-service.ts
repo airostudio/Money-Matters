@@ -48,6 +48,14 @@ const REDACTED_FIELDS = new Set([
   "invite_code",
   "codeHash",
   "code_hash",
+  // Phase 10 Slice 3: integration credentials. A connection's secret (e.g. a Slack incoming-webhook URL, which is a
+  // bearer secret) is shown once, stored encrypted, and must never reach an audit row; neither may its ciphertext.
+  "webhookUrl",
+  "webhook_url",
+  "secretConfig",
+  "secret_config",
+  "secretKeyVersion",
+  "secret_key_version",
 ]);
 const REDACTED_PLACEHOLDER = "[redacted]";
 
@@ -76,9 +84,21 @@ function apiKeyMetadata(actor: Actor): Record<string, unknown> | null {
   return { viaApiKey: true, apiKeyId: actor.apiKey.id, apiKeyPrefix: actor.apiKey.prefix, apiKeyCreatedBy: actor.userId };
 }
 
+/**
+ * What an automation-originated audit row records: the rule (id and name) and the person whose authority bounds it (the
+ * row's `actorUserId`). Merged into EVERY audit row an AUTOMATION actor writes - including the ones domain services write
+ * on their own (e.g. the purchase order service) - so no service needs to know the call came from a rule.
+ */
+function automationMetadata(actor: Actor): Record<string, unknown> | null {
+  if (actor.type !== "AUTOMATION" || !actor.automation) return null;
+  return { viaAutomation: true, automationRuleId: actor.automation.ruleId, automationRuleName: actor.automation.ruleName, automationAuthorisedBy: actor.userId };
+}
+
 export const AuditService = {
   async record(tx: TenantDb, actor: Actor, params: RecordAuditParams): Promise<void> {
     const viaKey = apiKeyMetadata(actor);
+    const viaRule = automationMetadata(actor);
+    const extra = viaKey || viaRule ? { ...(viaKey ?? {}), ...(viaRule ?? {}) } : null;
     await tx.insert(auditLogs).values({
       organizationId: actor.organizationId,
       actorUserId: actor.type === "SYSTEM" ? null : actor.userId,
@@ -88,7 +108,7 @@ export const AuditService = {
       entityId: params.entityId,
       before: params.before !== undefined ? (redactSensitive(params.before) as object) : null,
       after: params.after !== undefined ? (redactSensitive(params.after) as object) : null,
-      metadata: viaKey ? { ...(params.metadata ?? {}), ...viaKey } : (params.metadata ?? null),
+      metadata: extra ? { ...(params.metadata ?? {}), ...extra } : (params.metadata ?? null),
     });
   },
 

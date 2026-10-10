@@ -139,6 +139,8 @@ export const PERMISSION_AREAS: Record<string, string> = {
   client_request: "Accountant requests",
   api_key: "API access",
   webhook: "Webhooks",
+  automation: "Automations",
+  integration: "Integrations",
 };
 
 function areaOf(permission: Permission): string {

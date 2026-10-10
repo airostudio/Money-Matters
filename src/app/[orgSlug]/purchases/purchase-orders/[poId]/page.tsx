@@ -47,6 +47,11 @@ export default async function PurchaseOrderDetailPage({
       <div className="flex items-center gap-3">
         <h1 className="text-2xl font-semibold tracking-tight">{po.poNumber}</h1>
         <StatusBadge status={po.status} />
+        {po.automationRuleId && (
+          <span className="rounded bg-warning/20 px-1.5 py-0.5 text-xs font-medium" data-testid="automation-badge">
+            Drafted by automation
+          </span>
+        )}
       </div>
       <p className="text-sm text-muted-foreground">
         <Link href={`/${org.slug}/purchases/suppliers/${po.supplierContactId}`} className="hover:underline">

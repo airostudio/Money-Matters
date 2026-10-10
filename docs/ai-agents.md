@@ -730,6 +730,21 @@ changes, replays or even lists them**:
 - Business events are emitted by the same domain services whoever acts, so a document the AI drafts and a person confirms emits the same event as one created by hand; the AI never decides whether an event is emitted.
 
 
+## 0l. The Automation Centre and integrations are not an AI surface - and the autonomy whitelist is not duplicated (Phase 10 Slice 3)
+
+Phase 10 Slice 3 adds **automation rules** (Settings -> Automation) and an **integration framework** (Settings -> Integrations). Design and threat model: `docs/security.md` sections 18-19.
+
+- **Exclusions.** The AI Financial Controller has no tool that reads, creates, edits, enables, pauses or runs an automation rule, connects or tests an integration, or reads a notification. `automation:manage` and `integration:manage` are held by OWNER / ADMINISTRATOR only and every
+  management service requires a `HUMAN` actor, so an `AI`-typed actor is refused even with the OWNER role. The controller registry (read and write tools), the specialist modes, the auto-execution allowlist (`AUTO_APPROVABLE_ACTION_TYPES`) and the API scope list contain nothing
+  automation- or integration-related, and no `ai-controller` module imports the automation, integration or notification services (`src/tests/unit/automation/exclusions-and-identity.test.ts` and `structure.test.ts`).
+- **An automation is not an AI agent, and an AI agent is not an automation.** Automations are deterministic rules over a closed vocabulary (no model is called anywhere in them). They run as actor type `AUTOMATION`, a third non-human type beside `AI` and `API`: refused by every
+  human-only check, narrowed to the intersection of the rule's action and its authoriser's current role. The §3b "never auto-executable" list (large payments, bank-detail changes, payroll, tax submissions, unusual journals, period close, posting / approving / voiding) is
+  **not reachable by an automation either** - those actions are not in the action enum and their permissions are outside the identity's allow-list.
+- **One mechanism per behaviour.** The spec's "when bank confidence is above 99% and the rule is approved, reconcile automatically" ALREADY exists as the Phase 6 `BANK_RECONCILIATION_AUTO_MATCH` auto-approved action (section 3b), enabled per action type under Settings ->
+  AI Financial Controller autonomy, with the level >= 3 gate, the emergency stop, the audit trail and undo. The Automation page shows a read-only pointer to it instead of offering a second, weaker way to do the same thing. Conversely, nothing the autonomy slice may auto-execute is
+  an automation action (it posts documents and reconciles; automations never do).
+- The same pause discipline applies in both places: the autonomy emergency stop takes effect on the next evaluation; so does "Pause all automations" (read uncached on every pass).
+
 ## 1. Why this belongs in the Phase 1 docs
 
 The single most important constraint on the AI layer is: **it must never see

@@ -107,13 +107,13 @@ export function checkOptionalFeatures(env: EnvLike): OptionalFeatureNote[] {
     notes.push({
       feature: "Webhooks",
       variable: "WEBHOOK_SECRET_ENCRYPTION_KEY",
-      note: "not set - webhooks are disabled (no subscription can be created and nothing is delivered; the rest of the app is unaffected). To enable them set it to 32 random bytes, base64: `openssl rand -base64 32`.",
+      note: "not set - webhooks are disabled (no subscription can be created and nothing is delivered), and so are integration connections such as Slack (nothing can be connected or sent); the rest of the app, including automations that do not send to a channel, is unaffected. To enable them set it to 32 random bytes, base64: `openssl rand -base64 32`.",
     });
   } else if (!/^[A-Za-z0-9+/]+={0,2}$/.test(raw) || Buffer.from(raw, "base64").length !== 32) {
     notes.push({
       feature: "Webhooks",
       variable: "WEBHOOK_SECRET_ENCRYPTION_KEY",
-      note: "is not 32 random bytes, base64-encoded - webhooks stay disabled until it is fixed (`openssl rand -base64 32`).",
+      note: "is not 32 random bytes, base64-encoded - webhooks and integration connections stay disabled until it is fixed (`openssl rand -base64 32`).",
     });
   }
   return notes;

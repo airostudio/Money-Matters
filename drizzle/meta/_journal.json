@@ -337,6 +337,20 @@
       "when": 1791623976846,
       "tag": "0047_organisation_lifecycle_row_level_security",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1791628165402,
+      "tag": "0048_automation_slice3_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1791628177416,
+      "tag": "0049_automation_slice3_row_level_security",
+      "breakpoints": true
     }
   ]
 }

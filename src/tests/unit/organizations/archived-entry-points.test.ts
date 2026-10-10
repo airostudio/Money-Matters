@@ -113,6 +113,11 @@ describe("archived organizations: where an Actor is built", () => {
     const found = filesMatching(re);
     expect(found).toEqual([
       "domain/api/api-auth.ts",
+      // Phase 10 Slice 3. `identity.ts` builds the AUTOMATION actor from a rule's authoriser, and `run-recording.ts` the SYSTEM actor
+      // for audit rows about a rule switching itself off. Both are reachable ONLY from the evaluation pass, whose first
+      // statement reads the archived flag and returns before any rule is even loaded (see the automation test below).
+      "domain/automation/identity.ts",
+      "domain/automation/run-recording.ts",
       "domain/consolidation/entity-access.ts",
       "domain/organizations/invite-service.ts",
       "domain/organizations/lifecycle-service.ts",
@@ -159,6 +164,27 @@ describe("archived organizations: the non-session paths", () => {
     expect(dispatch).toMatch(/if \(archived\) return \[\] as Claim\[\]/);
   });
 
+  it("automation evaluation reads the archived flag in the same statement as its try-lock and returns before loading a single rule", () => {
+    const engine = code(byRel.get("domain/automation/engine.ts")!);
+    expect(engine).toMatch(/pg_try_advisory_xact_lock[\s\S]*archived_at IS NOT NULL FROM organizations/);
+    expect(engine).toMatch(/if \(h\.archived\) return \{ result: \{ \.\.\.result, skipped: "archived" \}, info: null, jobs: \[\] \}/);
+    // The early returns come BEFORE the rules are read and before any event is touched, so an archived company's events stay pending.
+    expect(engine.indexOf('skipped: "archived"')).toBeLessThan(engine.indexOf(".from(automationRules)"));
+    expect(engine.indexOf('skipped: "archived"')).toBeLessThan(engine.indexOf(".from(domainEvents)"));
+    // Every way in goes through runPass: the on-demand button, the post-response task, and the outbox "Send now" action.
+    expect(code(byRel.get("domain/webhooks/post-response.ts")!)).toMatch(/AutomationEngine\.runPass\(/);
+    expect(code(byRel.get("app/[orgSlug]/settings/webhooks/actions.ts")!)).toMatch(/AutomationEngine\.runPass\(/);
+    expect(code(byRel.get("app/[orgSlug]/settings/automation/actions.ts")!)).toMatch(/AutomationEngine\.runNow\(/);
+    const callers = FILES.filter((f) => /AutomationEngine\.(runPass|runNow)\(/.test(code(f))).map(rel).sort();
+    expect(callers).toEqual(["app/[orgSlug]/settings/automation/actions.ts", "app/[orgSlug]/settings/webhooks/actions.ts", "domain/webhooks/post-response.ts"]);
+  });
+
+  it("management of automations, integrations and notifications resolves its Actor through the session helpers (archived -> refused)", () => {
+    for (const f of ["app/[orgSlug]/settings/automation/actions.ts", "app/[orgSlug]/settings/integrations/actions.ts", "app/[orgSlug]/notifications/actions.ts"]) {
+      expect(code(byRel.get(f)!), f).toMatch(/requireOrgAndActor/);
+    }
+  });
+
   it("AI auto-execution and the recurring 'generate due' runners skip an archived organization", () => {
     expect(code(byRel.get("domain/ai-controller/auto-execution-policy.ts")!)).toMatch(/getLevelAndArchived[\s\S]*if \(archived\) return \{ approved: false/);
     expect(code(byRel.get("domain/sales/recurring-invoice-service.ts")!)).toMatch(/archived_at IS NOT NULL/);
@@ -199,6 +225,12 @@ describe("new modules: connection discipline", () => {
     "domain/organizations/invite-code.ts",
     "domain/organizations/limits.ts",
     "app/app/actions.ts",
+    "domain/automation/engine.ts",
+    "domain/automation/executors.ts",
+    "domain/automation/rule-service.ts",
+    "domain/automation/scans.ts",
+    "domain/integrations/connection-service.ts",
+    "domain/notifications/notification-service.ts",
     "components/shell/create-invite-form.tsx",
     "components/shell/archive-company-form.tsx",
   ];

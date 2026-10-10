@@ -1,4 +1,6 @@
 import { waitUntil } from "@vercel/functions";
+import { AutomationEngine } from "@/domain/automation/engine";
+import type { PassDeps } from "@/domain/automation/engine-types";
 import { webhookEncryptionStatus } from "./secret-crypto";
 import { MAX_BATCH_LIMIT, WebhookDispatchService, type DispatchDeps } from "./dispatch-service";
 
@@ -20,14 +22,22 @@ import { MAX_BATCH_LIMIT, WebhookDispatchService, type DispatchDeps } from "./di
  *
  * It is best effort by design: if the platform kills the invocation, events stay in the outbox and are sent by the next
  * dispatch (the "Send now" action, or the next best-effort run). That is why the settings page shows a pending banner.
+ *
+ * Phase 10 Slice 3 rides the same task: AFTER the dispatch (or instead of it, when the encryption key is missing - the
+ * Automation Centre does not need the key unless a rule sends to a channel) it runs one automation evaluation pass for the
+ * organization, so event-driven rules react right after the change that caused the event. The business transaction is
+ * untouched (it still only inserts the outbox row); the pass runs in this background task, sequentially, with its own
+ * short transactions, and can never throw into the request.
  */
 let enabledOverride: boolean | undefined;
 let depsOverride: DispatchDeps | undefined;
+let automationDepsOverride: PassDeps | undefined;
 const inFlight = new Set<string>();
 
-export function configurePostResponseDispatch(options: { enabled?: boolean; deps?: DispatchDeps } | null): void {
+export function configurePostResponseDispatch(options: { enabled?: boolean; deps?: DispatchDeps; automationDeps?: PassDeps } | null): void {
   enabledOverride = options?.enabled;
   depsOverride = options?.deps;
+  automationDepsOverride = options?.automationDeps;
 }
 
 function isEnabled(): boolean {
@@ -39,16 +49,24 @@ function isEnabled(): boolean {
 /** Resolves when the (possibly absent) background dispatch for `organizationId` has finished - used by tests only. */
 export function scheduleDispatchAfterResponse(organizationId: string): Promise<void> {
   try {
-    if (!isEnabled() || inFlight.has(organizationId) || !webhookEncryptionStatus(depsOverride?.env ?? process.env).configured) {
-      return Promise.resolve();
-    }
+    if (!isEnabled() || inFlight.has(organizationId)) return Promise.resolve();
+    const dispatchOn = webhookEncryptionStatus(depsOverride?.env ?? process.env).configured;
     inFlight.add(organizationId);
     const task = (async () => {
       try {
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
-        await WebhookDispatchService.dispatch(organizationId, { limit: MAX_BATCH_LIMIT }, depsOverride ?? {});
-      } catch {
-        // Best effort: the events remain in the outbox for the next dispatch.
+        if (dispatchOn) {
+          try {
+            await WebhookDispatchService.dispatch(organizationId, { limit: MAX_BATCH_LIMIT }, depsOverride ?? {});
+          } catch {
+            // Best effort: the events remain in the outbox for the next dispatch.
+          }
+        }
+        try {
+          await AutomationEngine.runPass(organizationId, { source: "POST_RESPONSE" }, automationDepsOverride ?? {});
+        } catch {
+          // Best effort: unprocessed events are picked up by the next pass ("Run automations now" or the next change).
+        }
       } finally {
         inFlight.delete(organizationId);
       }

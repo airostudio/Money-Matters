@@ -266,3 +266,61 @@ would call per organization once such an index exists.
 process; events with a still-PENDING delivery are kept). The attempt log is append-only for `mm_app` (no UPDATE/DELETE grant); aged rows disappear only as the
 foreign-key cascade of a purged event.
 
+
+## 13. The Automation Centre and the integration framework (Phase 10 Slice 3)
+
+Master spec §75 (automation rules) and §53 (integration platform). Threat model: `docs/security.md` §18-19. Owner decisions honoured: **no job queue, no scheduler, no Vercel Cron** - automations run on demand, best-effort after a response, and whenever the outbox is dispatched.
+
+```
+ triggers                          evaluation pass  AutomationEngine.runPass(orgId)         actions (own short tx each)
+ --------                          ---------------------------------------------           ---------------------------
+ "Run automations now"  --\        phase 1  ONE tx ("plan"):                                NOTIFY_IN_APP          1 tx
+ post-response task     ---+--->      head statement: try-lock + archived? + paused?          EMIT_WEBHOOK_EVENT     1 tx
+   (same waitUntil as              rules  -> re-validate + execution identity (1 query for the    CREATE_DRAFT_PO        1 tx (savepoint)
+    webhook dispatch)             authorisers' CURRENT standing)                                SEND_TO_CHANNEL        read tx -> HTTP (no tx) -> record tx
+ outbox "Send now"      --/        caps (1 query), events (1 query, oldest first, bounded),
+                                   scans (1 bounded SELECT per scan rule), claim = INSERT ... ON CONFLICT DO NOTHING,
+                                   retries / interrupted jobs; COMMIT
+                                  phase 2  for each claimed job, SEQUENTIALLY: execute -> (run row + job state + rule counters + audit) in the SAME tx as the effect
+```
+
+**Rules** (`automation_rules`) are `{ trigger, trigger_params, conditions[], action }` JSON from closed vocabularies (`vocabulary.ts`, zod), validated at creation and **again on every pass**. `authorised_by_user_id` is the person whose **current** membership bounds the run (`identity.ts`): `required permissions ∩ role ∩ allow-list`, as an `AUTOMATION` actor with `grantedPermissions`; a removed / suspended / demoted authoriser switches the rule off at the next pass with a visible reason. `automation_settings.all_paused` is the emergency switch, read in the pass's first statement, uncached.
+
+**Event-driven triggers** read the Slice 2 outbox but are *independent of webhook fan-out*: `domain_events.automation_processed_at` (a second flag next to `dispatched_at`) records that the evaluator has seen an event, so rules work with no webhook subscription and **without the encryption key**. The pass reads pending events once (`origin = 'user'`, newest rule floor, oldest first, `LIMIT 50`), builds a `JobContext` from the event's own payload (the public-API DTO; no extra reads), evaluates each rule's conditions in memory with exact decimals, and claims `event:<id>` jobs. The business transaction is unchanged: it still only inserts the outbox row.
+
+**Condition scans** (`scans.ts`): `INVOICE_OVERDUE` (N calendar days past due, UTC, still has an amount due), `BILL_DUE_SOON` (due today through N days, still owed), `INVENTORY_BELOW_REORDER` (active tracked product at or below its reorder point - `<=`, matching the Reorder Alerts page). Each is one bounded `SELECT ... LIMIT 25` that excludes rows the rule already has a job for (`NOT EXISTS`), with the rule's conditions **compiled into the WHERE clause** (closed field/operator tables, values bound) so non-matching rows cannot crowd matching ones out of the batch, and re-checked in memory. Re-arm of reorder jobs is one bounded `DELETE`.
+
+**Dedupe and the job table.** `automation_jobs` (`UNIQUE (rule_id, job_key)`) is both the "already fired" memory and the retry queue: state `CLAIMED` (with a lease) -> `DONE` / `SKIPPED` / `FAILED` / `RETRY`. Two passes racing (or two serverless instances) can only both *insert* the same key once; the loser's `RETURNING` is empty. An advisory lock (`pg_try_advisory_xact_lock`) additionally makes a concurrent pass for the same organization return `busy`. A stale `CLAIMED` job (process died) is **never repeated blindly** for actions that change something (marked FAILED, "interrupted"), and is retried for `SEND_TO_CHANNEL` (at-least-once for a message; a duplicate Slack message is the lesser evil). Failed sends retry on later passes (not before 1 min, then 5 min) up to 3 attempts; each attempt is its own append-only run row. Scan keys are never purged (they are the memory); event keys older than 90 days are purged lazily, at most once an hour per organization per process.
+
+**Caps** (documented constants): per pass 10 runs/rule and 30/organization; per rolling 24 h 100/rule and 300/organization (one grouped query); 25 rows per scan per rule; 50 events per pass; rules per organization 50. A rule is auto-disabled after 5 consecutive failed runs.
+
+### 13.1 Why no connection is held across I/O
+
+Same incident, same discipline as §12. `DATABASE_POOL_MAX` is 3 and the pooler allows ~15 clients project-wide. The only network call in the engine is the channel send, and it runs **between** two short transactions: `prepareSendIn` (read the connection + ciphertext) -> `sendWithPlan` (decrypt, SSRF-guarded HTTP, **no transaction open**) -> `recordSendIn` + the run record. `channel-and-integrations.test.ts` asserts, with the connection tracker, that at the instant the HTTP client runs `tracker.active === 0` and that scoped transactions never overlap (`maxActive === 1`). Nothing in the new modules uses `Promise.all` / `allSettled` / `race`, a private `pg` connection, or a timer (structural test); the page that lists rules, runs, channels and contacts makes its calls sequentially. Nothing was added to the shared layout, the shell or `withTenant` (structural test); the notifications nav item has no live badge and the unread count is computed only on the notifications page and the home card (one aggregate).
+
+### 13.2 Measured database budgets
+
+Counted at the driver (every statement including `BEGIN` / `set_config` / `COMMIT`), real engine, real database, `src/tests/integration/automation/query-budget.test.ts`:
+
+| Operation | Statements | Transactions |
+|---|---|---|
+| Pass, archived / paused / busy early exit | 4 | 1 |
+| Pass, no rules | 5 | 1 |
+| Pass, 1 event rule and 1 pending event (no match); also 15 events; also 6 event rules | **10, 10, 10** (independent of M events and of N event rules) | 1 |
+| Pass, 1 / 3 scan rules, nothing to do | 10 / 12 (+1 bounded SELECT per scan rule, +1 `DELETE` for a reorder re-arm) | 1 |
+| Pass + one successful `NOTIFY_IN_APP` run | **21** (the plan, then one run transaction), identical for 1 or 4 recipients | 2 |
+| Pass + one `SEND_TO_CHANNEL` run | **25** (the plan, a short read transaction, one HTTP call, a record transaction) | 3 (none open during the call) |
+
+The once-an-hour retention `DELETE` adds one statement to the first pass of a process. A post-response pass costs the same and runs after the response, so a request that creates an invoice is not slower; the business transaction gains nothing.
+
+### 13.3 Integrations
+
+`IntegrationProvider` (`provider.ts`) is the adapter contract; `registry.ts` resolves **implemented** providers only (today `slack_incoming_webhook`); `catalog.ts` lists everything else as data-only "coming soon" entries. `IntegrationService` (`connection-service.ts`) owns persistence, encryption, audit and the integration log; providers are stateless and never see the database. Reads happen in a short transaction, network I/O (DNS vetting at connect, the test message, a send) outside any transaction, writes in a second short transaction. The engine uses three narrow entry points of the service (`prepareSendIn`, `sendWithPlan`, `recordSendIn`) so a send costs two transactions of its own, not three.
+
+### 13.4 Notifications
+
+`NotificationService.createIn(tx, ...)` runs inside the action's transaction (select existing unread duplicates, bump their `occurrences`, insert the rest: at most three statements however many recipients). Listing, marking read, dismissing and the unread aggregate are one short transaction each. The page groups a rule's items for display (no spam).
+
+### 13.5 Where automations stop
+
+`CREATE_DRAFT_PURCHASE_ORDER` is the only action that writes books-adjacent data, and it goes through `PurchaseOrderService.createIn` inside a **savepoint** (a refusal by the service - an inactive supplier - skips the run without poisoning the transaction), re-checks stock at the moment of acting, never sends, converts or posts, and leaves the ledger and trial balance byte-identical (asserted). Everything else in the system that needs a person still needs one.

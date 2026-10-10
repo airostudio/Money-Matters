@@ -3,6 +3,7 @@ import type { LucideIcon } from "lucide-react";
 import type { UiMode } from "./ui-mode";
 import {
   Banknote,
+  Bell,
   Briefcase,
   Inbox,
   Boxes,
@@ -173,6 +174,8 @@ export const NAV_ITEMS: NavItem[] = [
     ],
   },
   { label: "Practice", href: "/practice", absoluteHref: "/practice", icon: Briefcase, onlyInMode: "ACCOUNTANT" },
+  // No live unread badge on purpose: the shared shell is the hot path and must not run a query per page view (the count is on the page and the home card).
+  { label: "Notifications", href: "/notifications", icon: Bell },
   { label: "Settings", href: "/settings", icon: Settings },
 ];
 

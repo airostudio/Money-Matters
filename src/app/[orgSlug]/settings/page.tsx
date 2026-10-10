@@ -44,6 +44,8 @@ export default async function SettingsPage({
   const canManageOrganization = roleHasPermission(actor.role, "organization:manage");
   const canManageApiKeys = roleHasPermission(actor.role, "api_key:manage");
   const canManageWebhooks = roleHasPermission(actor.role, "webhook:manage");
+  const canSeeAutomation = roleHasPermission(actor.role, "automation:read");
+  const canManageIntegrations = roleHasPermission(actor.role, "integration:manage");
 
   const members = canManageMembers
     ? (await OrganizationService.listMembers(actor)).filter((m) => m.isActive)
@@ -137,6 +139,34 @@ export default async function SettingsPage({
               Send signed events (invoice created or paid, payment received, bill approved, customer added) to your own server as they happen, with a delivery log, retries and replay.{" "}
               <Link href={`/${org.slug}/settings/webhooks`} className="text-primary underline">
                 Manage webhooks
+              </Link>
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      )}
+
+      {canSeeAutomation && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Automation</CardTitle>
+            <CardDescription>
+              Rules like &quot;when an invoice is 7 days overdue, notify the owner&quot;. Actions are limited to safe, reversible things (a notification, a channel message, a webhook event, a draft purchase order), with a run log and a pause-all switch.{" "}
+              <Link href={`/${org.slug}/settings/automation`} className="text-primary underline">
+                Open the Automation Centre
+              </Link>
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      )}
+
+      {canManageIntegrations && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Integrations</CardTitle>
+            <CardDescription>
+              Connect outside services. Slack (incoming webhook) is available; banking, payments, e-commerce, CRM and email connectors are listed as coming soon.{" "}
+              <Link href={`/${org.slug}/settings/integrations`} className="text-primary underline">
+                Manage integrations
               </Link>
             </CardDescription>
           </CardHeader>

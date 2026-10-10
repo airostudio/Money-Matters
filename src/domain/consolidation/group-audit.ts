@@ -7,7 +7,7 @@ export interface GroupAuditParams {
   /** The group's owner (the row-level-security key). */
   ownerUserId: string;
   actorUserId: string;
-  actorType?: "HUMAN" | "AI" | "SYSTEM" | "API";
+  actorType?: "HUMAN" | "AI" | "SYSTEM" | "API" | "AUTOMATION";
   action: string;
   entityType: string;
   entityId: string;

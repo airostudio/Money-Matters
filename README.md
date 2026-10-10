@@ -201,6 +201,19 @@ Signing secrets are AES-256-GCM encrypted with `WEBHOOK_SECRET_ENCRYPTION_KEY` (
 below) and webhooks are simply off without it. See [`docs/api.md`](docs/api.md)
 (Webhooks), `docs/architecture.md` section 12 and `docs/security.md` section 16.
 
+Phase 10 Slice 3 adds the **Automation Centre and the integration framework**. Settings -> Automation lets an Owner or
+Administrator define rules of the form *WHEN something happens AND conditions hold THEN a safe action runs* from **closed
+lists** (11 triggers - the eight webhook events plus overdue invoices, bills due soon and stock at its reorder point - and four
+actions: an in-app notification, a short message to a connected Slack channel, an `automation.triggered` webhook event, and a
+**draft** purchase order). There is no scripting, no expression language and no scheduler: rules run on demand ("Run automations
+now"), right after a change, and whenever webhook events are sent. Automations run as a separate non-human actor whose permissions
+are the action's needs intersected with the approving person's *current* role, so they can never post, approve, void, pay, close a
+period or change access; each run is logged (append-only), every rule can be paused, "Pause all automations" is an emergency
+switch, and a rule whose approver leaves is switched off by itself. Notifications have their own page (`/<org>/notifications`).
+Settings -> Integrations holds the provider framework: one real provider (a Slack incoming webhook, restricted to `hooks.slack.com`
+on top of the SSRF guard, credential stored encrypted and never shown again) and an honest "coming soon" list for the rest. See
+`docs/security.md` sections 18-19, `docs/architecture.md` section 13 and `docs/roadmap.md`.
+
 **Organisation lifecycle & joining.** A signed-in user can **create another company** under the same login (chooser or
 company switcher; up to 5 active owned companies) and **join a company with an invite code**. An Owner or Administrator
 creates the invite in Settings -> Team (an email + role; the one-time `mmj_...` code is shown once and passed on out of band -
@@ -333,11 +346,14 @@ functionality and no network call:
 | `ANTHROPIC_DAILY_BRIEF_MODEL` | Defaults to `claude-haiku-4-5-20251001` if unset. |
 
 Optionally, set `WEBHOOK_SECRET_ENCRYPTION_KEY` to turn on **webhooks** (Phase 10
-Slice 2). Webhook signing secrets must be stored recoverably (signing needs the raw
-value), so they are encrypted at rest under this key, which lives only in the
-environment. **Fail closed:** unset or invalid means webhooks are disabled with a clear
-message in Settings -> Webhooks; the build and the rest of the app are unaffected (the
-build log shows an optional-feature *note*, not a warning). Keep it stable - changing
+Slice 2) **and integration connections** (Slice 3 - the same key also encrypts, e.g., a
+Slack incoming-webhook URL; no new variable). Webhook signing secrets and integration
+credentials must be stored recoverably (signing and sending need the raw value), so they
+are encrypted at rest under this key, which lives only in the environment. **Fail
+closed:** unset or invalid means webhooks and integrations are disabled with a clear
+message in Settings -> Webhooks / Integrations; the build and the rest of the app,
+including automations that do not send to a channel, are unaffected (the build log shows
+an optional-feature *note*, not a warning). Keep it stable - changing
 or losing it makes stored secrets undecryptable (rotate each subscription's secret to
 recover):
 

@@ -52,6 +52,11 @@ export default async function PurchaseOrdersPage({ params }: { params: { orgSlug
                       <Link href={`/${org.slug}/purchases/purchase-orders/${po.id}`} className="font-medium hover:underline">
                         {po.poNumber}
                       </Link>
+                      {po.automationRuleId && (
+                        <span className="ml-2 rounded bg-warning/20 px-1.5 py-0.5 text-xs font-medium" title="Drafted by an automation rule - review before sending" data-testid="automation-badge">
+                          Automation
+                        </span>
+                      )}
                     </td>
                     <td className="px-6 py-3">{po.supplier.displayName}</td>
                     <td className="px-6 py-3">

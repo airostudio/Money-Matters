@@ -123,6 +123,15 @@ export const PERMISSIONS = [
   // signing secret, replay) is held ONLY by OWNER / ADMINISTRATOR AND requires a HUMAN actor; like api_key:manage it
   // is not reachable from any API scope or AI tool.
   "webhook:manage",
+  // Phase 10 Slice 3 (Automation Centre + integration framework, master spec s.75 / s.53). Creating, enabling, editing
+  // and deleting an automation rule - and the org-wide "pause all" switch - is `automation:manage`: OWNER /
+  // ADMINISTRATOR only AND a HUMAN actor (an API key, AI agent or automation can never hold it). Creating or enabling a
+  // rule IS the human's explicit approval of that narrow action. `automation:read` lets other roles SEE the rules and
+  // the run log. `integration:manage` (connect / test / disconnect a provider) is likewise OWNER / ADMINISTRATOR +
+  // human only and is not reachable from any API scope, AI tool or automation action.
+  "automation:read",
+  "automation:manage",
+  "integration:manage",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -225,6 +234,7 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "client_request:read",
     "client_request:respond",
     "client_request:manage",
+    "automation:read",
   ]),
   BOOKKEEPER: new Set<Permission>([
     "account:read",
@@ -295,6 +305,7 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "client_request:read",
     "client_request:respond",
     "client_request:manage",
+    "automation:read",
   ]),
   ACCOUNTS_RECEIVABLE: new Set<Permission>([
     "account:read",
@@ -413,6 +424,7 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "scenario:read",
     "close_checklist:read",
     "client_request:read",
+    "automation:read",
   ]),
   EMPLOYEE: new Set<Permission>([
     "expense_claim:read",
@@ -450,6 +462,7 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "forecast:read",
     "scenario:read",
     "close_checklist:read",
+    "automation:read",
   ]),
 };
 

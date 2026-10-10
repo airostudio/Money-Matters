@@ -5,6 +5,7 @@ import { Money } from "@/domain/money/money";
 import { AccountService } from "@/domain/accounts/account-service";
 import { roleHasPermission } from "@/domain/permissions/roles";
 import { DailyFinanceBriefService } from "@/domain/reporting/daily-finance-brief-service";
+import { NotificationService } from "@/domain/notifications/notification-service";
 import { MetricCard } from "@/components/accounting/metric-card";
 import { MoneyDisplay } from "@/components/accounting/money-display";
 import { StatusBadge } from "@/components/accounting/status-badge";
@@ -39,6 +40,8 @@ export default async function OrgHomePage({
 
   const canSeeBrief = roleHasPermission(actor.role, "financial_report:read");
   const brief = canSeeBrief ? await DailyFinanceBriefService.generate(actor) : null;
+  // ONE cheap aggregate, sequential, only here and on the notifications page - never in the shared layout (the hot path).
+  const unreadNotifications = await NotificationService.unreadCount(actor);
 
   const sum = (types: string[]) =>
     trialBalance
@@ -58,6 +61,19 @@ export default async function OrgHomePage({
         <h1 className="text-2xl font-semibold tracking-tight">Good to see you.</h1>
         <p className="text-sm text-muted-foreground">Here&apos;s where {org.name} stands right now.</p>
       </div>
+
+      {unreadNotifications > 0 && (
+        <Card data-testid="notifications-card">
+          <CardContent className="flex items-center justify-between gap-4 p-4 text-sm">
+            <p>
+              You have <span className="font-medium">{unreadNotifications}</span> unread notification{unreadNotifications === 1 ? "" : "s"}.
+            </p>
+            <Link href={`/${org.slug}/notifications`} className="text-primary hover:underline">
+              View
+            </Link>
+          </CardContent>
+        </Card>
+      )}
 
       {searchParams.onboarded && (
         <p className="rounded-md bg-success/10 px-3 py-2 text-sm text-success">

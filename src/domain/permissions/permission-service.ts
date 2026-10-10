@@ -3,8 +3,12 @@ import { roleHasPermission, type MembershipRole, type Permission } from "./roles
 /**
  * `API` is a request authenticated by an API key (Phase 10 Slice 1). Like `AI` and `SYSTEM` it is NOT human, so
  * every human-only check (`type === "HUMAN"`: period close/reopen/override, sign-offs, ...) refuses it.
+ *
+ * `AUTOMATION` is a rule run by the Automation Centre (Phase 10 Slice 3). Same story: NOT human, so every human-only
+ * check refuses it even when the rule's authorising person is an OWNER, and its `grantedPermissions` can only ever be
+ * the action's required permissions intersected with that person's CURRENT role (src/domain/automation/identity.ts).
  */
-export type ActorType = "HUMAN" | "AI" | "SYSTEM" | "API";
+export type ActorType = "HUMAN" | "AI" | "SYSTEM" | "API" | "AUTOMATION";
 
 /**
  * The acting party for a domain-service call: a specific user, in a
@@ -28,6 +32,8 @@ export interface Actor {
   grantedPermissions?: ReadonlySet<Permission>;
   /** Present for an `API` actor: which key acted. Recorded in the audit metadata by `AuditService.record`. Never the secret. */
   apiKey?: { id: string; prefix: string };
+  /** Present for an `AUTOMATION` actor: which rule acted. Recorded in the audit metadata by `AuditService.record`. */
+  automation?: { ruleId: string; ruleName: string };
 }
 
 /**

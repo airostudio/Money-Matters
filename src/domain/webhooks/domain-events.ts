@@ -20,6 +20,11 @@ export interface EmitParams {
   aggregateType: string;
   aggregateId: string;
   object: Record<string, unknown>;
+  /**
+   * `automation` marks an event the Automation Centre emitted. It is stored pre-marked as processed by the evaluator and
+   * the evaluator also refuses to read any non-`user` origin, so an automation can never trigger an automation (no loops).
+   */
+  origin?: "user" | "automation";
 }
 
 export const DomainEventService = {
@@ -36,6 +41,8 @@ export const DomainEventService = {
       aggregateId: params.aggregateId,
       payload: envelope,
       occurredAt,
+      origin: params.origin ?? "user",
+      automationProcessedAt: params.origin === "automation" ? occurredAt : null,
     });
     return id;
   },

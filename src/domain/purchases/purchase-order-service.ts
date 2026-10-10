@@ -11,7 +11,7 @@ import {
   type purchaseOrderStatusEnum,
 } from "@/db/schema";
 import { withTenant, type TenantDb } from "@/db/tenant";
-import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
+import { PermissionDeniedError, assertPermission, type Actor } from "@/domain/permissions/permission-service";
 import { AuditService } from "@/domain/audit/audit-service";
 import {
   InvalidBillLineError,
@@ -115,6 +115,14 @@ async function refreshPoStatus(tx: TenantDb, actor: Actor, poId: string): Promis
   });
 }
 
+/**
+ * An automation (Phase 10 Slice 3) may DRAFT a purchase order and nothing else: it can never edit, delete, send, cancel,
+ * close, receive against or convert one. Every PO mutator other than `create` / `createIn` calls this first.
+ */
+function assertNotAutomation(actor: Actor): void {
+  if (actor.type === "AUTOMATION") throw new PermissionDeniedError("purchase_order:manage", actor.role);
+}
+
 async function persistPoWithLines(
   tx: TenantDb,
   actor: Actor,
@@ -174,6 +182,8 @@ async function persistPoWithLines(
         total: totals.total,
         createdById: actor.userId,
         updatedById: actor.userId,
+        // Flags a PO that a rule drafted (so the UI can say so and a person can review or delete it). Only an AUTOMATION actor can set it.
+        automationRuleId: actor.type === "AUTOMATION" ? (actor.automation?.ruleId ?? null) : null,
       })
       .returning({ id: purchaseOrders.id });
     if (!created) throw new Error("Failed to create purchase order.");
@@ -263,7 +273,17 @@ export const PurchaseOrderService = {
     return withTenant(actor.organizationId, (tx) => persistPoWithLines(tx, actor, input));
   },
 
+  /**
+   * The same create-DRAFT path, inside the CALLER's transaction (the automation engine records its run and updates its job
+   * in the same transaction as the draft). Always a DRAFT: nothing is sent, converted to a bill or posted.
+   */
+  async createIn(tx: TenantDb, actor: Actor, input: CreatePurchaseOrderInput) {
+    assertPermission(actor, "purchase_order:manage");
+    return persistPoWithLines(tx, actor, input);
+  },
+
   async update(actor: Actor, poId: string, input: UpdatePurchaseOrderInput) {
+    assertNotAutomation(actor);
     assertPermission(actor, "purchase_order:manage");
     return withTenant(actor.organizationId, async (tx) => {
       const existing = await loadPoOr404(tx, actor.organizationId, poId);
@@ -275,6 +295,7 @@ export const PurchaseOrderService = {
   },
 
   async deleteDraft(actor: Actor, poId: string) {
+    assertNotAutomation(actor);
     assertPermission(actor, "purchase_order:manage");
     await withTenant(actor.organizationId, async (tx) => {
       const existing = await loadPoOr404(tx, actor.organizationId, poId);
@@ -293,6 +314,7 @@ export const PurchaseOrderService = {
 
   /** DRAFT -> SENT. Idempotent if already SENT. A PO never posts to the ledger — this is purely a workflow marker. */
   async markSent(actor: Actor, poId: string) {
+    assertNotAutomation(actor);
     assertPermission(actor, "purchase_order:manage");
     return withTenant(actor.organizationId, async (tx) => {
       const po = await loadPoOr404(tx, actor.organizationId, poId);
@@ -318,6 +340,7 @@ export const PurchaseOrderService = {
   },
 
   async cancel(actor: Actor, poId: string, reason: string) {
+    assertNotAutomation(actor);
     assertPermission(actor, "purchase_order:manage");
     return withTenant(actor.organizationId, async (tx) => {
       const po = await loadPoOr404(tx, actor.organizationId, poId);
@@ -350,6 +373,7 @@ export const PurchaseOrderService = {
 
   /** Manually closes a PO that won't receive any more goods (e.g. the supplier under-shipped the remainder). */
   async close(actor: Actor, poId: string) {
+    assertNotAutomation(actor);
     assertPermission(actor, "purchase_order:manage");
     return withTenant(actor.organizationId, async (tx) => {
       const po = await loadPoOr404(tx, actor.organizationId, poId);
@@ -382,6 +406,7 @@ export const PurchaseOrderService = {
    * PARTIALLY_RECEIVED/RECEIVED status, never trusting a stored belief.
    */
   async recordReceipt(actor: Actor, poId: string, input: RecordPurchaseOrderReceiptInput) {
+    assertNotAutomation(actor);
     assertPermission(actor, "purchase_order:manage");
     return withTenant(actor.organizationId, async (tx) => {
       const po = await loadPoOr404(tx, actor.organizationId, poId);
@@ -484,6 +509,7 @@ export const PurchaseOrderService = {
    * never auto-posts.
    */
   async convertToBill(actor: Actor, poId: string, input: ConvertPurchaseOrderToBillInput) {
+    assertNotAutomation(actor);
     assertPermission(actor, "purchase_order:manage");
     assertPermission(actor, "supplier_bill:manage");
 

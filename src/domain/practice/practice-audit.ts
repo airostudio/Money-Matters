@@ -5,7 +5,7 @@ import { redactSensitive } from "@/domain/audit/audit-service";
 export interface PracticeAuditParams {
   practiceId: string;
   actorUserId: string;
-  actorType?: "HUMAN" | "AI" | "SYSTEM" | "API";
+  actorType?: "HUMAN" | "AI" | "SYSTEM" | "API" | "AUTOMATION";
   action: string;
   entityType: string;
   entityId: string;

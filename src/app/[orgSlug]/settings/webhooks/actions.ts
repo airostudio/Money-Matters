@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { rethrowPermissionDenied } from "@/lib/action-errors";
 import { requireOrgAndActor } from "@/lib/session";
+import { AutomationEngine } from "@/domain/automation/engine";
 import { ReplayRefusedError, WebhookDispatchService } from "@/domain/webhooks/dispatch-service";
 import { WebhookEncryptionUnavailableError } from "@/domain/webhooks/secret-crypto";
 import { InvalidWebhookInputError, WebhookNotFoundError, WebhookSubscriptionService } from "@/domain/webhooks/subscription-service";
@@ -159,6 +160,12 @@ export async function sendPendingNowAction(orgSlug: string): Promise<void> {
   try {
     const { actor } = await requireOrgAndActor(orgSlug);
     const result = await WebhookDispatchService.dispatchNow(actor);
+    // Event-driven automations are evaluated whenever the outbox is dispatched (Phase 10 Slice 3). Sequential, after the dispatch, never throwing into this action.
+    try {
+      await AutomationEngine.runPass(actor.organizationId, { source: "OUTBOX_DISPATCH" });
+    } catch {
+      // Best effort: "Run automations now" does the same on demand.
+    }
     revalidatePath(back);
     const notice = result.skipped ? "dispatch_disabled" : `dispatched&sent=${result.delivered}&failed=${result.failed}`;
     redirect(`${back}?notice=${notice}`);

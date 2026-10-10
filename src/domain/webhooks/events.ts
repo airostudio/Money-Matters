@@ -15,6 +15,8 @@ export const EVENT_TYPES = [
   "payment.received",
   "bill.created",
   "bill.approved",
+  // Phase 10 Slice 3: emitted by the Automation Centre's EMIT_WEBHOOK_EVENT action (origin = automation). Never an automation trigger.
+  "automation.triggered",
 ] as const;
 
 export type WebhookEventType = (typeof EVENT_TYPES)[number];
@@ -31,6 +33,7 @@ export const EVENT_INFO: Record<WebhookEventType, { label: string; description: 
   "payment.received": { label: "Payment received", description: "A customer payment was recorded and allocated.", aggregate: "Payment" },
   "bill.created": { label: "Bill created", description: "A draft bill was created.", aggregate: "Bill" },
   "bill.approved": { label: "Bill approved", description: "A bill was approved and posted.", aggregate: "Bill" },
+  "automation.triggered": { label: "Automation triggered", description: "An automation rule you configured fired and chose to emit this event.", aggregate: "AutomationRule" },
 };
 
 export function isWebhookEventType(value: string): value is WebhookEventType {

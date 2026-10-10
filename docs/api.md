@@ -217,11 +217,32 @@ Without it webhooks are disabled with a clear message in Settings and nothing el
 | `payment.received` | a customer payment is recorded and allocated | Payment, with `allocations` |
 | `bill.created` | a **draft** bill is created | Bill, with `lines` |
 | `bill.approved` | a bill is approved and posted | Bill |
+| `automation.triggered` | an automation rule you configured fired and has the **Emit a webhook event** action (Phase 10 Slice 3, below) | an automation envelope object, not a resource |
 
 A subscription lists concrete event types; there is no wildcard in v1. **Not available:** `payroll.completed` (payroll is outside
 the public API) and `bank.transaction.created` (bank transactions have no API representation) — they will be offered when their
 data can be exposed under the same permission rules. There is also no `invoice.approved`/`bill.paid`/supplier-payment event yet.
 `ping` is sent only by the **Send test event** button.
+
+#### `automation.triggered` (Phase 10 Slice 3)
+
+Emitted only by the Automation Centre's `EMIT_WEBHOOK_EVENT` action (**Settings → Automation**), never by a business change, and
+delivered through your existing subscriptions like any other event (subscribe to `automation.triggered`). Its `data.object` is:
+
+```json
+{
+  "rule": { "id": "…", "name": "Large invoice" },
+  "trigger": "invoice.created",
+  "subject": { "type": "Invoice", "id": "…" },
+  "object": { "id": "…", "number": "INV-000042", "total": { "amount": "1100.00", "currency": "AUD" }, "…": "…" }
+}
+```
+
+`object` is the **public-API representation** of the triggering resource (for event triggers: exactly the object the original
+event carried; for the overdue / due-soon scans: a small subset of the invoice or bill fields the API already returns) and is
+`null` for a product (stock is not part of the public API), where only `subject.id` identifies it. Nothing beyond what
+`GET /api/v1/…` returns is ever included. **Loop protection:** an `automation.triggered` event carries an `origin = automation`
+marker and can never itself trigger an automation rule, so a rule cannot cause a cycle. The same `Mm-Event-Id` dedupe rule applies.
 
 ### Envelope
 

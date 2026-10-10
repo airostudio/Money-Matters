@@ -7,6 +7,13 @@ import type { Actor } from "@/domain/permissions/permission-service";
 import type { MembershipRole } from "@/domain/permissions/roles";
 
 const TENANT_TABLES = [
+  "integration_events",
+  "integration_connections",
+  "notifications",
+  "automation_runs",
+  "automation_jobs",
+  "automation_rules",
+  "automation_settings",
   "organization_invite_index",
   "organization_invites",
   "webhook_delivery_attempts",

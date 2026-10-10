@@ -137,7 +137,7 @@ export const planTierEnum = pgEnum("plan_tier", ["STANDARD", "EXTENDED", "COMPLI
  * distinct, NON-human actor type on purpose: every human-only check in the codebase asks "is this actor a
  * HUMAN?" and so refuses an API actor structurally (docs/security.md section 15).
  */
-export const auditActorTypeEnum = pgEnum("audit_actor_type", ["HUMAN", "AI", "SYSTEM", "API"]);
+export const auditActorTypeEnum = pgEnum("audit_actor_type", ["HUMAN", "AI", "SYSTEM", "API", "AUTOMATION"]);
 
 /**
  * Phase 3 Slice 1 (Sales — customer invoicing & AR core). `DRAFT` has no
@@ -1475,6 +1475,8 @@ export const purchaseOrders = pgTable("purchase_orders", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   createdById: uuid("created_by_id"),
   updatedById: uuid("updated_by_id"),
+  /** Phase 10 Slice 3: set when an automation rule drafted this PO (it is a normal DRAFT, flagged so a person can review or delete it). */
+  automationRuleId: uuid("automation_rule_id").references((): AnyPgColumn => automationRules.id, { onDelete: "set null" }),
 }, (table) => ({
   orgPoNumberUnique: uniqueIndex("purchase_orders_org_po_number_unique").on(
     table.organizationId,
@@ -4943,9 +4945,18 @@ export const domainEvents = pgTable("domain_events", {
   payload: jsonb("payload").notNull(),
   occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
   dispatchedAt: timestamp("dispatched_at", { withTimezone: true }),
+  /**
+   * Phase 10 Slice 3. `user` for every event a business change emits; `automation` for the `automation.triggered`
+   * events the Automation Centre emits. An `automation` event NEVER triggers an event rule (loop protection) - it is
+   * only ever delivered to webhook subscriptions.
+   */
+  origin: text("origin").notNull().default("user"),
+  /** When the automation evaluator has looked at this event (independent of webhook fan-out, which sets `dispatched_at`). */
+  automationProcessedAt: timestamp("automation_processed_at", { withTimezone: true }),
 }, (table) => ({
   orgOccurredIdx: index("domain_events_org_occurred_idx").on(table.organizationId, table.occurredAt),
   undispatchedIdx: index("domain_events_undispatched_idx").on(table.organizationId, table.occurredAt).where(sql`dispatched_at IS NULL`),
+  automationPendingIdx: index("domain_events_automation_pending_idx").on(table.organizationId, table.occurredAt).where(sql`automation_processed_at IS NULL`),
 }));
 
 /**
@@ -5096,4 +5107,206 @@ export const organizationInviteIndex = pgTable("organization_invite_index", {
     foreignColumns: [organizationInvites.id, organizationInvites.organizationId],
     name: "organization_invite_index_invite_org_fk",
   }).onDelete("cascade"),
+}));
+
+// ---------------------------------------------------------------------------
+// Phase 10 Slice 3: the Automation Centre, notifications and the integration framework
+// (docs/security.md sections 18-19, docs/architecture.md section 13)
+// ---------------------------------------------------------------------------
+
+export const automationJobStateEnum = pgEnum("automation_job_state", ["CLAIMED", "DONE", "RETRY", "FAILED", "SKIPPED"]);
+export const automationRunOutcomeEnum = pgEnum("automation_run_outcome", ["SUCCESS", "SKIPPED", "FAILED"]);
+export const notificationSeverityEnum = pgEnum("notification_severity", ["INFO", "ACTION", "WARNING", "CRITICAL"]);
+export const integrationStatusEnum = pgEnum("integration_status", ["CONNECTED", "ERROR", "DISCONNECTED"]);
+
+/**
+ * One optional row per organization holding the EMERGENCY switch ("Pause all automations"). It is read on every
+ * evaluation pass with no caching, so flipping it takes effect on the very next pass. Absent row = not paused.
+ */
+export const automationSettings = pgTable("automation_settings", {
+  organizationId: uuid("organization_id")
+    .primaryKey()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  allPaused: boolean("all_paused").notNull().default(false),
+  pausedAt: timestamp("paused_at", { withTimezone: true }),
+  pausedByUserId: uuid("paused_by_user_id").references(() => users.id),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * An automation rule: { trigger, conditions[], action } from CLOSED vocabularies (src/domain/automation/vocabulary.ts),
+ * stored as JSON and RE-VALIDATED on every run. `authorised_by_user_id` is the human whose CURRENT role bounds what the
+ * rule may do (initially its creator; changes when another human re-enables it, which is a fresh explicit approval).
+ */
+export const automationRules = pgTable("automation_rules", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  description: text("description"),
+  trigger: text("trigger").notNull(),
+  triggerParams: jsonb("trigger_params").notNull().default(sql`'{}'::jsonb`),
+  conditions: jsonb("conditions").notNull().default(sql`'[]'::jsonb`),
+  action: jsonb("action").notNull(),
+  enabled: boolean("enabled").notNull().default(true),
+  /** USER_PAUSED | AUTHORISER_INACTIVE | AUTO_FAILURES | INVALID_RULE - why a rule is not enabled (null while enabled). */
+  disabledCode: text("disabled_code"),
+  disabledReason: text("disabled_reason"),
+  createdByUserId: uuid("created_by_user_id")
+    .notNull()
+    .references(() => users.id),
+  authorisedByUserId: uuid("authorised_by_user_id")
+    .notNull()
+    .references(() => users.id),
+  consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+  lastRunAt: timestamp("last_run_at", { withTimezone: true }),
+  lastSuccessAt: timestamp("last_success_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  orgCreatedIdx: index("automation_rules_org_created_idx").on(table.organizationId, table.createdAt),
+  idOrgUnique: uniqueIndex("automation_rules_id_org_unique").on(table.id, table.organizationId),
+}));
+
+/**
+ * The idempotency / dedupe ledger and retry queue of the engine: one row per (rule, job key). The UNIQUE pair is what
+ * makes "each rule fires at most once per trigger key" a database fact, not a convention. Keys: the event id, or
+ * `invoice:<id>:overdue:<n>`, `bill:<id>:due_soon:<n>`, `reorder:<productId>` (the reorder row is DELETED when the product
+ * recovers above its reorder point, which is what re-arms it). `context` holds only public-API-visible data.
+ */
+export const automationJobs = pgTable("automation_jobs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  ruleId: uuid("rule_id")
+    .notNull()
+    .references(() => automationRules.id, { onDelete: "cascade" }),
+  jobKey: text("job_key").notNull(),
+  state: automationJobStateEnum("state").notNull().default("CLAIMED"),
+  attempts: integer("attempts").notNull().default(0),
+  nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
+  leaseUntil: timestamp("lease_until", { withTimezone: true }),
+  context: jsonb("context").notNull(),
+  lastError: text("last_error"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  ruleKeyUnique: uniqueIndex("automation_jobs_rule_key_unique").on(table.ruleId, table.jobKey),
+  orgStateIdx: index("automation_jobs_org_state_idx").on(table.organizationId, table.state, table.nextAttemptAt),
+  orgCreatedIdx: index("automation_jobs_org_created_idx").on(table.organizationId, table.createdAt),
+}));
+
+/** APPEND-ONLY run log: mm_app has INSERT and SELECT only. `rule_name` is a snapshot so the log survives a rule's deletion. */
+export const automationRuns = pgTable("automation_runs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  ruleId: uuid("rule_id").references(() => automationRules.id, { onDelete: "set null" }),
+  ruleName: text("rule_name").notNull(),
+  trigger: text("trigger").notNull(),
+  jobKey: text("job_key").notNull(),
+  attempt: integer("attempt").notNull().default(1),
+  outcome: automationRunOutcomeEnum("outcome").notNull(),
+  reason: text("reason"),
+  /** AUTOMATION (the engine acted as the automation identity) - kept as text so the log reads on its own. */
+  actorType: text("actor_type").notNull().default("AUTOMATION"),
+  actorUserId: uuid("actor_user_id").references(() => users.id),
+  source: text("source").notNull(),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }).notNull(),
+  createdObjectType: text("created_object_type"),
+  createdObjectId: uuid("created_object_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  orgCreatedIdx: index("automation_runs_org_created_idx").on(table.organizationId, table.createdAt),
+  ruleIdx: index("automation_runs_rule_idx").on(table.ruleId, table.createdAt),
+  createdObjectIdx: index("automation_runs_created_object_idx").on(table.organizationId, table.createdObjectId),
+}));
+
+/**
+ * In-app notifications (master spec section 66, minimal slice). One row per recipient, resolved at creation time from
+ * roles/users. Visible only to `recipient_user_id` (service rule; RLS keys on the organization like every tenant table).
+ * Identical unread items are folded (`occurrences`) instead of piling up.
+ */
+export const notifications = pgTable("notifications", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  recipientUserId: uuid("recipient_user_id")
+    .notNull()
+    .references(() => users.id),
+  title: text("title").notNull(),
+  body: text("body"),
+  /** An in-app path (`/<orgSlug>/...`), never an external URL. */
+  link: text("link"),
+  severity: notificationSeverityEnum("severity").notNull().default("INFO"),
+  /** `automation` or `system`. */
+  source: text("source").notNull(),
+  sourceRefId: uuid("source_ref_id"),
+  groupKey: text("group_key").notNull(),
+  occurrences: integer("occurrences").notNull().default(1),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  lastOccurredAt: timestamp("last_occurred_at", { withTimezone: true }).notNull().defaultNow(),
+  readAt: timestamp("read_at", { withTimezone: true }),
+  dismissedAt: timestamp("dismissed_at", { withTimezone: true }),
+}, (table) => ({
+  recipientIdx: index("notifications_recipient_idx").on(table.organizationId, table.recipientUserId, table.createdAt),
+  groupIdx: index("notifications_group_idx").on(table.recipientUserId, table.groupKey),
+}));
+
+/**
+ * A configured integration (docs/security.md section 19). Non-secret settings live in `config`; secrets (for the Slack
+ * provider: the incoming-webhook URL) are encrypted with AES-256-GCM under the SAME environment key as webhook signing
+ * secrets, with additional authenticated data bound to (organization, connection). The ciphertext is never returned,
+ * logged or audited. `secret_ciphertext` is NULL once disconnected.
+ */
+export const integrationConnections = pgTable("integration_connections", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  providerId: text("provider_id").notNull(),
+  name: text("name").notNull(),
+  config: jsonb("config").notNull().default(sql`'{}'::jsonb`),
+  secretCiphertext: text("secret_ciphertext"),
+  secretKeyVersion: integer("secret_key_version"),
+  status: integrationStatusEnum("status").notNull().default("CONNECTED"),
+  statusReason: text("status_reason"),
+  lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
+  lastError: text("last_error"),
+  consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+  createdByUserId: uuid("created_by_user_id")
+    .notNull()
+    .references(() => users.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  orgCreatedIdx: index("integration_connections_org_created_idx").on(table.organizationId, table.createdAt),
+  idOrgUnique: uniqueIndex("integration_connections_id_org_unique").on(table.id, table.organizationId),
+}));
+
+/** APPEND-ONLY integration / sync log: mm_app has INSERT and SELECT only. Never contains a secret. */
+export const integrationEvents = pgTable("integration_events", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  connectionId: uuid("connection_id")
+    .notNull()
+    .references(() => integrationConnections.id, { onDelete: "cascade" }),
+  /** CONNECT | TEST | SEND | DISCONNECT | ERROR. */
+  kind: text("kind").notNull(),
+  ok: boolean("ok").notNull(),
+  detail: text("detail"),
+  errorClass: text("error_class"),
+  statusCode: integer("status_code"),
+  actorUserId: uuid("actor_user_id").references(() => users.id),
+  ruleId: uuid("rule_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  connectionIdx: index("integration_events_connection_idx").on(table.connectionId, table.createdAt),
 }));
