@@ -2324,10 +2324,10 @@ Deferred by default and not researched to a build, per the standing rule that no
 - `npm run typecheck` and `npm run lint` clean; `npx next build` succeeds with all new routes. Migrations 0052-0056 apply from an
   empty database (renumbered after the OAuth slice took 0050/0051) and the build-time isolation audit reports 92
   organization-scoped tables (the four new ones, `bas_statements`, `bas_lodgement_records`, `leave_requests`, `payroll_payments`,
-  all FORCE-RLS). Full suite on the merged tip: 190 files, 2,359 tests, 2,358 passing; the one failure is
-  `consolidation/isolation-audit.test.ts` complaining about the OAuth slice's `oauth_access_tokens` table (not a Phase 8 table; that
-  test's tenant-policy expectation does not account for the OAuth slice's lookup table, and I did not run it against the bare
-  OAuth tip). New tests: 13 BAS arithmetic unit tests, 13 BAS integration (hand-worked figures,
+  all FORCE-RLS). Full suite on the merged tip: 190 files, 2,359 tests, 2,358 passing; the one failure was
+  `consolidation/isolation-audit.test.ts` complaining about the OAuth slice's `oauth_access_tokens` table (not a Phase 8 table);
+  the OAuth work fixed that test upstream in its final commit, which is merged here, and it passes together with the
+  tenant-isolation and permission tests after the merge. New tests: 13 BAS arithmetic unit tests, 13 BAS integration (hand-worked figures,
   reversals, reconciliation, immutability as `mm_app`, permissions, AI tool, CSV, expense claims), 15 payroll-operations
   integration, 1 query-budget, 5 ABA layout, 5 Payday Super and 5 foreign resident / Medicare unit tests, 3 rule-set / Payday
   pay run integration tests.
