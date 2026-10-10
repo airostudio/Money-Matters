@@ -3219,7 +3219,7 @@ attempt after the request.
 - `payroll.completed` and `bank.transaction.created` - payroll is outside the public API surface and bank transactions have no API DTO; they wait until their data can be exposed under the same permission rules.
 - Also not built: `invoice.approved` / `bill.paid` / supplier-payment events (not in the §55 list), a polling `GET /events` catch-up endpoint, per-event payload customisation, wildcard subscriptions, webhook management via the
   public API, mTLS / sender IP allow-listing (no stable egress), dead-letter email notifications, bulk re-encryption when the encryption key is rotated.
-- The **integration framework (§53) and automation centre (§75)** are the next slice.
+- The **integration framework (§53) and automation centre (§75)** were delivered in Slice 3 (below).
 
 **Verified.** Typecheck, lint, the full suite (1812 tests: 1475 existing, unmodified, + 337 new) and `npm run build` pass. A real-HTTP smoke test against `next start` (production build, no browser):
 an invoice created through the public API with a key wrote its outbox row and was dispatched right after the response to a real public HTTPS host (`example.com`: real DNS, real TLS verification, a real 405 recorded in the
@@ -3231,6 +3231,63 @@ the visual layout (no browser), a delivery to a 2xx endpoint over the public int
 **New environment variable:** `WEBHOOK_SECRET_ENCRYPTION_KEY` (optional; webhooks are off without it). **New dependency:** `@vercel/functions` (for `waitUntil`).
 
 **Phase 10 remaining:** integration framework + automation centre (Slice 3), OAuth 2.0 for third-party apps, a global webhook dispatcher/scheduler (needs a cross-tenant work index).
+
+## Phase 10 Slice 3 — Automation Centre & integration framework — complete
+
+Master spec §75 (Automation Centre, Settings → Automation) and §53 (integration platform: "Create an integration framework"), under §76 (the system learns only through explicit, controlled configuration), §77 (every automated process must have pause, override, undo where
+allowed, review and an audit trail) and the §87 non-negotiables. Design: `docs/architecture.md` §13. Threat model: `docs/security.md` §18 (automations) and §19 (integrations). Developer-visible change: the `automation.triggered` webhook event (`docs/api.md`).
+Owner decisions honoured: **no job queue, no scheduler, no Vercel Cron** - automations run on demand ("Run automations now"), best-effort right after a response (the same `waitUntil` task as the webhook dispatch) and whenever the outbox is dispatched ("Send now"); no real
+third-party connector was built (no credentials or accounts exist) - the framework is real and the one concrete provider works with only a user-supplied URL.
+
+**Built**
+- **Rules from closed vocabularies, no code.** `{ trigger, conditions[], action }` validated with zod: **11 triggers** (the 8 outbox events - `customer.created`, `supplier.created`, `invoice.created`, `invoice.sent`, `invoice.paid`, `payment.received`, `bill.created`, `bill.approved` -
+  and 3 bounded condition scans - `INVOICE_OVERDUE` (N days, once per invoice per rule), `BILL_DUE_SOON` (within N days), `INVENTORY_BELOW_REORDER` (once per product until it recovers above its reorder point, then re-arms)); conditions over a **fixed field whitelist per trigger**
+  with a closed operator set per field kind and exact-decimal money (a float is refused); **4 actions** (all low-risk and reversible): `NOTIFY_IN_APP`, `SEND_TO_CHANNEL`, `EMIT_WEBHOOK_EVENT` (new outbox event type `automation.triggered`, payload = rule + the public-API DTO) and
+  `CREATE_DRAFT_PURCHASE_ORDER` (only with the reorder trigger; a DRAFT PO via `PurchaseOrderService.createIn`, never sent / converted / posted, flagged "Automation", deletable). Unknown fields, operators and actions are rejected at creation **and re-validated on every run**; the scans
+  compile conditions to SQL through closed lookup tables with bound values (no string-built SQL; structural test).
+- **Excluded actions are structurally unreachable.** Not in the action enum; and the execution identity could not perform them anyway. A test walks the action enum and the action/trigger → permission mappings and every write permission in the system; another proves the engine imports no human-only service.
+- **Execution identity `AUTOMATION`.** A distinct non-human actor type (added to `ActorType` and the `audit_actor_type` enum exactly as `API` was; migration `0048`). Its permissions = (action + trigger needs) ∩ the authorising person's **current** role ∩ a short allow-list, re-evaluated on every run; the authoriser must also still hold
+  `automation:manage` and be active and unsuspended. Removed / suspended / demoted → the rule is **switched off at the next run with a visible reason and an audit entry** (and the page warns beforehand); never silently deleted. `assertHumanWith`, `evaluatePosting`, `evaluateLockChange` and the webhook / API-key /
+  integration / automation guards refuse the type even with an OWNER role behind it (tested). `PurchaseOrderService` refuses the type for everything except creating a draft.
+- **Controlled configuration = the authorisation.** New permissions `automation:read` (ACCOUNTANT, BOOKKEEPER, MANAGER, READ_ONLY + OWNER/ADMINISTRATOR), `automation:manage` and `integration:manage` (OWNER/ADMINISTRATOR only, and a HUMAN actor: API keys, AI, automations and the system are refused). A write-type action shows a
+  warning and needs a server-checked acknowledgement at creation and at every re-enable. `PERMISSION_AREAS` extended.
+- **Pause / override / undo / review.** Per-rule pause; org-wide **"Pause all automations"** read uncached on every pass (the very next evaluation; events that occur while paused are not replayed after resuming); append-only **run log** (`automation_runs`, `mm_app` INSERT/SELECT only, verified as the real role) with
+  links to created drafts; auto-disable after 5 consecutive failures (visible reason + audit); archived organizations do not run and their events stay pending (the archived-entry-points safety net was updated properly, not weakened); notifications are dismissible.
+- **Loop and flood protection.** `UNIQUE (rule_id, job_key)` dedupe table (event id / invoice id + threshold / bill id + threshold / product id); events an automation emits carry `origin = automation`, are pre-marked processed, excluded by the evaluator's query, not a valid trigger, and immutable for `mm_app` - no
+  automation→event→automation cycle (four layers, each tested); per-rule and per-org caps per pass and per day (10/30 and 100/300); bounded scan batches (25) and event batches (50); a rule ignores events older than 72 h or from before it was last edited / enabled.
+- **Notifications** (minimal §66): `notifications` tenant table (RLS + FORCE + policy + narrow grants), per-recipient rows resolved at creation (roles filtered to those who can see the object), folding of identical unread items, page `/[orgSlug]/notifications` (grouped by rule, mark read, dismiss, clear old), a home-page card, a nav item with **no live badge**, and
+  **no query in the shared layout, shell or `withTenant`** (structural test). Only the recipient can read or change a notification (tested against OWNER/ADMINISTRATOR colleagues, other organizations and non-human actors).
+- **Integration framework (§53).** `IntegrationProvider` adapter contract + registry; tenant tables `integration_connections` and append-only `integration_events`; management UI at Settings → Integrations (`integration:manage`). **Secrets** use the existing AES-256-GCM machinery and `WEBHOOK_SECRET_ENCRYPTION_KEY`
+  (generalised to `src/domain/security/secret-encryption.ts`; the webhook module re-exports it, the `webhook` purpose keeps its original AAD byte for byte, integration ciphertexts are bound to purpose + organization + connection): shown/entered once, never returned, logged or audited, **fail closed** without the key.
+  The catalogue lists **every spec'd provider** (Basiq, Plaid, Yodlee, Stripe, PayPal, Square, Shopify, WooCommerce, Amazon, eBay, HubSpot, Salesforce, payroll/HR, Gmail, Outlook, Google Drive, OneDrive, Teams) as data-only "coming soon" entries with the reason; none can resolve to a provider or be connected (tested). **No stub connectors.**
+- **The one real provider `slack_incoming_webhook`.** The URL is a bearer secret (encrypted, masked on screen). Destination check at connect AND every send: **exact host allowlist `hooks.slack.com`** + path shape, **then the full webhook SSRF guard** (https/443, vetted DNS, pinned IP, no redirects, 10 s, TLS verified) through the same `sendWebhook` client.
+  Lookalikes (`hooks.slack.com.evil.com`, `evilhooks.slack.com`), userinfo tricks, ports, http, IP literals, localhost and redirects are all refused (a table of refusals; refused destinations never reach the client or even the resolver). Messages are Slack's `{ "text": ... }`: minimal by default, amounts only with the connection's toggle (off by default), control characters
+  escaped so text cannot become a mention. `testConnection` sends a labelled test message. Failed sends retry on later passes (3 attempts, 1 min then 5 min), repeated failures set the connection to ERROR (audited), and the 5th failed run switches the rule off.
+- **Measured database budgets** (`query-budget.test.ts`): a pass is **one transaction of 4-12 statements** whatever the number of pending events or event rules (10 statements with 1 or 15 events or 6 rules; +1 bounded SELECT per scan rule); a notify run adds one transaction (21 statements total, identical for 1 or 4 recipients); a channel send is
+  exactly 3 transactions (plan, read, record; 25 statements) with **none open during the HTTP call** (asserted with the connection tracker). Sequential everywhere; no `Promise.all`, private connection or timer in the new modules (structural test).
+
+**§75 examples - disposition**
+| Example | Disposition |
+|---|---|
+| WHEN invoice becomes 7 days overdue THEN send reminder | **Built** as `INVOICE_OVERDUE` (days = 7) → notify / channel message / webhook event. The "reminder" is an internal notification or channel message; **no customer-facing email or SMS** (no email infrastructure). |
+| WHEN expense > $2,000 THEN request CFO approval | **Deferred**: there is no multi-level approval engine (§45), and an automation may never approve or route approvals. The nearest built thing is a notification when an `invoice.created` / `bill.created` total exceeds a threshold. |
+| WHEN supplier bank information changes THEN block payment + alert owner | **Deferred**: no supplier-bank-detail-change event exists, and blocking a payment is a human-controlled action. |
+| WHEN bank confidence > 99% AND rule approved THEN auto-reconcile | **Already exists** as the Phase 6 `BANK_RECONCILIATION_AUTO_MATCH` autonomy whitelist item (Settings → AI Financial Controller autonomy). The Automation page shows a read-only pointer to it instead of creating a second mechanism. |
+| WHEN inventory < reorder point THEN draft purchase order | **Built** as `INVENTORY_BELOW_REORDER` + `CREATE_DRAFT_PURCHASE_ORDER` (at-or-below, matching the Reorder Alerts page; fires once per product, re-arms on recovery). |
+| WHEN monthly close reaches 100% THEN prepare management pack | **Deferred**: computing the close checklist is heavy per evaluation; and period close stays a human decision. |
+
+**Deliberately deferred (and why)**
+- Real third-party connectors (Basiq / Plaid / Yodlee, Stripe / PayPal / Square, Shopify / WooCommerce / Amazon / eBay, HubSpot / Salesforce, payroll / HR, Gmail / Outlook / Drive / OneDrive): need external accounts, credentials and, mostly, OAuth. **Teams: deferred, mechanism unverified** - Microsoft is changing its incoming-webhook
+  mechanism and it could not be verified offline from repository knowledge, so none was implemented.
+- **OAuth 2.0 for third-party apps** (the only part of Phase 10 now remaining), a scheduler / cron (owner decision), email / SMS actions (no email infrastructure), approval-routing rules (§45), supplier-bank-change blocking, the month-close-complete trigger (cost), multi-step or branching workflows, automation via the public API,
+  per-user notification preferences / digests, mobile push.
+- Not built either: a "dry-run / preview" of a rule against history, editing a rule's conditions in place in the UI (delete and recreate; the service supports `update`), cross-organization fairness between simultaneous passes, bulk re-encryption of integration credentials on key rotation.
+
+**Verified.** Typecheck, lint, the full suite (2156 tests across 174 files: the 1933 existing ones unmodified except the audited-table update in `archived-entry-points.test.ts`, which is the intended safety net, + 223 new) and the production build (`npm run db:migrate` then `npx next build`; `npm run build` itself needs the environment exported, which the sandbox refuses) pass. **Real-HTTP smoke test** against `next start` (production build, real NextAuth logins for an OWNER and a READ_ONLY user, forms posted exactly as rendered, no browser; 33/33 checks after two assertions in my own script were corrected, then 8/8 with the key unset): the owner created the rule "WHEN invoice.created AND total > 100 THEN notify OWNERs" over HTTP and it is listed in plain English; tampered form values (an SQL-looking field name, an action outside the closed list) were refused with a message; creating invoices through the public API with a key (50.00 and 200.00) produced, right after the response and with no manual step, exactly one notification (for the 200.00 invoice) visible on the notifications page and as a home-page card; an inventory-below-reorder rule was refused without the write acknowledgement, then created, and **Run automations now** created one flagged DRAFT purchase order linked from the run log and badged "Automation" in the PO list (a second run created none); **Pause all automations** stopped the next evaluation (a new invoice produced no notification) and resuming worked; a READ_ONLY user could view rules and the run log but saw no management controls, a forged create-form post redirected to access-denied, their notifications page was private and empty, and Integrations showed the owner-only message; the Slack form refused `localhost`, `127.0.0.1`, a non-allowlisted host, the `hooks.slack.com.evil.com` lookalike and plain `http://` over real HTTP, and a stored hooks.slack.com URL was never rendered back (masked only); with the encryption key unset the Integrations page showed the disabled message while the Automation page, a notify rule, the home page, Sales, a public-API invoice (201) and post-response automation all still worked. **Not verified:** the visual layout (no browser); delivery to Slack itself (no workspace - sends were verified only through the injected fake client and a real local TLS server, never to Slack); a real send from the running server (deliberately not made); behaviour on Vercel (`waitUntil` is a no-op off Vercel).
+
+**No new environment variable.** `WEBHOOK_SECRET_ENCRYPTION_KEY` now also covers integration credentials (README, `.env.example` and the `db:migrate` optional-feature note updated). **No new dependency.**
+
+**Phase 10 remaining:** OAuth 2.0 for third-party apps (and the real providers that need it), a global webhook / automation dispatcher (needs a cross-tenant work index and, by the owner's decision, is not wanted yet).
 
 ## Organisation lifecycle & joining — complete
 
@@ -3266,8 +3323,8 @@ group keeps the entity configured and simply excludes it while archived. Webhook
 
 ## Phase 10 — Platform (in progress)
 
-Slices 1 (the public API foundation, API keys) and 2 (webhooks and the event outbox) are complete - see above. Remaining: the
-integration framework and adapters, the advanced automation centre, OAuth 2.0 for third-party apps, and a global webhook dispatcher. (Phase 8's later slices - BAS/GST,
+Slices 1 (the public API foundation, API keys), 2 (webhooks and the event outbox) and 3 (the Automation Centre and the integration framework) are complete - see above. Remaining: OAuth 2.0 for third-party apps (and the
+real providers that depend on it), and a global webhook / automation dispatcher (not wanted yet, by owner decision). (Phase 8's later slices - BAS/GST,
 STP lodgement, awards - are also still open.)
 
 ## Explicit non-goals for this session
