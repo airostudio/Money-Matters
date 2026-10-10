@@ -4908,9 +4908,12 @@ export const apiIdempotencyKeys = pgTable("api_idempotency_keys", {
   organizationId: uuid("organization_id")
     .notNull()
     .references(() => organizations.id, { onDelete: "cascade" }),
-  apiKeyId: uuid("api_key_id")
-    .notNull()
-    .references(() => apiKeys.id, { onDelete: "cascade" }),
+  /**
+   * The CREDENTIAL the key is scoped to: an API key id, or (Phase 10 Slice 4) an OAuth grant id. Deliberately NOT a
+   * foreign key any more (migration 0050) - a grant lives in a different table - so the scoping is by value: two
+   * credentials never share an idempotency namespace because their ids are distinct random UUIDs.
+   */
+  apiKeyId: uuid("api_key_id").notNull(),
   idempotencyKey: text("idempotency_key").notNull(),
   /** SHA-256 of the canonical (method, path, body) - a reuse with a different body is refused. */
   requestHash: text("request_hash").notNull(),
@@ -5310,3 +5313,203 @@ export const integrationEvents = pgTable("integration_events", {
 }, (table) => ({
   connectionIdx: index("integration_events_connection_idx").on(table.connectionId, table.createdAt),
 }));
+
+// ---------------------------------------------------------------------------
+// Phase 10 Slice 4: OAuth 2.0 for third-party apps (authorization code + PKCE) - docs/security.md section 20
+// ---------------------------------------------------------------------------
+
+export const oauthClientTypeEnum = pgEnum("oauth_client_type", ["PUBLIC", "CONFIDENTIAL"]);
+
+/**
+ * A registered third-party application. A normal TENANT table (RLS on organization_id): an app belongs to the
+ * organisation whose Owner/Administrator registered it and can only ever be authorised into THAT organisation
+ * (docs/security.md section 20 explains why). Holds the SHA-256 hash of a confidential client's secret (never the
+ * secret); public clients have neither. Soft-deleted (`deleted_at`) so the audit trail and the grant history keep
+ * their referent; disabling or deleting an app revokes every grant in the same transaction.
+ */
+export const oauthApps = pgTable("oauth_apps", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  /** Public identifier `mmo_c_<random>`. Unique platform-wide (see oauth_client_index). */
+  clientId: text("client_id").notNull(),
+  name: text("name").notNull(),
+  description: text("description"),
+  homepageUrl: text("homepage_url"),
+  clientType: oauthClientTypeEnum("client_type").notNull(),
+  /** Exact-match redirect URIs (https, or http loopback with any port). */
+  redirectUris: text("redirect_uris").array().notNull(),
+  /** The ceiling of scopes this app may ever request (same vocabulary as API keys). */
+  scopes: text("scopes").array().notNull(),
+  /** Non-secret display tag of the current client secret (confidential only). */
+  secretPrefix: text("secret_prefix"),
+  /** Hex SHA-256 of the full client secret (confidential only). */
+  secretHash: text("secret_hash"),
+  secretRotatedAt: timestamp("secret_rotated_at", { withTimezone: true }),
+  createdByUserId: uuid("created_by_user_id")
+    .notNull()
+    .references(() => users.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  disabledAt: timestamp("disabled_at", { withTimezone: true }),
+  disabledByUserId: uuid("disabled_by_user_id").references(() => users.id),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  deletedByUserId: uuid("deleted_by_user_id").references(() => users.id),
+}, (table) => ({
+  orgCreatedIdx: index("oauth_apps_org_created_idx").on(table.organizationId, table.createdAt),
+  clientIdUnique: uniqueIndex("oauth_apps_client_id_unique").on(table.clientId),
+  idOrgUnique: uniqueIndex("oauth_apps_id_org_unique").on(table.id, table.organizationId),
+}));
+
+/**
+ * The narrow NON-tenant lookup `client_id -> (app id, organisation id, client type)`. The authorize and token
+ * endpoints receive only a client_id, before any organisation is known - the same shape of problem (and answer) as
+ * `api_key_index`. IMMUTABLE for mm_app (SELECT + INSERT only): everything that can change (redirect URIs, scopes,
+ * secret hash, disabled/deleted) is read from the RLS-protected `oauth_apps` row once the tenant context is open.
+ * The composite foreign key to oauth_apps(id, organization_id) makes a row for an app that does not exist in that
+ * organisation impossible to forge from a tenant transaction. Listed in RLS_EXEMPT_TABLES.
+ */
+export const oauthClientIndex = pgTable("oauth_client_index", {
+  id: uuid("id").primaryKey(),
+  organizationId: uuid("organization_id").notNull(),
+  clientId: text("client_id").notNull(),
+  clientType: oauthClientTypeEnum("client_type").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  clientIdUnique: uniqueIndex("oauth_client_index_client_id_unique").on(table.clientId),
+  appFk: foreignKey({
+    columns: [table.id, table.organizationId],
+    foreignColumns: [oauthApps.id, oauthApps.organizationId],
+    name: "oauth_client_index_app_org_fk",
+  }).onDelete("cascade"),
+}));
+
+/**
+ * One consent = one grant, created when the authorization code is EXCHANGED (so every row here is a real grant that
+ * minted tokens). A tenant table. Revocation (by the user, an Owner/Administrator, an app disable/delete, a code
+ * replay or a refresh-token reuse) sets `revoked_at` and the reason; nothing is deleted. The grant carries the scopes
+ * the user consented to; its POWER is never stored - it is recomputed on every API request as scopes intersected with
+ * the user's current role (src/domain/api/scopes.ts `effectivePermissions`).
+ */
+export const oauthGrants = pgTable("oauth_grants", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  appId: uuid("app_id")
+    .notNull()
+    .references(() => oauthApps.id, { onDelete: "cascade" }),
+  userId: uuid("user_id")
+    .notNull()
+    .references(() => users.id),
+  scopes: text("scopes").array().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  lastRefreshedAt: timestamp("last_refreshed_at", { withTimezone: true }),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  revokedByUserId: uuid("revoked_by_user_id").references(() => users.id),
+  /** USER | ADMIN | APP_DISABLED | APP_DELETED | APP_SCOPES_REDUCED | CODE_REPLAY | REFRESH_REUSE | CLIENT. */
+  revokeReason: text("revoke_reason"),
+}, (table) => ({
+  orgAppIdx: index("oauth_grants_org_app_idx").on(table.organizationId, table.appId),
+  orgUserIdx: index("oauth_grants_org_user_idx").on(table.organizationId, table.userId),
+  idOrgUnique: uniqueIndex("oauth_grants_id_org_unique").on(table.id, table.organizationId),
+}));
+
+/**
+ * A single-use authorization code (<= 60 seconds), stored only as a SHA-256 hash. Bound to the client, redirect URI,
+ * PKCE challenge (S256), user, organisation and scopes at consent time. Consumed by an atomic
+ * `UPDATE ... WHERE used_at IS NULL RETURNING`; `grant_id` is set when it is exchanged so a REPLAY can revoke what
+ * the first use created. A tenant table: the token endpoint resolves the organisation from the client id first.
+ */
+export const oauthAuthorizationCodes = pgTable("oauth_authorization_codes", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  appId: uuid("app_id")
+    .notNull()
+    .references(() => oauthApps.id, { onDelete: "cascade" }),
+  userId: uuid("user_id")
+    .notNull()
+    .references(() => users.id),
+  codeHash: text("code_hash").notNull(),
+  scopes: text("scopes").array().notNull(),
+  redirectUri: text("redirect_uri").notNull(),
+  /** base64url(SHA-256(code_verifier)). Only S256 exists; there is no `plain`. */
+  codeChallenge: text("code_challenge").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  usedAt: timestamp("used_at", { withTimezone: true }),
+  grantId: uuid("grant_id").references(() => oauthGrants.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  codeHashUnique: uniqueIndex("oauth_authorization_codes_code_hash_unique").on(table.codeHash),
+  orgExpiresIdx: index("oauth_authorization_codes_org_expires_idx").on(table.organizationId, table.expiresAt),
+}));
+
+/**
+ * Refresh tokens: opaque, hashed, ROTATED on every use. `used_at` is set by the atomic claim when a token is
+ * exchanged; presenting a token whose `used_at` is already set is a REUSE and revokes the whole grant (RFC 9700).
+ * A tenant table - the endpoint resolves the organisation from the presented client id.
+ */
+export const oauthRefreshTokens = pgTable("oauth_refresh_tokens", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  grantId: uuid("grant_id")
+    .notNull()
+    .references(() => oauthGrants.id, { onDelete: "cascade" }),
+  tokenHash: text("token_hash").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  usedAt: timestamp("used_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  tokenHashUnique: uniqueIndex("oauth_refresh_tokens_token_hash_unique").on(table.tokenHash),
+  grantIdx: index("oauth_refresh_tokens_grant_idx").on(table.grantId),
+}));
+
+/**
+ * The bearer-authentication LOOKUP for OAuth access tokens: prefix -> (token, grant, app, organisation, user, scopes,
+ * validity, hash). NOT a tenant table, for exactly the reason `api_key_index` is not: the API authenticates a token
+ * BEFORE it knows the organisation. Bounded by GRANTs (SELECT + INSERT, UPDATE of only revoked_at, DELETE for the
+ * grant-scoped purge of long-expired rows) and by the composite foreign key to the RLS-protected `oauth_grants`, so a
+ * row for another organisation's grant cannot be forged from a tenant transaction. Listed in RLS_EXEMPT_TABLES.
+ */
+export const oauthAccessTokens = pgTable("oauth_access_tokens", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id").notNull(),
+  grantId: uuid("grant_id").notNull(),
+  appId: uuid("app_id").notNull(),
+  /** The public client id of the app (recorded in audit metadata and `GET /me`; not a secret). */
+  clientId: text("client_id").notNull(),
+  userId: uuid("user_id").notNull(),
+  /** Non-secret lookup/display prefix (the token reads `mmo_at_<prefix>_<secret>`). */
+  prefix: text("prefix").notNull(),
+  /** Hex SHA-256 of the full token. */
+  secretHash: text("secret_hash").notNull(),
+  scopes: text("scopes").array().notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  prefixUnique: uniqueIndex("oauth_access_tokens_prefix_unique").on(table.prefix),
+  grantIdx: index("oauth_access_tokens_grant_idx").on(table.grantId),
+  appIdx: index("oauth_access_tokens_app_idx").on(table.appId),
+  grantFk: foreignKey({
+    columns: [table.grantId, table.organizationId],
+    foreignColumns: [oauthGrants.id, oauthGrants.organizationId],
+    name: "oauth_access_tokens_grant_org_fk",
+  }).onDelete("cascade"),
+}));
+
+/**
+ * Fixed-window request counters for OAuth: `api:<grant id>` for API requests made with an access token, and
+ * `tok:ip:<address>` / `tok:client:<client id>` for the token and revocation endpoints. A text key (not a uuid FK) so
+ * one table serves all three; holds only counters, no organisation column. Old rows are purged opportunistically.
+ */
+export const oauthRateWindows = pgTable("oauth_rate_windows", {
+  bucket: text("bucket").primaryKey(),
+  windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+  requestCount: integer("request_count").notNull(),
+});

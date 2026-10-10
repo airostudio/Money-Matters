@@ -56,6 +56,20 @@ const REDACTED_FIELDS = new Set([
   "secret_config",
   "secretKeyVersion",
   "secret_key_version",
+  // Phase 10 Slice 4: OAuth credentials. Access / refresh tokens, authorization codes, PKCE verifiers and client secrets
+  // are bearer secrets shown once and stored only as hashes in non-audited tables; none may reach an audit row.
+  "accessToken",
+  "access_token",
+  "refreshToken",
+  "refresh_token",
+  "clientSecret",
+  "client_secret",
+  "authorizationCode",
+  "authorization_code",
+  "codeVerifier",
+  "code_verifier",
+  "tokenHash",
+  "token_hash",
 ]);
 const REDACTED_PLACEHOLDER = "[redacted]";
 
@@ -85,6 +99,16 @@ function apiKeyMetadata(actor: Actor): Record<string, unknown> | null {
 }
 
 /**
+ * What an OAuth-originated audit row records: the client and grant (ids only) and the person who consented (the row's
+ * `actorUserId`). Merged into EVERY audit row an OAuth-backed API actor writes - including the ones domain services write on
+ * their own (a draft invoice created with an access token) - so no service needs to know the call came from an app.
+ */
+function oauthMetadata(actor: Actor): Record<string, unknown> | null {
+  if (actor.type !== "API" || !actor.oauth) return null;
+  return { viaOAuth: true, oauthClientId: actor.oauth.clientId, oauthGrantId: actor.oauth.grantId, oauthAuthorisedBy: actor.userId };
+}
+
+/**
  * What an automation-originated audit row records: the rule (id and name) and the person whose authority bounds it (the
  * row's `actorUserId`). Merged into EVERY audit row an AUTOMATION actor writes - including the ones domain services write
  * on their own (e.g. the purchase order service) - so no service needs to know the call came from a rule.
@@ -98,7 +122,8 @@ export const AuditService = {
   async record(tx: TenantDb, actor: Actor, params: RecordAuditParams): Promise<void> {
     const viaKey = apiKeyMetadata(actor);
     const viaRule = automationMetadata(actor);
-    const extra = viaKey || viaRule ? { ...(viaKey ?? {}), ...(viaRule ?? {}) } : null;
+    const viaOAuth = oauthMetadata(actor);
+    const extra = viaKey || viaRule || viaOAuth ? { ...(viaKey ?? {}), ...(viaRule ?? {}), ...(viaOAuth ?? {}) } : null;
     await tx.insert(auditLogs).values({
       organizationId: actor.organizationId,
       actorUserId: actor.type === "SYSTEM" ? null : actor.userId,

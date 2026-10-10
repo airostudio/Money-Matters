@@ -4,6 +4,9 @@ import { roleHasPermission, type MembershipRole, type Permission } from "./roles
  * `API` is a request authenticated by an API key (Phase 10 Slice 1). Like `AI` and `SYSTEM` it is NOT human, so
  * every human-only check (`type === "HUMAN"`: period close/reopen/override, sign-offs, ...) refuses it.
  *
+ * An `API` actor is also what an OAuth access token resolves to (Phase 10 Slice 4): a third-party app acting for a user who
+ * consented, carrying `Actor.oauth` instead of `Actor.apiKey`. No new actor type, so no human-only check needed touching.
+ *
  * `AUTOMATION` is a rule run by the Automation Centre (Phase 10 Slice 3). Same story: NOT human, so every human-only
  * check refuses it even when the rule's authorising person is an OWNER, and its `grantedPermissions` can only ever be
  * the action's required permissions intersected with that person's CURRENT role (src/domain/automation/identity.ts).
@@ -32,6 +35,12 @@ export interface Actor {
   grantedPermissions?: ReadonlySet<Permission>;
   /** Present for an `API` actor: which key acted. Recorded in the audit metadata by `AuditService.record`. Never the secret. */
   apiKey?: { id: string; prefix: string };
+  /**
+   * Present for an `API` actor that authenticated with an OAuth access token (Phase 10 Slice 4) INSTEAD of `apiKey`: which
+   * client and which grant acted. The actor's type is still `API` - every human-only check refuses it exactly as it
+   * refuses an API key - and `userId` is the person who consented. Recorded in the audit metadata. Never a token.
+   */
+  oauth?: { clientId: string; grantId: string };
   /** Present for an `AUTOMATION` actor: which rule acted. Recorded in the audit metadata by `AuditService.record`. */
   automation?: { ruleId: string; ruleName: string };
 }

@@ -132,6 +132,11 @@ export const PERMISSIONS = [
   "automation:read",
   "automation:manage",
   "integration:manage",
+  // Phase 10 Slice 4 (OAuth 2.0 for third-party apps, master spec s.54). Registering, editing, disabling and deleting an
+  // OAuth application, rotating its secret and revoking any of its grants is `oauth_app:manage`: OWNER / ADMINISTRATOR
+  // only AND a HUMAN actor (an API key, an OAuth token, an AI agent or an automation can never hold it). Any member can
+  // revoke THEIR OWN grants (that is not a permission: it is the right to withdraw your own consent).
+  "oauth_app:manage",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];

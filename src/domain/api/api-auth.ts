@@ -8,18 +8,29 @@ import { hashesEqual, parseApiKey, parseBearer, hashApiKey } from "./api-key-for
 import { authThrottle, type AuthThrottle } from "./auth-throttle";
 import { consumeRateLimit, resolveLimit, type RateLimitState } from "./rate-limit";
 import { effectivePermissions } from "./scopes";
+import { looksLikeAccessToken, parseAccessToken } from "@/domain/oauth/credentials";
+import { lookupAccessTokenByPrefix, resolveAccessToken } from "@/domain/oauth/bearer";
+import { consumeBucket } from "@/domain/oauth/rate-limit";
+import { API_LIMIT_PER_GRANT_PER_MINUTE } from "@/domain/oauth/constants";
 
 /**
  * Authenticating an API request (docs/security.md section 15). The credential arrives ONLY in the
- * `Authorization: Bearer <key>` header - never the query string, never a cookie. The design leaves room for OAuth:
- * a future `Bearer <access token>` is just another credential `authenticateApiKey`'s caller resolves into the same
- * `ApiPrincipal`; everything downstream (scopes, effective permissions, the Actor, rate limiting, idempotency,
- * errors) is credential-agnostic.
+ * `Authorization: Bearer <credential>` header - never the query string, never a cookie. TWO credential kinds resolve into
+ * the SAME `ApiPrincipal`: an API key (`mm_live_...`) and, since Phase 10 Slice 4, an OAuth access token (`mmo_at_...`,
+ * src/domain/oauth/bearer.ts). Everything downstream (scopes, effective permissions, the Actor, rate limiting,
+ * idempotency, errors) is credential-agnostic.
  *
- * Query budget: ONE lookup query (key index joined to the creator's membership and user row) + ONE rate-limit
- * statement, then the request's work in a single withTenant. Nothing else touches the database here.
+ * Query budget (either kind): ONE lookup query (the credential's index row joined to the person's membership, account
+ * state and the organization's archive flag) + ONE rate-limit statement, then the request's work in a single withTenant.
+ * Nothing else touches the database here.
  */
 export interface ApiPrincipal {
+  /** Which kind of credential authenticated this request. */
+  credential: "api_key" | "oauth";
+  /**
+   * The id rate limiting and idempotency are scoped to: the API key's id, or - for an OAuth access token - the id of the
+   * GRANT it was minted from (every token of a grant shares one budget and one idempotency namespace).
+   */
   keyId: string;
   prefix: string;
   organizationId: string;
@@ -29,6 +40,8 @@ export interface ApiPrincipal {
   creatorRole: MembershipRole;
   expiresAt: Date | null;
   permissions: ReadonlySet<Permission>;
+  /** Present for an OAuth access token: which app (client id) and grant acted. Null for an API key. */
+  oauth: { clientId: string; grantId: string; appId: string } | null;
   /** The Actor handed to domain services: type API, role = creator's current role, narrowed to `permissions`. */
   actor: Actor;
 }
@@ -101,6 +114,7 @@ export function resolvePrincipal(row: KeyLookupRow, presentedHash: string, now: 
 
   const permissions = effectivePermissions(row.scopes, row.membershipRole);
   return {
+    credential: "api_key",
     keyId: row.id,
     prefix: row.prefix,
     organizationId: row.organizationId,
@@ -109,6 +123,7 @@ export function resolvePrincipal(row: KeyLookupRow, presentedHash: string, now: 
     creatorRole: row.membershipRole,
     expiresAt: row.expiresAt,
     permissions,
+    oauth: null,
     actor: {
       userId: row.createdByUserId,
       organizationId: row.organizationId,
@@ -123,8 +138,10 @@ export function resolvePrincipal(row: KeyLookupRow, presentedHash: string, now: 
 export interface AuthenticateOptions {
   now?: Date;
   throttle?: AuthThrottle;
-  /** Test seam: replaces the lookup query. */
+  /** Test seam: replaces the API-key lookup query. */
   lookup?: typeof lookupKeyByPrefix;
+  /** Test seam: replaces the OAuth access-token lookup query. */
+  lookupAccessToken?: typeof lookupAccessTokenByPrefix;
 }
 
 export async function authenticateApiKey(
@@ -145,6 +162,32 @@ export async function authenticateApiKey(
 
   const bearer = parseBearer(authorizationHeader);
   if (!bearer) return fail(apiErrors.invalidApiKey());
+
+  if (looksLikeAccessToken(bearer)) {
+    // OAuth access token: same pipeline, different index. Garbage never reaches the database (parseAccessToken).
+    const token = parseAccessToken(bearer);
+    if (!token) return fail(apiErrors.invalidToken());
+    const tokenRow = await (options.lookupAccessToken ?? lookupAccessTokenByPrefix)(token.prefix);
+    if (!tokenRow) {
+      hashApiKey(bearer);
+      return fail(apiErrors.invalidToken());
+    }
+    let oauthPrincipal: ApiPrincipal;
+    try {
+      oauthPrincipal = resolveAccessToken(tokenRow, token.hash, now);
+    } catch (error) {
+      return fail(error as ApiError);
+    }
+    throttle.recordSuccess(client);
+    const oauthRate = await consumeBucket(`api:${oauthPrincipal.keyId}`, API_LIMIT_PER_GRANT_PER_MINUTE, now.getTime());
+    if (!oauthRate.allowed) {
+      throw new ApiError(429, "rate_limited", "Rate limit exceeded", `This authorisation is limited to ${API_LIMIT_PER_GRANT_PER_MINUTE} requests per minute. Retry after ${oauthRate.resetInSeconds} seconds.`, {
+        headers: { "Retry-After": String(oauthRate.resetInSeconds), ...rateLimitHeaders(oauthRate) },
+      });
+    }
+    return { principal: oauthPrincipal, rate: oauthRate };
+  }
+
   const parsed = parseApiKey(bearer);
   if (!parsed) return fail(apiErrors.invalidApiKey());
 
