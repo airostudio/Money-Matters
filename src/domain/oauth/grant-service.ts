@@ -3,6 +3,7 @@ import { oauthApps, oauthGrants, users } from "@/db/schema";
 import { withTenant } from "@/db/tenant";
 import { PermissionDeniedError, assertPermission, type Actor } from "@/domain/permissions/permission-service";
 import { roleHasPermission } from "@/domain/permissions/roles";
+import { OrganizationService } from "@/domain/organizations/organization-service";
 import { OAuthGrantNotFoundError } from "./errors";
 import { auditGrantRevoked, revokeGrant } from "./grant-store";
 
@@ -60,6 +61,21 @@ export const OAuthGrantService = {
         .where(and(eq(oauthGrants.organizationId, actor.organizationId), eq(oauthGrants.userId, actor.userId), isNull(oauthGrants.revokedAt)))
         .orderBy(desc(oauthGrants.createdAt), desc(oauthGrants.id)),
     );
+  },
+
+  /**
+   * The person's own authorisations in EVERY company they belong to (the "Authorised apps" page). Companies are read ONE AT A
+   * TIME, each through the person's real membership; archived companies are skipped (`listMembershipsForUser` excludes them,
+   * and nothing can act in them). Capped so a pathological membership list cannot make the page long.
+   */
+  async listOwnAcrossOrganizations(userId: string, maxOrganizations = 25) {
+    const memberships = (await OrganizationService.listMembershipsForUser(userId)).slice(0, maxOrganizations);
+    const sections: Array<{ organizationId: string; organizationName: string; grants: GrantSummary[] }> = [];
+    for (const m of memberships) {
+      const grants = await OAuthGrantService.listOwn({ userId, organizationId: m.organization.id, role: m.role });
+      if (grants.length > 0) sections.push({ organizationId: m.organization.id, organizationName: m.organization.name, grants });
+    }
+    return sections;
   },
 
   /** Every active grant in the organization (optionally one app's) - Owner / Administrator only. */

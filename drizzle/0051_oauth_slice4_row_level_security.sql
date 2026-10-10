@@ -72,5 +72,35 @@ GRANT SELECT, INSERT ON oauth_client_index TO mm_app;
 GRANT SELECT, INSERT, DELETE ON oauth_access_tokens TO mm_app;
 GRANT UPDATE (revoked_at) ON oauth_access_tokens TO mm_app;
 
+-- Write-side isolation for the two lookup indexes (stronger than api_key_index / organization_invite_index have).
+-- A composite foreign key alone does NOT stop a transaction scoped to organisation B from inserting an index row that
+-- names organisation A and an A-owned app / grant id it happens to know: foreign-key checks bypass row-level security. So
+-- these two tables also carry row-level security with an ASYMMETRIC policy set:
+--   * SELECT is open (USING true): the authorize / token endpoints and bearer authentication run BEFORE any organisation is
+--     known, so they must read by client id / token prefix without a tenant context. (Rows hold only ids, public client
+--     metadata and SHA-256 hashes of 256-bit random tokens.)
+--   * INSERT / UPDATE / DELETE are only possible for rows of the transaction's OWN organisation
+--     (organization_id = app.current_org_id), so a tenant transaction can never mint, revoke or purge another
+--     organisation's client or token rows. Every write in the application already happens inside that organisation's
+--     withTenant transaction (src/domain/oauth/*).
+-- src/db/isolation-audit.ts still lists both tables in RLS_EXEMPT_TABLES (they are not "one policy keyed on the
+-- organisation" tables) and its "RLS enabled but no policy" check is satisfied.
+ALTER TABLE oauth_client_index ENABLE ROW LEVEL SECURITY;
+ALTER TABLE oauth_client_index FORCE ROW LEVEL SECURITY;
+CREATE POLICY oauth_client_index_read ON oauth_client_index FOR SELECT USING (true);
+CREATE POLICY oauth_client_index_write ON oauth_client_index FOR INSERT
+  WITH CHECK (organization_id = nullif(current_setting('app.current_org_id', true), '')::uuid);
+
+ALTER TABLE oauth_access_tokens ENABLE ROW LEVEL SECURITY;
+ALTER TABLE oauth_access_tokens FORCE ROW LEVEL SECURITY;
+CREATE POLICY oauth_access_tokens_read ON oauth_access_tokens FOR SELECT USING (true);
+CREATE POLICY oauth_access_tokens_insert ON oauth_access_tokens FOR INSERT
+  WITH CHECK (organization_id = nullif(current_setting('app.current_org_id', true), '')::uuid);
+CREATE POLICY oauth_access_tokens_update ON oauth_access_tokens FOR UPDATE
+  USING (organization_id = nullif(current_setting('app.current_org_id', true), '')::uuid)
+  WITH CHECK (organization_id = nullif(current_setting('app.current_org_id', true), '')::uuid);
+CREATE POLICY oauth_access_tokens_delete ON oauth_access_tokens FOR DELETE
+  USING (organization_id = nullif(current_setting('app.current_org_id', true), '')::uuid);
+
 -- oauth_rate_windows: counters only.
 GRANT SELECT, INSERT, UPDATE, DELETE ON oauth_rate_windows TO mm_app;

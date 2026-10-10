@@ -182,8 +182,7 @@ organization>)` as the restricted database role - no RLS change. Cursor
 pagination, `Idempotency-Key` (required for invoice/bill creation; two simultaneous
 identical POSTs create one invoice), per-key rate limits with `X-RateLimit-*` /
 `Retry-After`, RFC 7807 errors, and a generated OpenAPI 3.1 document at
-`/api/v1/openapi.json`. OAuth and the automation centre are later Phase 10
-slices. See [`docs/api.md`](docs/api.md), `docs/security.md` section 15 and
+`/api/v1/openapi.json`. (OAuth for third-party apps arrived in Slice 4, below.) See [`docs/api.md`](docs/api.md), `docs/security.md` section 15 and
 `docs/roadmap.md`.
 
 Phase 10 Slice 2 adds **webhooks on a durable transactional outbox**: business events
@@ -224,6 +223,17 @@ chooser; the platform admin can archive/restore with a reason. Archive is **reve
 nobody (including API keys, webhooks and automations) can reach the company, and a restore returns it exactly as it was.
 **Permanent deletion is deliberately not built**: it is a manual, DBA-level procedure outside the app, described with strong
 warnings (and no script) in [`docs/operations.md`](docs/operations.md). See `docs/security.md` section 17.
+
+**OAuth 2.0 for third-party apps (Phase 10 Slice 4).** Instead of handing an app an API key, an Owner or Administrator registers it under
+Settings -> Connected apps (a name, exact redirect URIs, the most scopes it may ask for; public or confidential, with a client secret
+shown once) and each person who wants to use it approves it on a **consent screen** - the authorization-code grant with **PKCE (S256,
+required)**, `state`, one-hour opaque access tokens and 30-day **rotating** refresh tokens (reusing a rotated one revokes the whole
+authorisation), RFC 7009 revocation and RFC 8414 discovery at `/.well-known/oauth-authorization-server`. The scopes are the same ten as API
+keys; a token can do **only what its scopes allow and the approving person's current role allows**, recomputed on every request (demote,
+remove or suspend them and it shrinks or stops at once), creates **drafts only**, and can never post, approve, void, pay, delete or reach
+anything administrative. An app belongs to one company and can only be authorised into it. People see and remove the apps they have
+authorised under "Authorised apps" (`/app/authorised-apps`); Owners and Administrators can revoke any. No new environment variable.
+See [`docs/api.md`](docs/api.md) section 1a, `docs/security.md` section 20, `docs/architecture.md` section 14 and `docs/roadmap.md`.
 
 See
 [`docs/roadmap.md`](docs/roadmap.md) for exactly what's built
@@ -454,8 +464,8 @@ application code forgets a filter — see
 - [`docs/architecture.md`](docs/architecture.md) — system architecture
 - [`docs/accounting-engine.md`](docs/accounting-engine.md) — the double-entry posting engine's invariants
 - [`docs/database.md`](docs/database.md) — schema conventions, RLS, a Drizzle/Postgres pitfall worth reading before touching money-bearing queries
-- [`docs/security.md`](docs/security.md) — tenant isolation, auth, threat model (section 15: API keys)
-- [`docs/api.md`](docs/api.md) — the public developer API (v1): authentication, scopes, pagination, idempotency, errors, endpoints
+- [`docs/security.md`](docs/security.md) — tenant isolation, auth, threat model (section 15: API keys; section 20: OAuth)
+- [`docs/api.md`](docs/api.md) — the public developer API (v1): authentication (API keys and OAuth 2.0), scopes, pagination, idempotency, errors, endpoints
 - [`docs/ai-agents.md`](docs/ai-agents.md) — the AI layer's architecture: the AI Financial Controller foundation (Phase 6 Slice 1), the autonomy-level gate, prepare/confirm write tools, and specialist-agent modes (Phase 6 Slice 2), and the full 0-4 autonomy dial with whitelisted auto-execution, undo, and an emergency stop (Phase 6 Slice 3). Payroll/Tax specialist agents are not yet built — see that doc and `docs/roadmap.md` for why
 - [`docs/roadmap.md`](docs/roadmap.md) — phase-by-phase status
 - [`docs/decisions/`](docs/decisions/) — ADRs for the non-obvious technical calls

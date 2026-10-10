@@ -324,3 +324,60 @@ The once-an-hour retention `DELETE` adds one statement to the first pass of a pr
 ### 13.5 Where automations stop
 
 `CREATE_DRAFT_PURCHASE_ORDER` is the only action that writes books-adjacent data, and it goes through `PurchaseOrderService.createIn` inside a **savepoint** (a refusal by the service - an inactive supplier - skips the run without poisoning the transaction), re-checks stock at the moment of acting, never sends, converts or posts, and leaves the ledger and trial balance byte-identical (asserted). Everything else in the system that needs a person still needs one.
+
+## 14. OAuth 2.0 for third-party apps (Phase 10 Slice 4)
+
+Master spec §54. Threat model and decisions: `docs/security.md` section 20; schema: `docs/database.md` section 2v; developer guide: `docs/api.md` section 1a. Code: `src/domain/oauth/*` (the logic), thin routes at `src/app/oauth/*`, `src/app/api/oauth/*` and `src/app/.well-known/*`, the management UI at `src/app/[orgSlug]/settings/oauth-apps` and `src/app/app/authorised-apps`.
+
+```
+ third-party app                                  Money Matters
+ ---------------                                  -------------
+ browser  --> GET /oauth/authorize ------------>  page (server component): parse (no DB) -> session -> client index -> ONE tenant tx
+              ?client_id&redirect_uri&scope         [app + org archive flag + membership, one joined SELECT] -> consent screen
+              &state&code_challenge(S256)
+ person   --> POST /oauth/authorize/decision -->  Origin + session + HMAC token -> re-validate everything -> code row + audit (same tx)
+ browser  <-- hand-off page -> redirect_uri?code&state&iss
+ server   --> POST /api/oauth/token ----------->  rate limit (Postgres, 1 stmt) -> client index -> ONE tenant tx:
+              (code + code_verifier)                client auth, claim code (atomic), PKCE, grant, refresh + access rows, audit
+ server   --> GET/POST /api/v1/* -------------->  Bearer mmo_at_...: ONE joined lookup (token + membership + user + org) + 1 rate-limit stmt
+              Authorization: Bearer access token     -> the SAME pipeline as an API key (scopes, permissions, idempotency, one withTenant)
+```
+
+**One pipeline.** `authenticateApiKey` (still the name; it authenticates *any* bearer credential) dispatches on the token label: `mm_live_` -> `api_key_index`, `mmo_at_` -> `oauth_access_tokens`. Both resolve to an `ApiPrincipal` (`credential: "api_key" | "oauth"`); `keyId` is the id rate limiting and idempotency are scoped to (the key id, or the **grant** id). The handler, endpoint registry, scope checks, draft guard, idempotency, errors and OpenAPI (`bearerAuth` **or** `oauth2` on every protected operation) are unchanged and credential-agnostic.
+
+**Where the logic lives**
+
+| Module | Role |
+|---|---|
+| `credentials.ts`, `pkce.ts`, `redirect-uri.ts` | token formats and hashing, S256 verification, redirect-URI rules (pure, unit-tested) |
+| `authorize-service.ts` | the authorization decision: `preview` / `approve` / `deny`, the order of checks that makes an open redirect impossible |
+| `token-service.ts` | code exchange, refresh with rotation + reuse detection, RFC 7009 revocation; each one tenant transaction |
+| `grant-store.ts` | the single function that revokes (grant row + access-token index rows, one transaction) |
+| `app-service.ts`, `grant-service.ts` | the human management side (`oauth_app:manage` + HUMAN; own-grant revoke for any member) |
+| `bearer.ts` | access-token lookup and the pure `resolveAccessToken` (intersection rule) |
+| `http.ts` | the form-encoded shell of the token and revocation endpoints |
+| `rate-limit.ts`, `client-lookup.ts` | the only other modules that use the bare `db` handle (non-tenant by nature) |
+| `csrf.ts`, `metadata.ts`, `constants.ts`, `errors.ts` | consent CSRF token, RFC 8414 document, pinned tunables, error classes |
+
+### 14.1 Measured database budgets
+
+Counted at the driver (every statement including `BEGIN` / `set_config` / `COMMIT`), real handlers, real database, `src/tests/integration/oauth/oauth-query-budget.test.ts`. Sequential everywhere; **at most one pooled connection and one tenant transaction per operation** (asserted with the connection tracker); no `Promise.all`, private connection or raw SQL in the new modules (structural test); nothing added to the shared layout, shell or `withTenant`.
+
+| Operation | Statements | Tenant tx | Composition |
+|---|---|---|---|
+| Authenticated API request, **OAuth bearer** (`GET /me`) | **2** | 0 | (1) token index joined to membership + user + organization; (2) one rate-limit upsert - **identical to an API key** |
+| Authenticated read (`GET /customers`) | **6** | 1 | the 2 above + the same single tenant transaction as for a key (key: 6) |
+| Malformed token / unknown prefix / wrong secret | 0 / 1 / 1 | 0 | rejected on shape; or one lookup |
+| Consent page render | **6** | 1 | session user lookup (1), client index (1), `BEGIN`, `set_config`, ONE joined SELECT (app + organization + membership), `COMMIT` |
+| Consent approval (Allow) | 8 | 1 | client index, tx: joined SELECT, code INSERT, audit INSERT, expired-code purge |
+| Token exchange (code -> tokens) | **14** | 1 | rate limit (1, address + client together), client index (1), tx: app SELECT, code SELECT, membership SELECT, code claim UPDATE, grant INSERT, code UPDATE, refresh INSERT, access INSERT, audit INSERT |
+| Refresh | **13** | 1 | rate limit, client index, tx: app SELECT, one joined SELECT (refresh + grant + membership + user), claim UPDATE, refresh INSERT, access INSERT, grant UPDATE, two grant-scoped purges |
+| Revocation (RFC 7009) | 10 | 1 | rate limit, client index, tx: app SELECT, token lookup, grant UPDATE, access-token UPDATE, audit INSERT |
+| Token endpoint, unknown client | 2 | 0 | rate limit + client index; the tenant transaction is never opened |
+| Token endpoint, bad content type / query string | 0 | 0 | rejected before any query |
+
+The OAuth-bearer request costs **exactly** what an API-key request costs (the target was "at most +1"). The exchange and refresh figures are larger only because they *are* the writes; they happen once per hour per authorisation, not per API call. Housekeeping is bounded and rides inside those transactions (expired codes purged at approval; a grant's long-expired refresh/access rows purged at refresh); the stale rate-window purge runs after the response on roughly 1% of token-endpoint calls.
+
+### 14.2 Why the endpoints are plain route handlers
+
+`/api/oauth/*` is authenticated by **client credentials**, never the browser session: the middleware bypasses NextAuth for it, deletes the cookie header, refuses every method but POST (so no CORS preflight is ever answered) and the routes do not import the session layer. `/oauth/authorize` is a real page that sends a signed-out visitor to `/login?next=<full URL>` itself (the middleware's generic redirect would drop the query string). The consent decision hands off with a small interstitial page instead of a 3xx because browsers apply the consent page's `form-action 'self'` CSP to a form submission's redirect chain; the interstitial navigates with a meta refresh and a visible link.

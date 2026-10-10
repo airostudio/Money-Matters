@@ -43,6 +43,7 @@ export default async function SettingsPage({
   const canManageMembers = roleHasPermission(actor.role, "membership:manage");
   const canManageOrganization = roleHasPermission(actor.role, "organization:manage");
   const canManageApiKeys = roleHasPermission(actor.role, "api_key:manage");
+  const canManageOAuthApps = roleHasPermission(actor.role, "oauth_app:manage");
   const canManageWebhooks = roleHasPermission(actor.role, "webhook:manage");
   const canSeeAutomation = roleHasPermission(actor.role, "automation:read");
   const canManageIntegrations = roleHasPermission(actor.role, "integration:manage");
@@ -130,6 +131,32 @@ export default async function SettingsPage({
           </CardHeader>
         </Card>
       )}
+
+      {canManageOAuthApps && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Connected apps</CardTitle>
+            <CardDescription>
+              Register third-party apps that people can connect to {org.name} with OAuth - each person approves on a consent screen, and an app can only do what that person&apos;s role allows (drafts only, never posting or paying).{" "}
+              <Link href={`/${org.slug}/settings/oauth-apps`} className="text-primary underline">
+                Manage connected apps
+              </Link>
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Authorised apps</CardTitle>
+          <CardDescription>
+            See the apps you have allowed to use your companies&apos; data, and remove any of them.{" "}
+            <Link href="/app/authorised-apps" className="text-primary underline">
+              Your authorised apps
+            </Link>
+          </CardDescription>
+        </CardHeader>
+      </Card>
 
       {canManageWebhooks && (
         <Card>

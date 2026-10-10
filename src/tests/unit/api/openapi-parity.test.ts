@@ -71,7 +71,7 @@ describe("OpenAPI document, endpoint registry and route files cannot drift apart
 
     const createInvoice = doc.paths["/invoices"].post;
     expect(createInvoice.parameters.find((p: any) => p.name === "Idempotency-Key").required).toBe(true);
-    expect(createInvoice.security).toEqual([{ bearerAuth: ["invoices:write"] }]);
+    expect(createInvoice.security).toEqual([{ bearerAuth: ["invoices:write"] }, { oauth2: ["invoices:write"] }]);
     expect(createInvoice.responses["201"].headers.Location).toBeDefined();
     expect(createInvoice.responses["422"]).toBeDefined();
     expect(doc.paths["/customers"].post.parameters.find((p: any) => p.name === "Idempotency-Key").required).toBe(false);
