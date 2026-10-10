@@ -208,9 +208,9 @@ define({
   method: "GET",
   path: "/me",
   tag: "Meta",
-  summary: "Describe the calling API key",
+  summary: "Describe the calling credential",
   description:
-    "Returns the organization the key belongs to, its scopes, the permissions it can actually exercise right now (scopes intersected with its creator's current role) and its rate-limit window. Never returns the secret. Costs no database query beyond authentication.",
+    "Returns the organization the credential (an API key or an OAuth access token) belongs to, its scopes, the permissions it can actually exercise right now (scopes intersected with the current role of the person behind it) and its rate-limit window. Never returns a secret. Costs no database query beyond authentication.",
   scope: null,
   permissions: [],
   query: S.NoQuery,
@@ -221,7 +221,15 @@ define({
     const { principal, rate } = ctx;
     return ok(200, {
       organization_id: principal.organizationId,
-      api_key: { id: principal.keyId, prefix: principal.prefix, expires_at: principal.expiresAt ? principal.expiresAt.toISOString() : null },
+      auth_type: principal.credential,
+      api_key:
+        principal.credential === "api_key"
+          ? { id: principal.keyId, prefix: principal.prefix, expires_at: principal.expiresAt ? principal.expiresAt.toISOString() : null }
+          : null,
+      oauth:
+        principal.oauth && principal.expiresAt
+          ? { client_id: principal.oauth.clientId, grant_id: principal.oauth.grantId, token_prefix: principal.prefix, expires_at: principal.expiresAt.toISOString() }
+          : null,
       scopes: principal.scopes,
       effective_permissions: [...principal.permissions].sort(),
       rate_limit: { limit: rate.limit, remaining: rate.remaining, reset_at: new Date(rate.resetAt * 1000).toISOString() },

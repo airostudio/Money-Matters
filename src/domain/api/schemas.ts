@@ -339,9 +339,17 @@ export const TrialBalanceOut = z
 export const MeOut = z
   .strictObject({
     organization_id: uuid,
-    api_key: z.strictObject({ id: uuid, prefix: z.string(), expires_at: timestampString.nullable() }),
+    auth_type: z.enum(["api_key", "oauth"]).meta({ description: "Which kind of credential authenticated this request." }),
+    api_key: z
+      .strictObject({ id: uuid, prefix: z.string(), expires_at: timestampString.nullable() })
+      .nullable()
+      .meta({ description: "The API key, or null when the request used an OAuth access token." }),
+    oauth: z
+      .strictObject({ client_id: z.string(), grant_id: uuid, token_prefix: z.string(), expires_at: timestampString })
+      .nullable()
+      .meta({ description: "The OAuth client and grant, or null when the request used an API key." }),
     scopes: z.array(z.string()),
-    effective_permissions: z.array(z.string()).meta({ description: "What this key can actually do right now: its scopes intersected with its creator's current role." }),
+    effective_permissions: z.array(z.string()).meta({ description: "What this credential can actually do right now: its scopes intersected with the current role of the person behind it (the key's creator, or the user who authorised the app)." }),
     rate_limit: z.strictObject({ limit: z.number().int(), remaining: z.number().int(), reset_at: timestampString }),
   })
   .meta({ id: "Me" });

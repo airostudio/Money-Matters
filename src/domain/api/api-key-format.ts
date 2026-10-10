@@ -31,7 +31,7 @@ export interface GeneratedApiKey {
   secretHash: string;
 }
 
-function randomPrefix(): string {
+export function randomPrefix(): string {
   // Rejection sampling over 256 so every letter is equally likely (36 does not divide 256).
   let out = "";
   const limit = 256 - (256 % PREFIX_ALPHABET.length);

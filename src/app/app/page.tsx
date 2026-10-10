@@ -151,6 +151,12 @@ export default async function AppLandingPage({
           Consolidate them into one set of reports.
         </Link>
       </p>
+      <p className="mt-2 text-sm text-muted-foreground">
+        Connected a third-party app?{" "}
+        <Link href="/app/authorised-apps" className="text-primary hover:underline">
+          See and remove the apps you have authorised.
+        </Link>
+      </p>
     </div>
   );
 }

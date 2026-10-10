@@ -50,11 +50,47 @@ function handleApi(request: NextRequest): NextResponse {
   return NextResponse.next({ request: { headers } });
 }
 
+/**
+ * OAuth 2.0 (Phase 10 Slice 4, docs/security.md section 20).
+ *  - `/api/oauth/*` (token, revocation): authenticated by CLIENT credentials inside the route, never by the browser
+ *    session, so NextAuth is bypassed (no redirect to /login) and cookies are stripped from the request the route sees.
+ *    POST only: GET / OPTIONS / anything else is answered 405 here, so no CORS preflight is ever answered and no
+ *    `Access-Control-*` header is ever sent for these endpoints.
+ *  - `/.well-known/*` (RFC 8414 metadata) is public.
+ *  - `/oauth/*` (consent screen + decision) are real pages: the page sends a signed-out visitor to /login ITSELF (keeping
+ *    the full query string, which this middleware's generic redirect would drop) and the decision route checks the session.
+ */
+const OAUTH_API_PREFIX = "/api/oauth/";
+
+function isOAuthApiPath(pathname: string): boolean {
+  return pathname.startsWith(OAUTH_API_PREFIX);
+}
+
+function handleOAuthApi(request: NextRequest): NextResponse {
+  if (request.method !== "POST") {
+    return new NextResponse(JSON.stringify({ error: "invalid_request", error_description: "Use POST." }), {
+      status: 405,
+      headers: { "Content-Type": "application/json", Allow: "POST", "Cache-Control": "no-store" },
+    });
+  }
+  const headers = new Headers(request.headers);
+  headers.delete("cookie");
+  return NextResponse.next({ request: { headers } });
+}
+
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   if (isApiPath(pathname)) {
     return handleApi(request);
+  }
+
+  if (isOAuthApiPath(pathname)) {
+    return handleOAuthApi(request);
+  }
+
+  if (pathname.startsWith("/.well-known/") || pathname === "/oauth" || pathname.startsWith("/oauth/")) {
+    return NextResponse.next();
   }
 
   if (PUBLIC_PATHS.some((path) => pathname.startsWith(path)) || pathname.startsWith("/api/auth")) {

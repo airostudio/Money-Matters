@@ -62,6 +62,10 @@ const MEMBERSHIP_RESOLUTION_TABLE: Record<string, { calls: string[]; archived: s
     calls: ["listMembershipsForUser"],
     archived: "archived entities are absent from the access map -> excluded with the usual 'excluded - no access' notice",
   },
+  "domain/oauth/grant-service.ts": {
+    calls: ["listMembershipsForUser"],
+    archived: "the Authorised-apps listing reads only non-archived memberships (nothing can act in an archived company; its grants resume on restore)",
+  },
   "domain/practice/client-access.ts": {
     calls: ["getMembership", "listMembershipsForUser"],
     archived: "archived clients are absent from the access map / have no membership; explainNotAMember answers a neutral 'unavailable'",
@@ -119,6 +123,16 @@ describe("archived organizations: where an Actor is built", () => {
       "domain/automation/identity.ts",
       "domain/automation/run-recording.ts",
       "domain/consolidation/entity-access.ts",
+      // Phase 10 Slice 4 (OAuth). `bearer.ts` builds the API actor of an access token from the SAME join that reads the
+      // organization's archive flag; `authorize-service.ts` builds the consenting person's actor inside a transaction that
+      // read the flag first (an archived organization renders an error page); `token-service.ts` builds the SYSTEM actor
+      // for audit rows only, after the archive check at the top of each grant flow. See oauth-surface.test.ts.
+      "domain/oauth/authorize-service.ts",
+      "domain/oauth/bearer.ts",
+      // `grant-service.ts` builds the actor of the signed-in person for each company returned by `listMembershipsForUser`,
+      // which excludes archived organizations.
+      "domain/oauth/grant-service.ts",
+      "domain/oauth/token-service.ts",
       "domain/organizations/invite-service.ts",
       "domain/organizations/lifecycle-service.ts",
       "domain/organizations/organization-service.ts",

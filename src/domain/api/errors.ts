@@ -78,6 +78,26 @@ export const apiErrors = {
     new ApiError(401, "invalid_api_key", "Authentication failed", "The API key is missing, malformed or not recognised. Send it as `Authorization: Bearer <key>`."),
   apiKeyRevoked: () => new ApiError(401, "api_key_revoked", "API key revoked", "This API key has been revoked."),
   apiKeyExpired: () => new ApiError(401, "api_key_expired", "API key expired", "This API key has expired."),
+  invalidToken: () =>
+    new ApiError(401, "invalid_token", "Authentication failed", "The access token is malformed, not recognised or revoked. Send it as `Authorization: Bearer <access token>`.", {
+      headers: { "WWW-Authenticate": 'Bearer error="invalid_token"' },
+    }),
+  tokenRevoked: () =>
+    new ApiError(401, "token_revoked", "Access token revoked", "This access token (or the authorisation it came from) has been revoked.", {
+      headers: { "WWW-Authenticate": 'Bearer error="invalid_token", error_description="revoked"' },
+    }),
+  tokenExpired: () =>
+    new ApiError(401, "token_expired", "Access token expired", "This access token has expired. Use your refresh token to get a new one.", {
+      headers: { "WWW-Authenticate": 'Bearer error="invalid_token", error_description="expired"' },
+    }),
+  authorizationOwnerInactive: () =>
+    new ApiError(
+      401,
+      "authorization_owner_inactive",
+      "Authorising user is no longer active",
+      "The person who authorised this app has been removed from the organization or suspended, so the access token no longer works.",
+      { headers: { "WWW-Authenticate": 'Bearer error="invalid_token", error_description="authorizing user inactive"' } },
+    ),
   organizationArchived: () =>
     new ApiError(
       403,

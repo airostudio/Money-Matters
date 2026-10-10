@@ -145,6 +145,7 @@ export const PERMISSION_AREAS: Record<string, string> = {
   webhook: "Webhooks",
   automation: "Automations",
   integration: "Integrations",
+  oauth_app: "Connected apps (OAuth)",
 };
 
 function areaOf(permission: Permission): string {

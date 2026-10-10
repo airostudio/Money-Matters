@@ -1,4 +1,6 @@
 import { Pool } from "pg";
+import { drizzle } from "drizzle-orm/node-postgres";
+import * as schema from "@/db/schema";
 import { closeDatabase, db } from "@/db/client";
 import { eq } from "drizzle-orm";
 import { organizations, users } from "@/db/schema";
@@ -7,6 +9,13 @@ import type { Actor } from "@/domain/permissions/permission-service";
 import type { MembershipRole } from "@/domain/permissions/roles";
 
 const TENANT_TABLES = [
+  "oauth_rate_windows",
+  "oauth_access_tokens",
+  "oauth_client_index",
+  "oauth_refresh_tokens",
+  "oauth_authorization_codes",
+  "oauth_grants",
+  "oauth_apps",
   "integration_events",
   "integration_connections",
   "notifications",
@@ -135,6 +144,14 @@ let adminPool: Pool | undefined;
 function admin(): Pool {
   adminPool ??= new Pool({ connectionString: process.env.DIRECT_DATABASE_URL });
   return adminPool;
+}
+
+/**
+ * A drizzle handle on the SUPERUSER connection (bypasses row-level security): for tests that need to read or tamper with
+ * tenant rows directly, e.g. to age a token, or to prove what is (not) stored. Never used by application code.
+ */
+export function adminDb() {
+  return drizzle(admin(), { schema });
 }
 
 /** Wipes every table between tests. Uses the superuser connection — mm_app owns nothing and can't TRUNCATE. */

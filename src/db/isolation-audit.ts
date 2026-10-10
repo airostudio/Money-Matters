@@ -27,8 +27,21 @@ import type { Pool } from "pg";
  * `app.current_org_id`. It is SELECT + INSERT only (no UPDATE, no DELETE), carries no email/role/expiry/state, and a
  * composite foreign key to the RLS-protected `organization_invites` stops a row for another organization's invite
  * being forged. See docs/security.md section 17 and src/tests/integration/organizations/invite-index.test.ts.
+ *
+ * `oauth_client_index` and `oauth_access_tokens` (Phase 10 Slice 4, OAuth 2.0) are the same shape again: the authorize and
+ * token endpoints receive only a client id, and the API receives only a bearer token, BEFORE any organisation is known.
+ * `oauth_client_index` is SELECT + INSERT only (immutable); `oauth_access_tokens` is SELECT + INSERT, UPDATE of only
+ * revoked_at, and a grant-scoped DELETE of long-expired rows. Each carries a composite foreign key to its RLS-protected
+ * parent (oauth_apps / oauth_grants), so a row for another organisation's app or grant cannot be forged from a tenant
+ * transaction. See docs/security.md section 20 and src/tests/integration/oauth/oauth-isolation.test.ts.
  */
-export const RLS_EXEMPT_TABLES = new Set(["organization_memberships", "api_key_index", "organization_invite_index"]);
+export const RLS_EXEMPT_TABLES = new Set([
+  "organization_memberships",
+  "api_key_index",
+  "organization_invite_index",
+  "oauth_client_index",
+  "oauth_access_tokens",
+]);
 
 /**
  * The practice (accounting firm) scoping model, Phase 9 Slice 5 (docs/security.md

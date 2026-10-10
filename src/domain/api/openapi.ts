@@ -29,8 +29,8 @@ function hoist(schema: Json, components: Record<string, Json>): Json {
 
 const PROBLEM_RESPONSES: Record<string, string> = {
   "400": "Malformed request (invalid JSON, invalid query parameter, invalid cursor, missing or invalid Idempotency-Key).",
-  "401": "Missing, malformed, unknown, revoked or expired API key, or its creator is no longer active.",
-  "403": "The key lacks the scope, or its creator no longer holds the permission.",
+  "401": "Missing, malformed, unknown, revoked or expired API key or OAuth access token, or the person behind it is no longer active.",
+  "403": "The credential lacks the scope, or the person behind it no longer holds the permission.",
   "404": "Not found - including ids that belong to another organization.",
   "409": "Conflict: locked period, concurrent change, or an identical request still in progress.",
   "413": "Request body too large.",
@@ -101,7 +101,9 @@ function operation(def: EndpointDef, components: Record<string, Json>): Json {
     tags: [def.tag],
     summary: def.summary,
     description: def.description,
-    ...(def.public ? { security: [] } : { security: [{ bearerAuth: def.scope ? [def.scope] : [] }] }),
+    ...(def.public
+      ? { security: [] }
+      : { security: [{ bearerAuth: def.scope ? [def.scope] : [] }, { oauth2: def.scope ? [def.scope] : [] }] }),
     parameters: [...pathParams, ...queryParams, ...headerParams],
     ...(def.body
       ? { requestBody: { required: true, content: { "application/json": { schema: hoist(toSchema(def.body, "input"), components) } } } }
@@ -142,9 +144,9 @@ export function buildOpenApiDocument(): Json {
       description: [
         "Server-to-server API for approved integrations. **Read** your organization's customers, suppliers, chart of accounts, invoices, bills, payments, journal entries and financial reports, and **create DRAFT** invoices, bills, customers and suppliers. Posting, approving, voiding, paying and deleting stay with people in the app.",
         "",
-        "**Authentication.** Create an API key under Settings > API access (Owner or Administrator). Send it as `Authorization: Bearer mm_live_<prefix>_<secret>` - only in that header, never in a URL. The secret is shown once. Browser use (CORS, cookies) is not supported: keep keys on a server. OAuth 2.0 for third-party apps is planned; the auth layer is designed for it.",
+        "**Authentication.** Two ways, one set of scopes. (1) An API key for your own server integration: create it under Settings > API access (Owner or Administrator) and send `Authorization: Bearer mm_live_<prefix>_<secret>`. (2) OAuth 2.0 for a third-party app acting for a person who consents: the authorization-code grant with PKCE (S256, required), then send `Authorization: Bearer mmo_at_<prefix>_<secret>`. Endpoints are published at `/.well-known/oauth-authorization-server` (RFC 8414). Either credential goes only in that header, never in a URL; secrets and tokens are shown once. Browser use (CORS, cookies) is not supported: keep credentials on a server.",
         "",
-        "**Effective permissions.** A key can do what its scopes allow AND what the person who created it can currently do. If that person is demoted, removed or suspended, the key shrinks or stops working on the next request.",
+        "**Effective permissions.** A credential can do what its scopes allow AND what the person behind it (the key's creator, or the user who authorised the app) can currently do, recomputed on every request. If that person is demoted, removed or suspended, or the organization is archived, it shrinks or stops working on the next request. OAuth access tokens also die the instant the authorisation is revoked.",
         "",
         `**Rate limits.** ${DEFAULT_RATE_LIMIT_PER_MINUTE} requests per minute per key by default (configurable per key between ${MIN_RATE_LIMIT_PER_MINUTE} and ${MAX_RATE_LIMIT_PER_MINUTE}). Every response carries \`X-RateLimit-Limit\`, \`X-RateLimit-Remaining\` and \`X-RateLimit-Reset\`; 429 adds \`Retry-After\`.`,
         "",
@@ -159,7 +161,7 @@ export function buildOpenApiDocument(): Json {
     },
     servers: [{ url: "/api/v1" }],
     tags: [...new Set(allEndpoints().map((e) => e.tag))].map((name) => ({ name })),
-    security: [{ bearerAuth: [] }],
+    security: [{ bearerAuth: [] }, { oauth2: [] }],
     paths,
     components: {
       securitySchemes: {
@@ -168,6 +170,19 @@ export function buildOpenApiDocument(): Json {
           scheme: "bearer",
           bearerFormat: "mm_live_<prefix>_<secret>",
           description: `API key. Scopes: ${Object.entries(scopes).map(([k, v]) => `\`${k}\` - ${v}`).join(" ")}`,
+        },
+        oauth2: {
+          type: "oauth2",
+          description:
+            "OAuth 2.0 authorization code grant with PKCE (S256 only, required for every client; `state` is required; redirect URIs match exactly). Access tokens (`mmo_at_...`) last one hour; refresh tokens (`mmo_rt_...`) rotate on every use and a reused one revokes the whole authorisation. Tokens are revoked at `/api/oauth/revoke` (RFC 7009). An app is registered by an Owner or Administrator of ONE organization and can only be authorised into that organization. Server metadata: `/.well-known/oauth-authorization-server`.",
+          flows: {
+            authorizationCode: {
+              authorizationUrl: "/oauth/authorize",
+              tokenUrl: "/api/oauth/token",
+              refreshUrl: "/api/oauth/token",
+              scopes,
+            },
+          },
         },
       },
       schemas: components,
