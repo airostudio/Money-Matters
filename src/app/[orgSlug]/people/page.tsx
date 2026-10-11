@@ -1,13 +1,6 @@
-import { Users } from "lucide-react";
-import { ComingSoon } from "@/components/shell/coming-soon";
+import { redirect } from "next/navigation";
 
-export default function PeoplePage() {
-  return (
-    <ComingSoon
-      icon={Users}
-      title="People"
-      phase={8}
-      blurb="Employees, Australian payroll, timesheets, and leave."
-    />
-  );
+// Employees, payroll, leave and payslips are built (Phase 8) under "People & Payroll"; this old placeholder URL redirects.
+export default function PeoplePage({ params }: { params: { orgSlug: string } }) {
+  redirect(`/${params.orgSlug}/payroll`);
 }
