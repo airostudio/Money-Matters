@@ -6,6 +6,13 @@ import { normalizeEmail } from "./email";
 
 const BCRYPT_WORK_FACTOR = 12;
 
+/**
+ * A bcrypt hash (work factor 12, same as real accounts) of a random value nobody knows. It is compared against when the
+ * email has no account, so the bcrypt cost - the dominant part of sign-in time - is paid either way. Public by design:
+ * it protects nothing and matches no password.
+ */
+export const DUMMY_PASSWORD_HASH = "$2a$12$YkYT30bY/S.WS0x0AzVYV.L2SiU0gJtXL5/eAKcnjsu2kN8Pvmugm";
+
 export class EmailAlreadyRegisteredError extends Error {
   constructor(email: string) {
     super(`An account already exists for "${email}".`);
@@ -51,21 +58,27 @@ export const UserService = {
     }
   },
 
-  async verifyCredentials(email: string, password: string) {
+  /**
+   * Checks an email + password with UNIFORM work: bcrypt always runs (against a fixed dummy hash when the account does
+   * not exist or has no password), so an unknown email costs the same as a wrong password and response time does not
+   * reveal whether an account exists. A suspended account is checked AFTER the hash comparison and is
+   * indistinguishable from a wrong password to the caller (no account-state oracle). Returns the user row, or null.
+   */
+  async checkPassword(email: string, password: string) {
     const [user] = await db
       .select()
       .from(users)
       .where(eq(users.email, normalizeEmail(email)));
-    if (!user?.passwordHash) return null;
 
-    const valid = await bcrypt.compare(password, user.passwordHash);
-    if (!valid) return null;
-
-    // A suspended account cannot sign in. Indistinguishable from a wrong
-    // password to the caller (no account-state oracle).
+    const valid = await bcrypt.compare(password, user?.passwordHash ?? DUMMY_PASSWORD_HASH);
+    if (!user?.passwordHash || !valid) return null;
     if (user.disabledAt) return null;
+    return user;
+  },
 
-    return { id: user.id, email: user.email, name: user.name };
+  async verifyCredentials(email: string, password: string) {
+    const user = await UserService.checkPassword(email, password);
+    return user ? { id: user.id, email: user.email, name: user.name } : null;
   },
 
   /**

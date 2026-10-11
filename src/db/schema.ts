@@ -350,6 +350,8 @@ export const users = pgTable("users", {
    * already-issued JWT session on the very next request. NULL = active.
    */
   disabledAt: timestamp("disabled_at", { withTimezone: true }),
+  /** Time of the last successful sign-in (login security, docs/security.md section 22). */
+  lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
@@ -5701,3 +5703,49 @@ export const oauthRateWindows = pgTable("oauth_rate_windows", {
   windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
   requestCount: integer("request_count").notNull(),
 });
+
+// ---------------------------------------------------------------------------
+// Login security (master spec 47; docs/security.md section 22)
+// ---------------------------------------------------------------------------
+
+/**
+ * Failed-sign-in counters and temporary lockouts, in Postgres so every serverless instance agrees. Sign-in happens
+ * BEFORE any tenant or user context exists, so this is NOT a tenant/user-scoped table (no organization_id /
+ * owner_user_id column; same stance as api_key_index / oauth_rate_windows) and holds no personal data: the bucket is a
+ * keyed HMAC of the normalised email (`acct:<hmac>`) or of the client address (`ip:<hmac>`), never the raw value. The
+ * same counter exists for an email that has no account, so a lockout does not reveal whether an account exists.
+ */
+export const loginThrottles = pgTable("login_throttles", {
+  bucket: text("bucket").primaryKey(),
+  failures: integer("failures").notNull().default(0),
+  windowStart: timestamp("window_start", { withTimezone: true }).notNull().defaultNow(),
+  lockedUntil: timestamp("locked_until", { withTimezone: true }),
+  /** How many lockouts in a row; the next lockout lasts base * 2^lock_level (capped). Decays after 24 h of quiet. */
+  lockLevel: integer("lock_level").notNull().default(0),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  updatedIdx: index("login_throttles_updated_idx").on(table.updatedAt),
+}));
+
+/**
+ * Append-only platform-level log of authentication events (sign-in success / failure / lockout, MFA, password reset,
+ * email verification). Not a tenant table: sign-in precedes tenant context. mm_app has SELECT + INSERT only. Holds NO
+ * secret, code, token or raw IP: `email_hash` and `ip_hash` are keyed HMACs, `ip_prefix_hash` is a keyed HMAC of the
+ * /24 (IPv4) or /48 (IPv6) network used only to recognise a new location, `user_agent_family` is a coarse "Chrome on
+ * Windows" label. `user_id` is a plain reference (no FK) so the row outlives the user.
+ */
+export const authEvents = pgTable("auth_events", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: uuid("user_id"),
+  event: text("event").notNull(),
+  emailHash: text("email_hash"),
+  ipHash: text("ip_hash"),
+  ipPrefixHash: text("ip_prefix_hash"),
+  userAgentFamily: text("user_agent_family"),
+  newDevice: boolean("new_device").notNull().default(false),
+  detail: text("detail"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  userIdx: index("auth_events_user_idx").on(table.userId, table.createdAt),
+  eventIdx: index("auth_events_event_idx").on(table.event, table.createdAt),
+}));

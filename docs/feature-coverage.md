@@ -38,7 +38,7 @@ there is no standalone Timesheets screen or nav entry.
 | Practice mode, workpapers (42, 43) | BUILT for balance-sheet reconciliation workpapers; adjustments are notes (never posted); no practice audit-log UI. |
 | Approval engine (45) | MISSING (single-step approvals exist for payment runs, expenses, leave, timesheets). |
 | Roles (46) | PARTIAL. 10 roles; no CFO/External Auditor; no per-branch/department/bank-account restrictions. |
-| Security (47, 49–52) | PARTIAL. CSP/headers, RLS, secrets, hashed keys, AI permission parity built. MFA DEFERRED; login rate limiting, email verification, password reset, dependency scanning/CI, IP/device audit capture, AI prompt-injection tests, supplier bank-detail change controls MISSING. |
+| Security (47, 49–52) | PARTIAL. CSP/headers, RLS, secrets, hashed keys, AI permission parity built. MFA DEFERRED; login rate limiting/lockout and new-device signal BUILT (security.md s.22); email verification, password reset, dependency scanning/CI, IP/device audit capture, AI prompt-injection tests, supplier bank-detail change controls MISSING. |
 | Integrations, API, OAuth, webhooks (53–55) | BUILT framework (Slack real, 17 providers "coming soon"); API v1 drafts-only; OAuth auth-code+PKCE; webhooks with outbox. `payroll.completed` / `bank.transaction.created` events and a scheduler DEFERRED. |
 | Search, create button, command bar (56, 57, 80) | Global search / Cmd+K MISSING; "+ Create" has 1 of 9 entries (pages exist); AI controller is the only command surface. |
 | Navigation (59), onboarding (60), migration (61) | Nav PARTIAL (flat list; no Payments list, Timesheets entry, Dashboards). Onboarding 4-step wizard PARTIAL. Migration engine and Xero/MYOB/QuickBooks importers MISSING. |

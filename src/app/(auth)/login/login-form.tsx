@@ -16,6 +16,18 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 
+/** The ONE place a sign-in error code becomes words. Unknown email, wrong password and a suspended account all read the same. */
+function loginErrorMessage(code: string): string {
+  if (code.startsWith("TooManyAttempts:")) {
+    const seconds = Number(code.slice("TooManyAttempts:".length));
+    const minutes = Number.isFinite(seconds) && seconds > 0 ? Math.max(1, Math.ceil(seconds / 60)) : null;
+    return minutes
+      ? `Too many failed attempts. Try again in about ${minutes} minute${minutes === 1 ? "" : "s"}.`
+      : "Too many failed attempts. Try again later.";
+  }
+  return "Invalid email or password.";
+}
+
 export function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -36,7 +48,7 @@ export function LoginForm() {
 
     setLoading(false);
     if (result?.error) {
-      setError("Invalid email or password.");
+      setError(loginErrorMessage(result.error));
       return;
     }
     const next = searchParams.get("next");

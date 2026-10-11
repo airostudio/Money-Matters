@@ -3,7 +3,7 @@
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { signOut } from "next-auth/react";
 import Link from "next/link";
-import { Layers, LogOut, ShieldCheck } from "lucide-react";
+import { KeyRound, Layers, LogOut, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export function UserMenu({
@@ -47,6 +47,14 @@ export function UserMenu({
               className="flex cursor-pointer items-center gap-2 rounded-sm px-3 py-2 text-sm outline-none hover:bg-accent"
             >
               <Layers className="size-4" /> Entity groups
+            </Link>
+          </DropdownMenu.Item>
+          <DropdownMenu.Item asChild>
+            <Link
+              href="/app/security"
+              className="flex cursor-pointer items-center gap-2 rounded-sm px-3 py-2 text-sm outline-none hover:bg-accent"
+            >
+              <KeyRound className="size-4" /> Account security
             </Link>
           </DropdownMenu.Item>
           {showAdminLink && (

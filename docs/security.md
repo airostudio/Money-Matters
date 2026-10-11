@@ -150,9 +150,8 @@ logged in full, only via `redactConnectionString()`.
 - **SQL injection**: Prisma parameterizes all queries; the only hand-written
   SQL in the repo is the RLS policy DDL in migrations, which contains no
   user input.
-- **Rate limiting / brute force / suspicious login detection**: deferred —
-  requires the Redis-compatible cache/queue infra introduced in Phase 2;
-  tracked in `docs/roadmap.md` as a Phase 2 item, not silently skipped.
+- **Rate limiting / brute force / suspicious login detection**: built in
+  Postgres (no Redis needed) - see section 22.
 
 ## 7. Audit trail as a security control
 
@@ -1321,3 +1320,34 @@ RFC 6749 (authorization-code grant **only**; implicit, resource-owner password a
 ### 20.8 Known limits
 
 The OAuth rate limits are in Postgres (shared across instances) but keyed on the address a proxy reports (`X-Forwarded-For`), so a client able to spoof it can spread across address buckets; the per-client-id bucket still bounds it. The reuse-detection window is 7 days after rotation. A client that loses the response to a refresh (network failure after the server rotated) holds a spent token and will, on retry, trigger reuse detection and need a fresh consent: the documented trade-off of strict rotation (clients must persist the new refresh token before using it). The consent hand-off is an interstitial page rather than a 3xx because browsers apply the consent page's `form-action 'self'` CSP to a form's redirect chain; that was reasoned from the CSP specification and **not** observed in a real browser. The visual layout of every new page is unverified.
+
+## 22. Login security (master spec 47): throttling and lockout, two-step verification, email verification and password reset
+
+Delivered in three independently shippable parts. Part 1 (below) needs nothing external. Parts 2 and 3 add their own subsections (22.4+, 22.8+). The sign-in decision lives in `src/domain/auth/login-service.ts`; `src/lib/auth.ts` (NextAuth Credentials, JWT sessions, ADR 0002) only calls it and issues a session cookie solely when it returns a user.
+
+### 22.1 Part 1: rate limiting, lockout, uniform responses
+
+| Control | Behaviour |
+| --- | --- |
+| Per account | A keyed HMAC of the **normalised** email (`acct:<hmac>`). 5 failures inside a 15-minute window lock the account for 15 minutes. Each consecutive lockout doubles the next one (15, 30, 60 ... minutes), capped at 24 hours; the level is forgotten after 24 hours without a lock; a successful sign-in clears the counter. |
+| Per address | A keyed HMAC of the client address (`ip:<hmac>`). 30 failures in 15 minutes lock the address for 15 minutes (same doubling). Higher than the account limit so an office behind one address is not locked out by a few typos. |
+| Storage | Postgres `login_throttles`, advanced by ONE atomic `INSERT ... ON CONFLICT DO UPDATE ... RETURNING` per counted failure, every time comparison on the **database clock** (same mechanism family as `api_rate_windows` / `oauth_rate_windows`; no in-memory state, so it holds across serverless instances and cold starts). |
+| Refused while locked | The attempt is refused **before any password work** with one `SELECT`; it writes nothing (no counter advance, no audit row), so a flood against a locked account cannot extend the lock or grow a table. |
+| No account-existence oracle | Counters exist for any typed email, so an unknown email locks after exactly the same number of attempts as a real one. `UserService.checkPassword` always runs bcrypt (work factor 12) - against a fixed dummy hash when the email has no account or no password - so response time does not distinguish unknown email from wrong password. Unknown email, wrong password and a suspended account are one outcome (`invalid`). Structure test: bcrypt is called exactly once in each case. |
+| Audit | `auth_events` (append-only): `login_failed`, `login_locked` (account or address), `login_success`. |
+
+**Why not tenant RLS.** Sign-in precedes any tenant or user context, so a policy keyed on `app.current_org_id` / `app.current_user_id` cannot work. `login_throttles` and `auth_events` are *unscoped platform tables* like `platform_admin_audit_logs` and `oauth_rate_windows`: no `organization_id` / `owner_user_id` column, no personal data (keyed HMACs only), exposure bounded by GRANTs (`login_throttles`: SELECT, INSERT, UPDATE, DELETE for stale-row purging; `auth_events`: SELECT, INSERT only - proven in `src/tests/integration/auth/login-security.test.ts`). The isolation audit passes unchanged.
+
+**What is stored about a sign-in** (never a raw email, address or full user agent): keyed HMACs of the email, of the address, and of the address' network (/24 IPv4, /48 IPv6); a coarse user-agent family ("Chrome on Windows"); the time. The HMAC key is derived from `NEXTAUTH_SECRET`, so a database dump alone cannot be used to test guessed addresses. `users.last_login_at` records the last successful sign-in.
+
+**Suspicious-login signal.** A successful sign-in is flagged `new_device` when the user has signed in before and never from this combination of browser family and network in their last 100 sign-ins. It is shown on `/app/security` ("New browser or network") with the recent sign-in list. It is **not** pushed as an in-app notification: the notifications table is tenant-scoped (needs an organisation) and a person may belong to none or several, so a notification would be a design change for a small gain; deferred.
+
+**Platform admin.** `/admin/security` lists the 50 most recent lockouts (scope, a short prefix of the keyed email hash, browser family).
+
+**Seats, suspension, archived organisations** are untouched: they are enforced per request by `getCurrentUser` / `requireOrgAndActor`, and a suspended user's existing JWT still stops working on the next request.
+
+**Known limits (honest).**
+- Anyone can lock a *known* email by failing 5 times: a temporary denial of service on that account. The owner waits out the lock (or a platform admin helps). This is the standard trade-off of per-account lockout; the exponential growth is capped at 24 hours.
+- The address comes from `X-Forwarded-For`. On Vercel the platform sets it; behind any other proxy a client may choose it, which is why the per-account lock (not keyed on the address) is the control that does not depend on that header.
+- `auth_events` has no purge (append-only by grant). It grows by one row per sign-in attempt that reaches a password check; a retention job can be added by the owner with a separate role.
+- Not verified in a real browser: the layout of `/app/security` and `/admin/security`.

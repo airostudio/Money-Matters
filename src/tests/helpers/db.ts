@@ -18,6 +18,8 @@ const TENANT_TABLES = [
   "oauth_apps",
   "integration_events",
   "integration_connections",
+  "login_throttles",
+  "auth_events",
   "notifications",
   "automation_runs",
   "automation_jobs",
