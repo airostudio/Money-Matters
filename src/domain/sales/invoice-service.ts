@@ -30,7 +30,7 @@ import {
 import { calculateInvoiceTotals } from "./invoice-calculations";
 import { nextInvoiceNumber } from "./numbering";
 import type { CreateInvoiceInput, InvoiceLineInput, UpdateInvoiceInput } from "./types";
-import { paymentAllocations, products, organizations } from "@/db/schema";
+import { customerCreditAllocations, paymentAllocations, products, organizations } from "@/db/schema";
 import { InventoryService } from "@/domain/inventory/inventory-service";
 import { ProductCurrencyMismatchError, VoidWouldDesyncInventoryError } from "@/domain/inventory/errors";
 
@@ -125,15 +125,27 @@ async function loadInvoiceOr404(tx: TenantDb, organizationId: string, invoiceId:
   return invoice;
 }
 
-/** Sum of everything ever allocated against this invoice — the source of truth for "outstanding", never a denormalized counter. */
+/**
+ * Sum of everything ever allocated against this invoice — the source of truth for "outstanding", never a denormalized
+ * counter. Since the sales documents slice this is cash/receipt allocations PLUS customer credit note applications
+ * (`customer_credit_allocations`, where a reversal is a negative row, so the plain sum is the net).
+ */
 export async function loadAllocatedTotal(tx: TenantDb, organizationId: string, invoiceId: string): Promise<string> {
-  const rows = await tx
-    .select({ amount: paymentAllocations.amount })
-    .from(paymentAllocations)
-    .where(and(eq(paymentAllocations.organizationId, organizationId), eq(paymentAllocations.invoiceId, invoiceId)));
   const [invoice] = await tx.select({ currency: invoices.currency }).from(invoices).where(eq(invoices.id, invoiceId));
   const currency = invoice?.currency ?? "AUD";
-  return rows.reduce((sum, r) => sum.add(Money.of(r.amount, currency)), Money.zero(currency)).toString();
+  const [paymentRows, creditRows] = [
+    await tx
+      .select({ amount: paymentAllocations.amount })
+      .from(paymentAllocations)
+      .where(and(eq(paymentAllocations.organizationId, organizationId), eq(paymentAllocations.invoiceId, invoiceId))),
+    await tx
+      .select({ amount: customerCreditAllocations.amount })
+      .from(customerCreditAllocations)
+      .where(and(eq(customerCreditAllocations.organizationId, organizationId), eq(customerCreditAllocations.invoiceId, invoiceId))),
+  ];
+  return [...paymentRows, ...creditRows]
+    .reduce((sum, r) => sum.add(Money.of(r.amount, currency)), Money.zero(currency))
+    .toString();
 }
 
 async function persistInvoiceWithLines(

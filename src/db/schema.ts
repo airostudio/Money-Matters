@@ -266,6 +266,20 @@ export const supplierCreditStatusEnum = pgEnum("supplier_credit_status", [
 ]);
 
 /**
+ * Sales documents slice (customer credit notes), the mirror image of `supplier_credit_status`. A customer credit
+ * note posts the reverse of an invoice (debit revenue and GST payable, credit Accounts Receivable) on approval; it
+ * can then be applied against open invoices through `customer_credit_allocations`. PART_APPLIED/APPLIED are derived
+ * from those allocations, never a stored counter.
+ */
+export const customerCreditStatusEnum = pgEnum("customer_credit_status", [
+  "DRAFT",
+  "APPROVED",
+  "PART_APPLIED",
+  "APPLIED",
+  "VOID",
+]);
+
+/**
  * Phase 4 Slice 2 (Purchases — payment runs). Segregation of duties (master
  * spec §52) is enforced in `PaymentRunService`, not just this status column:
  * DRAFT is the run being assembled by its creator; AWAITING_APPROVAL is
@@ -1077,10 +1091,18 @@ export const paymentAllocations = pgTable("payment_allocations", {
     .notNull()
     .references(() => invoices.id),
   amount: numeric("amount", { precision: 19, scale: 4 }).notNull(),
+  /**
+   * The date this allocation took effect, for historical (as-at) statements and aged balances. Null on an allocation
+   * made when the payment was recorded (its effective date is then the payment's own `paymentDate`); set when an
+   * unapplied receipt is applied to an invoice later (sales documents slice). Never used for "outstanding" today.
+   */
+  appliedDate: timestamp("applied_date", { withTimezone: true, mode: "date" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   createdById: uuid("created_by_id"),
 }, (table) => ({
-  paymentInvoiceUnique: uniqueIndex("payment_allocations_payment_invoice_unique").on(
+  // Not unique any more (sales documents slice): an unapplied receipt can be applied to the same invoice in more
+  // than one step, each step being its own row with its own `appliedDate`.
+  paymentInvoiceIdx: index("payment_allocations_payment_invoice_idx").on(
     table.paymentId,
     table.invoiceId,
   ),
@@ -1777,6 +1799,137 @@ export const supplierCreditAllocations = pgTable("supplier_credit_allocations", 
   ),
   orgBillIdx: index("supplier_credit_allocations_org_bill_idx").on(table.organizationId, table.billId),
   orgCreditIdx: index("supplier_credit_allocations_org_credit_idx").on(table.organizationId, table.creditNoteId),
+}));
+
+/**
+ * A customer credit note (sales documents slice) - a reduction in what a customer owes (a return, a pricing or
+ * quantity correction). Shaped like `invoices` so `CustomerCreditService` reuses `calculateInvoiceTotals`; on approval
+ * it posts the mirror image of an invoice (debit revenue and GST payable, credit Accounts Receivable) via
+ * `PostingService`. `invoiceId` optionally links it to the invoice it corrects. Until applied to an invoice through
+ * `customer_credit_allocations` it is an unapplied customer credit (a credit balance inside the AR control account).
+ */
+export const customerCreditNotes = pgTable("customer_credit_notes", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  customerContactId: uuid("customer_contact_id")
+    .notNull()
+    .references(() => contacts.id),
+  /** The invoice this credit corrects, when there is one. Informational plus a cap (linked credits never exceed the invoice total). */
+  invoiceId: uuid("invoice_id").references((): AnyPgColumn => invoices.id),
+  creditNoteNumber: text("credit_note_number").notNull(),
+  issueDate: timestamp("issue_date", { withTimezone: true, mode: "date" }).notNull(),
+  currency: text("currency").notNull(),
+  memo: text("memo"),
+  arAccountId: uuid("ar_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  status: customerCreditStatusEnum("status").notNull().default("DRAFT"),
+  subtotal: numeric("subtotal", { precision: 19, scale: 4 }).notNull().default("0"),
+  taxTotal: numeric("tax_total", { precision: 19, scale: 4 }).notNull().default("0"),
+  total: numeric("total", { precision: 19, scale: 4 }).notNull().default("0"),
+  journalEntryId: uuid("journal_entry_id").references((): AnyPgColumn => journalEntries.id),
+  voidJournalEntryId: uuid("void_journal_entry_id").references((): AnyPgColumn => journalEntries.id),
+  postedAt: timestamp("posted_at", { withTimezone: true }),
+  postedById: uuid("posted_by_id"),
+  voidedAt: timestamp("voided_at", { withTimezone: true }),
+  voidedById: uuid("voided_by_id"),
+  voidReason: text("void_reason"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+  updatedById: uuid("updated_by_id"),
+}, (table) => ({
+  orgCreditNumberUnique: uniqueIndex("customer_credit_notes_org_number_unique").on(
+    table.organizationId,
+    table.creditNoteNumber,
+  ),
+  orgStatusIdx: index("customer_credit_notes_org_status_idx").on(table.organizationId, table.status),
+  orgCustomerIdx: index("customer_credit_notes_org_customer_idx").on(table.organizationId, table.customerContactId),
+  orgInvoiceIdx: index("customer_credit_notes_org_invoice_idx").on(table.organizationId, table.invoiceId),
+}));
+
+/** One line of a customer credit note - same shape as `invoice_lines` (no project/task; a tracked-stock product is refused). */
+export const customerCreditNoteLines = pgTable("customer_credit_note_lines", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  creditNoteId: uuid("credit_note_id")
+    .notNull()
+    .references(() => customerCreditNotes.id, { onDelete: "cascade" }),
+  lineNumber: integer("line_number").notNull(),
+  description: text("description").notNull(),
+  quantity: numeric("quantity", { precision: 19, scale: 4 }).notNull(),
+  unitPrice: numeric("unit_price", { precision: 19, scale: 4 }).notNull(),
+  accountId: uuid("account_id")
+    .notNull()
+    .references(() => accounts.id),
+  taxCodeId: uuid("tax_code_id").references(() => taxCodes.id),
+  /** Optional catalog product (non-stock only; its revenue account is used). TRACKED_INVENTORY products are refused. */
+  productId: uuid("product_id").references((): AnyPgColumn => products.id),
+  lineAmount: numeric("line_amount", { precision: 19, scale: 4 }).notNull(),
+  taxAmount: numeric("tax_amount", { precision: 19, scale: 4 }).notNull().default("0"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  creditLineUnique: uniqueIndex("customer_credit_note_lines_credit_line_unique").on(
+    table.creditNoteId,
+    table.lineNumber,
+  ),
+  orgCreditIdx: index("customer_credit_note_lines_org_credit_idx").on(table.organizationId, table.creditNoteId),
+}));
+
+/**
+ * How much of a `customer_credit_note` was applied against an `invoice`. APPEND-ONLY: a mistaken application is
+ * undone by inserting a NEGATIVE row that points at the original (`reversesAllocationId`), never by editing or
+ * deleting one (the table is granted SELECT + INSERT only). Net applied = the plain sum of `amount`. `appliedDate`
+ * is the effective date for historical statements. `CustomerCreditService` is the only writer.
+ */
+export const customerCreditAllocations = pgTable("customer_credit_allocations", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  creditNoteId: uuid("credit_note_id")
+    .notNull()
+    .references(() => customerCreditNotes.id),
+  invoiceId: uuid("invoice_id")
+    .notNull()
+    .references(() => invoices.id),
+  /** Positive = applied; negative = a reversal of an earlier application. Never zero. */
+  amount: numeric("amount", { precision: 19, scale: 4 }).notNull(),
+  appliedDate: timestamp("applied_date", { withTimezone: true, mode: "date" }).notNull(),
+  reversesAllocationId: uuid("reverses_allocation_id").references((): AnyPgColumn => customerCreditAllocations.id),
+  reason: text("reason"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+}, (table) => ({
+  orgInvoiceIdx: index("customer_credit_allocations_org_invoice_idx").on(table.organizationId, table.invoiceId),
+  orgCreditIdx: index("customer_credit_allocations_org_credit_idx").on(table.organizationId, table.creditNoteId),
+  reversesUnique: uniqueIndex("customer_credit_allocations_reverses_unique").on(table.reversesAllocationId),
+}));
+
+/**
+ * The receipt issued for a recorded customer payment (sales documents slice). IMMUTABLE once issued: SELECT + INSERT
+ * only. `snapshot` freezes what the receipt said at issue time (customer, amount, method, reference, allocations to
+ * invoices, any credit left unapplied); later applications of the unapplied balance never rewrite it. One per payment.
+ */
+export const customerPaymentReceipts = pgTable("customer_payment_receipts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  paymentId: uuid("payment_id")
+    .notNull()
+    .references(() => payments.id),
+  receiptNumber: text("receipt_number").notNull(),
+  snapshot: jsonb("snapshot").notNull(),
+  issuedAt: timestamp("issued_at", { withTimezone: true }).notNull().defaultNow(),
+  issuedById: uuid("issued_by_id"),
+}, (table) => ({
+  paymentUnique: uniqueIndex("customer_payment_receipts_payment_unique").on(table.paymentId),
+  orgNumberUnique: uniqueIndex("customer_payment_receipts_org_number_unique").on(table.organizationId, table.receiptNumber),
 }));
 
 /**

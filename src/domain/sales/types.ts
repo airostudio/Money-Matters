@@ -1,4 +1,5 @@
 import type {
+  customerCreditStatusEnum,
   invoiceStatusEnum,
   paymentMethodEnum,
   quoteStatusEnum,
@@ -126,5 +127,33 @@ export interface RecordPaymentInput {
   /** Optional informational link to Phase 2's bank_accounts, for later bank-feed reconciliation. */
   bankAccountId?: string;
   reference?: string;
+  /**
+   * Allocations to posted invoices. May be empty or total less than `amount` (sales documents slice): whatever is not
+   * allocated becomes an unapplied customer credit - a credit balance on the receivable account below.
+   */
   allocations: RecordPaymentAllocationInput[];
+  /**
+   * The Accounts Receivable control account credited with the UNALLOCATED part of the payment. Optional when the
+   * payment allocates to at least one invoice (the first allocated invoice's AR account is used); required otherwise.
+   */
+  arAccountId?: string;
 }
+
+export type CustomerCreditStatus = (typeof customerCreditStatusEnum.enumValues)[number];
+
+/** A customer credit note line is shaped like an invoice line (`calculateInvoiceTotals` is reused verbatim). */
+export type CustomerCreditLineInput = Pick<InvoiceLineInput, "description" | "quantity" | "unitPrice" | "accountId" | "taxCodeId" | "productId">;
+
+export interface CreateCustomerCreditInput {
+  customerContactId: string;
+  issueDate: Date;
+  currency: string;
+  /** The Accounts Receivable control account credited on posting. */
+  arAccountId: string;
+  /** The invoice this credit corrects, if any (same customer, posted, same currency). */
+  invoiceId?: string;
+  memo?: string;
+  lines: CustomerCreditLineInput[];
+}
+
+export type UpdateCustomerCreditInput = CreateCustomerCreditInput;

@@ -23,6 +23,7 @@ const DOC_PATH: Record<string, string> = {
   INVOICE: "sales/invoices",
   BILL: "purchases/bills",
   SUPPLIER_CREDIT: "purchases/supplier-credits",
+  CUSTOMER_CREDIT: "sales/credit-notes",
   EXPENSE_CLAIM: "expenses",
 };
 
