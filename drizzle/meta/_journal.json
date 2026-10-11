@@ -402,10 +402,10 @@
       "breakpoints": true
     },
     {
-      "idx": 57,
+      "idx": 59,
       "version": "7",
-      "when": 1791700060000,
-      "tag": "0057_sales_documents",
+      "when": 1791700084000,
+      "tag": "0059_sales_documents",
       "breakpoints": true
     }
   ]
