@@ -9,6 +9,8 @@ import type { Actor } from "@/domain/permissions/permission-service";
 import type { MembershipRole } from "@/domain/permissions/roles";
 
 const TENANT_TABLES = [
+  "migration_rows",
+  "migration_batches",
   "oauth_rate_windows",
   "oauth_access_tokens",
   "oauth_client_index",

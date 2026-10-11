@@ -155,6 +155,10 @@ export const PERMISSIONS = [
   // only AND a HUMAN actor (an API key, an OAuth token, an AI agent or an automation can never hold it). Any member can
   // revoke THEIR OWN grants (that is not a permission: it is the right to withdraw your own consent).
   "oauth_app:manage",
+  // Migration engine (docs/migration.md). Importing a chart of accounts, contacts, opening balances, open invoices/bills
+  // or opening stock from another system, and rolling an import back. OWNER / ADMINISTRATOR / ACCOUNTANT only (an
+  // accountant already holds every permission the import exercises) AND a HUMAN actor; never reachable from an API scope.
+  "migration:manage",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -267,6 +271,7 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "client_request:respond",
     "client_request:manage",
     "automation:read",
+    "migration:manage",
   ]),
   BOOKKEEPER: new Set<Permission>([
     "account:read",

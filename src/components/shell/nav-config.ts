@@ -197,6 +197,7 @@ export const NAV_ITEMS: NavItem[] = [
       { label: "API keys", href: "/settings/api", permission: "api_key:manage" },
       { label: "Webhooks", href: "/settings/webhooks", permission: "webhook:manage" },
       { label: "Connected apps", href: "/settings/oauth-apps", permission: "oauth_app:manage" },
+      { label: "Import data", href: "/settings/import", permission: "migration:manage" },
     ],
   },
 ];

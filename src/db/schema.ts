@@ -5701,3 +5701,89 @@ export const oauthRateWindows = pgTable("oauth_rate_windows", {
   windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
   requestCount: integer("request_count").notNull(),
 });
+
+// ---------------------------------------------------------------------------
+// Migration engine: import from another accounting system (docs/migration.md, docs/security.md section 22)
+// ---------------------------------------------------------------------------
+
+/**
+ * One staged file being migrated in. A TENANT table (RLS on organization_id). The batch is staged (parsed, mapped, every
+ * row validated, NOTHING written to the books), then imported on an explicit confirmation, and can be rolled back.
+ * `file_hash` (SHA-256 of the uploaded bytes) plus the partial unique index makes re-uploading the same file a no-op
+ * while the earlier import is still live. Never deleted: a rolled-back or discarded batch stays as history.
+ */
+export const migrationBatches = pgTable("migration_batches", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  kind: text("kind").notNull(),
+  status: text("status").notNull().default("STAGED"),
+  fileName: text("file_name"),
+  fileHash: text("file_hash").notNull(),
+  /** Target field -> source column, as confirmed by the user. */
+  mapping: jsonb("mapping").notNull(),
+  /** Kind-specific choices (date format, offset account, as-at date, ...). */
+  options: jsonb("options").notNull(),
+  rowCount: integer("row_count").notNull().default(0),
+  errorCount: integer("error_count").notNull().default(0),
+  importedCount: integer("imported_count").notNull().default(0),
+  skippedCount: integer("skipped_count").notNull().default(0),
+  /** Reconciliation figures, created journal ids, rollback outcome. */
+  result: jsonb("result"),
+  createdById: uuid("created_by_id").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  importedAt: timestamp("imported_at", { withTimezone: true }),
+  rolledBackAt: timestamp("rolled_back_at", { withTimezone: true }),
+  rolledBackById: uuid("rolled_back_by_id"),
+}, (table) => ({
+  orgCreatedIdx: index("migration_batches_org_created_idx").on(table.organizationId, table.createdAt),
+  liveFileUnique: uniqueIndex("migration_batches_live_file_unique")
+    .on(table.organizationId, table.kind, table.fileHash)
+    .where(sql`${table.status} IN ('STAGED', 'IMPORTING', 'IMPORTED', 'FAILED')`),
+  idOrgUnique: uniqueIndex("migration_batches_id_org_unique").on(table.id, table.organizationId),
+  kindCheck: check(
+    "migration_batches_kind_check",
+    sql`${table.kind} IN ('CHART_OF_ACCOUNTS', 'CONTACTS', 'OPENING_BALANCES', 'OPEN_INVOICES', 'OPEN_BILLS', 'OPENING_STOCK')`,
+  ),
+  statusCheck: check(
+    "migration_batches_status_check",
+    sql`${table.status} IN ('STAGED', 'IMPORTING', 'IMPORTED', 'FAILED', 'ROLLED_BACK', 'DISCARDED')`,
+  ),
+}));
+
+/**
+ * One source row of a batch: the raw cells exactly as read, the normalised values after mapping, any validation
+ * errors, and - once imported - which record it created (or was linked to). `natural_key` is the source's own
+ * identity for the row (account code, contact name, document number, ...); a row whose key is already IMPORTED in
+ * another live batch of the same kind is skipped as a duplicate rather than imported twice.
+ */
+export const migrationRows = pgTable("migration_rows", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  batchId: uuid("batch_id").notNull(),
+  rowNumber: integer("row_number").notNull(),
+  raw: jsonb("raw").notNull(),
+  normalized: jsonb("normalized"),
+  naturalKey: text("natural_key"),
+  status: text("status").notNull().default("VALID"),
+  errors: jsonb("errors"),
+  entityType: text("entity_type"),
+  entityId: uuid("entity_id"),
+  /** CREATED (a new record, safe to roll back if unused) or LINKED (matched an existing record, never touched on rollback). */
+  entityAction: text("entity_action"),
+}, (table) => ({
+  batchRowUnique: uniqueIndex("migration_rows_batch_row_unique").on(table.batchId, table.rowNumber),
+  orgKeyIdx: index("migration_rows_org_key_idx").on(table.organizationId, table.naturalKey),
+  batchFk: foreignKey({
+    columns: [table.batchId, table.organizationId],
+    foreignColumns: [migrationBatches.id, migrationBatches.organizationId],
+    name: "migration_rows_batch_org_fk",
+  }).onDelete("cascade"),
+  statusCheck: check(
+    "migration_rows_status_check",
+    sql`${table.status} IN ('VALID', 'ERROR', 'IMPORTED', 'SKIPPED_DUPLICATE', 'FAILED', 'ROLLED_BACK')`,
+  ),
+}));

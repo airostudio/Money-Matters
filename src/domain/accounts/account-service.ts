@@ -1,6 +1,6 @@
 import { and, asc, eq } from "drizzle-orm";
 import { accounts, type accountTypeEnum } from "@/db/schema";
-import { withTenant } from "@/db/tenant";
+import { withTenant, type TenantDb } from "@/db/tenant";
 import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
 import { AuditService } from "@/domain/audit/audit-service";
 
@@ -67,7 +67,13 @@ export const AccountService = {
 
   async create(actor: Actor, input: CreateAccountInput, opts: { isSystemAccount?: boolean } = {}) {
     assertPermission(actor, "account:manage");
-    return withTenant(actor.organizationId, async (tx) => {
+    return withTenant(actor.organizationId, (tx) => AccountService.createIn(tx, actor, input, opts));
+  },
+
+  /** `create` inside a caller's tenant transaction (the migration engine imports a chart in bounded batches). */
+  async createIn(tx: TenantDb, actor: Actor, input: CreateAccountInput, opts: { isSystemAccount?: boolean } = {}) {
+    assertPermission(actor, "account:manage");
+    {
       const [existing] = await tx
         .select({ id: accounts.id })
         .from(accounts)
@@ -104,7 +110,7 @@ export const AccountService = {
       });
 
       return account;
-    });
+    }
   },
 
   async update(actor: Actor, accountId: string, input: UpdateAccountInput) {
