@@ -146,6 +146,7 @@ export const PERMISSION_AREAS: Record<string, string> = {
   automation: "Automations",
   integration: "Integrations",
   oauth_app: "Connected apps (OAuth)",
+  approval: "Approval policies",
 };
 
 function areaOf(permission: Permission): string {

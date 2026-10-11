@@ -13,6 +13,7 @@ import { Money } from "@/domain/money/money";
 import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
 import { roleHasPermission } from "@/domain/permissions/roles";
 import { AuditService } from "@/domain/audit/audit-service";
+import { ApprovalService } from "@/domain/approvals/approval-service";
 import { SupplierPaymentAllocationService } from "./supplier-payment-service";
 import { loadAllocatedTotal } from "./bill-service";
 import {
@@ -224,6 +225,9 @@ export const PaymentRunService = {
         after: { status: "AWAITING_APPROVAL" },
       });
 
+      // Approval engine (spec s.45): opens a multi-step request when a policy matches; otherwise a no-op (existing flow).
+      await ApprovalService.openForSubmissionIn(tx, actor, "PAYMENT_RUN", runId);
+
       return updated;
     });
   },
@@ -262,6 +266,9 @@ export const PaymentRunService = {
     const { run, bySupplier, selfApprovalDocumented } = await withTenant(actor.organizationId, async (tx) => {
       const run = await loadRunOr404(tx, actor.organizationId, runId);
       if (run.status !== "AWAITING_APPROVAL") throw new PaymentRunNotAwaitingApprovalError(run.runNumber);
+      // Approval engine (spec s.45): refuses until the policy-governed request is fully APPROVED. The creator != approver
+      // rule below still applies on top; a no-op with no matching policy.
+      await ApprovalService.assertClearedIn(tx, actor.organizationId, "PAYMENT_RUN", runId);
 
       let selfApprovalDocumented = false;
       if (actor.userId === run.createdById) {
@@ -363,11 +370,38 @@ export const PaymentRunService = {
     });
   },
 
+  /**
+   * AWAITING_APPROVAL -> DRAFT after an approval-engine rejection, so the preparer can fix the run and resubmit (which opens a
+   * NEW request; the rejected one is kept). Needs `payment_run:approve`: it is the approver's side of the decision.
+   */
+  async returnToDraft(actor: Actor, runId: string, reason: string) {
+    assertPermission(actor, "payment_run:approve");
+    return withTenant(actor.organizationId, async (tx) => {
+      const run = await loadRunOr404(tx, actor.organizationId, runId);
+      if (run.status !== "AWAITING_APPROVAL") throw new PaymentRunNotAwaitingApprovalError(run.runNumber);
+      await ApprovalService.cancelOpenIn(tx, actor, "PAYMENT_RUN", runId, reason);
+      const [updated] = await tx
+        .update(paymentRuns)
+        .set({ status: "DRAFT", submittedAt: null, submittedById: null, updatedById: actor.userId, updatedAt: new Date() })
+        .where(eq(paymentRuns.id, runId))
+        .returning();
+      await AuditService.record(tx, actor, {
+        action: "payment_run.returned_to_draft",
+        entityType: "PaymentRun",
+        entityId: runId,
+        before: { status: "AWAITING_APPROVAL" },
+        after: { status: "DRAFT", reason },
+      });
+      return updated;
+    });
+  },
+
   async cancel(actor: Actor, runId: string, reason: string) {
     assertPermission(actor, "payment_run:manage");
     return withTenant(actor.organizationId, async (tx) => {
       const run = await loadRunOr404(tx, actor.organizationId, runId);
       if (run.status === "PAID") throw new PaymentRunNotEditableError(run.runNumber);
+      await ApprovalService.cancelOpenIn(tx, actor, "PAYMENT_RUN", runId, "The payment run was cancelled.");
 
       const [updated] = await tx
         .update(paymentRuns)
