@@ -136,6 +136,13 @@ describe("the shared layout and shell stay free of the new features (hot path)",
   it("no notification, automation or integration query or import in the layout, the shell or withTenant", () => {
     for (const f of HOT) {
       const c = code(path.join(SRC, f));
+      if (f === "components/shell/nav-config.ts") {
+        // Static menu data: its links and permission names legitimately say "automation"/"integration". What matters is
+        // that it imports nothing that could query (no db, no domain service beyond the pure role table).
+        const imports = [...c.matchAll(/from\s+["']([^"']+)["']/g)].map((m) => m[1]);
+        expect(imports.filter((i) => i !== "@/domain/permissions/roles" && i !== "lucide-react" && i !== "./ui-mode"), f).toEqual([]);
+        continue;
+      }
       expect(c, f).not.toMatch(/NotificationService|notification-service|automation|integration|schema["']\s*;?[\s\S]{0,40}notifications/i);
       expect(c, f).not.toMatch(/unreadCount|from\(notifications\)/);
     }

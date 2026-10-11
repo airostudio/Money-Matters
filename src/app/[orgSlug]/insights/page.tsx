@@ -1,13 +1,6 @@
-import { Sparkles } from "lucide-react";
-import { ComingSoon } from "@/components/shell/coming-soon";
+import { redirect } from "next/navigation";
 
-export default function InsightsPage() {
-  return (
-    <ComingSoon
-      icon={Sparkles}
-      title="Insights"
-      phase={5}
-      blurb="Financial statements, dimensional reporting, and the report builder. For now, see the Trial Balance under Accounting."
-    />
-  );
+// Financial statements, the report builder and the management pack are built under Accounting; this old placeholder redirects.
+export default function InsightsPage({ params }: { params: { orgSlug: string } }) {
+  redirect(`/${params.orgSlug}/accounting`);
 }

@@ -9,7 +9,7 @@ import {
   resolveConnection,
   type ResolvedConnection,
 } from "./connection";
-import { auditTableSecurity } from "./isolation-audit";
+import { auditTableSecurity, healUnscopedDenyAllTables } from "./isolation-audit";
 import { checkOptionalFeatures, checkRuntimeEnv, formatEnvProblems, formatOptionalFeatureNotes } from "@/lib/runtime-env";
 
 const SAFE_PASSWORD_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -298,6 +298,13 @@ async function main() {
     await migrate(drizzle(pool), { migrationsFolder: "./drizzle" });
     console.log("[db] Migrations complete.");
     await ensureAppRolePassword(pool, connection);
+    const healed = await healUnscopedDenyAllTables(pool);
+    if (healed.length > 0) {
+      console.warn(
+        `[db] Repaired ${healed.length} unscoped table(s) that had row-level security enabled with no policy ` +
+          `(the platform auto-enables RLS): ${healed.join(", ")}. Added an mm_app-only policy; RLS stays on.`,
+      );
+    }
     await auditTableSecurity(pool);
     const runtime = reportRuntimeConnection(connection);
     if (runtime) {

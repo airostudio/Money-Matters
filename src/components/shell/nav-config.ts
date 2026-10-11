@@ -17,10 +17,8 @@ import {
   Scale,
   Settings,
   ShoppingCart,
-  Sparkles,
   TrendingUp,
   Users,
-  Wallet,
 } from "lucide-react";
 
 export interface NavItem {
@@ -39,14 +37,22 @@ export interface NavItem {
 }
 
 /**
- * Top-level navigation per master spec §59. Sections not yet built in
- * Phase 1 still appear (so the product's shape is honest about what's
- * coming) but route to a "not built yet" page rather than faking data —
- * see docs/roadmap.md and master spec §81.
+ * Top-level navigation per master spec §59. Every entry points at something that is built; a section that is not
+ * built yet is left out rather than shown as a "coming soon" page (see docs/roadmap.md). People and Insights used to
+ * be placeholder entries: employees, payroll and leave live under "People & Payroll", and the reports live under
+ * Accounting. Their old URLs redirect there.
  */
 export const NAV_ITEMS: NavItem[] = [
   { label: "Home", href: "", icon: Home },
-  { label: "Money", href: "/money", icon: Banknote },
+  {
+    label: "Money",
+    href: "/money",
+    icon: Banknote,
+    children: [
+      { label: "Bank accounts & reconciliation", href: "/money" },
+      { label: "Bank rules", href: "/money/rules", permission: "bank_rule:manage" },
+    ],
+  },
   {
     label: "Sales",
     href: "/sales",
@@ -76,7 +82,6 @@ export const NAV_ITEMS: NavItem[] = [
       { label: "Expenses", href: "/expenses", permission: "expense_claim:read" },
     ],
   },
-  { label: "People", href: "/people", icon: Users },
   {
     label: "Projects",
     href: "/projects",
@@ -122,9 +127,9 @@ export const NAV_ITEMS: NavItem[] = [
     ],
   },
   {
-    label: "Payroll",
+    label: "People & Payroll",
     href: "/payroll",
-    icon: Wallet,
+    icon: Users,
     anyPermission: ["employee:read", "payslip:read"],
     children: [
       { label: "My pay and leave", href: "/payroll/my", permission: "payslip:read" },
@@ -167,7 +172,6 @@ export const NAV_ITEMS: NavItem[] = [
     icon: Inbox,
     permission: "client_request:read",
   },
-  { label: "Insights", href: "/insights", icon: Sparkles },
   {
     label: "AI Finance",
     href: "/ai-finance",
@@ -181,7 +185,20 @@ export const NAV_ITEMS: NavItem[] = [
   { label: "Practice", href: "/practice", absoluteHref: "/practice", icon: Briefcase, onlyInMode: "ACCOUNTANT" },
   // No live unread badge on purpose: the shared shell is the hot path and must not run a query per page view (the count is on the page and the home card).
   { label: "Notifications", href: "/notifications", icon: Bell },
-  { label: "Settings", href: "/settings", icon: Settings },
+  {
+    label: "Settings",
+    href: "/settings",
+    icon: Settings,
+    children: [
+      { label: "Company & team", href: "/settings" },
+      { label: "Accountant access", href: "/settings/accountant", permission: "organization:manage" },
+      { label: "Automation", href: "/settings/automation", permission: "automation:read" },
+      { label: "Integrations", href: "/settings/integrations", permission: "integration:manage" },
+      { label: "API keys", href: "/settings/api", permission: "api_key:manage" },
+      { label: "Webhooks", href: "/settings/webhooks", permission: "webhook:manage" },
+      { label: "Connected apps", href: "/settings/oauth-apps", permission: "oauth_app:manage" },
+    ],
+  },
 ];
 
 export const BRAND_ICON = Building2;
