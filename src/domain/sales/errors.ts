@@ -150,3 +150,132 @@ export class InvalidRecurringTemplateError extends Error {
     this.name = "InvalidRecurringTemplateError";
   }
 }
+
+// ---------------------------------------------------------------------------
+// Sales documents slice: customer credit notes, unapplied credit, receipts
+// ---------------------------------------------------------------------------
+
+export class CustomerCreditNotFoundError extends Error {
+  constructor(creditId: string) {
+    super(`Customer credit note ${creditId} was not found in this organization.`);
+    this.name = "CustomerCreditNotFoundError";
+  }
+}
+
+export class CustomerCreditNotEditableError extends Error {
+  constructor(creditNoteNumber: string) {
+    super(`Credit note ${creditNoteNumber} is not a draft and cannot be edited or deleted.`);
+    this.name = "CustomerCreditNotEditableError";
+  }
+}
+
+export class CustomerCreditNotDraftError extends Error {
+  constructor(creditNoteNumber: string) {
+    super(`Credit note ${creditNoteNumber} is not a draft and cannot be posted.`);
+    this.name = "CustomerCreditNotDraftError";
+  }
+}
+
+export class CustomerCreditNotPostedError extends Error {
+  constructor(creditNoteNumber: string) {
+    super(`Credit note ${creditNoteNumber} has not been posted (or is void), so it cannot be applied or voided this way.`);
+    this.name = "CustomerCreditNotPostedError";
+  }
+}
+
+export class CustomerCreditAlreadyVoidError extends Error {
+  constructor(creditNoteNumber: string) {
+    super(`Credit note ${creditNoteNumber} is already void.`);
+    this.name = "CustomerCreditAlreadyVoidError";
+  }
+}
+
+export class CustomerCreditHasAllocationsError extends Error {
+  constructor(creditNoteNumber: string) {
+    super(`Credit note ${creditNoteNumber} is applied to one or more invoices - un-apply it before voiding.`);
+    this.name = "CustomerCreditHasAllocationsError";
+  }
+}
+
+export class CustomerCreditAllocationExceedsAvailableError extends Error {
+  constructor(source: string, available: string, requested: string) {
+    super(`Cannot apply ${requested} from ${source} - only ${available} of it is still unapplied.`);
+    this.name = "CustomerCreditAllocationExceedsAvailableError";
+  }
+}
+
+export class CustomerCreditCurrencyMismatchError extends Error {
+  constructor(source: string, invoiceNumber: string) {
+    super(`${source} and invoice ${invoiceNumber} are in different currencies.`);
+    this.name = "CustomerCreditCurrencyMismatchError";
+  }
+}
+
+export class CustomerCreditCustomerMismatchError extends Error {
+  constructor(source: string, invoiceNumber: string) {
+    super(`${source} and invoice ${invoiceNumber} belong to different customers - credit can only be applied within one customer.`);
+    this.name = "CustomerCreditCustomerMismatchError";
+  }
+}
+
+export class CustomerCreditExceedsInvoiceError extends Error {
+  constructor(creditNoteNumber: string, invoiceNumber: string, remaining: string) {
+    super(
+      `Credit note ${creditNoteNumber} would credit invoice ${invoiceNumber} by more than the invoice total - only ${remaining} of the invoice can still be credited.`,
+    );
+    this.name = "CustomerCreditExceedsInvoiceError";
+  }
+}
+
+export class CustomerCreditTrackedStockError extends Error {
+  constructor(sku: string) {
+    super(
+      `Product ${sku} is stock-tracked. Customer credit notes do not reverse stock or cost of goods sold, so a tracked-stock product cannot be credited here - credit the revenue account directly (a price adjustment) and record any returned stock with an inventory adjustment.`,
+    );
+    this.name = "CustomerCreditTrackedStockError";
+  }
+}
+
+export class CustomerCreditAllocationNotFoundError extends Error {
+  constructor(allocationId: string) {
+    super(`Credit allocation ${allocationId} was not found in this organization.`);
+    this.name = "CustomerCreditAllocationNotFoundError";
+  }
+}
+
+export class CustomerCreditAllocationAlreadyReversedError extends Error {
+  constructor() {
+    super("That credit allocation has already been reversed (or is itself a reversal).");
+    this.name = "CustomerCreditAllocationAlreadyReversedError";
+  }
+}
+
+export class PaymentNotUnappliedError extends Error {
+  constructor(available: string, requested: string) {
+    super(`Cannot apply ${requested} from this payment - only ${available} of it is unapplied.`);
+    this.name = "PaymentNotUnappliedError";
+  }
+}
+
+export class PaymentNeedsReceivableAccountError extends Error {
+  constructor() {
+    super(
+      "A payment that is not fully allocated to invoices needs a receivable account for the unallocated part - choose one.",
+    );
+    this.name = "PaymentNeedsReceivableAccountError";
+  }
+}
+
+export class ReceiptNotFoundError extends Error {
+  constructor(paymentId: string) {
+    super(`No receipt exists for payment ${paymentId} in this organization.`);
+    this.name = "ReceiptNotFoundError";
+  }
+}
+
+export class StatementRangeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StatementRangeError";
+  }
+}

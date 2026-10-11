@@ -37,6 +37,7 @@ export default async function InvoiceDetailPage({
   const canPost = roleHasPermission(actor.role, "customer_invoice:post");
   const canVoid = roleHasPermission(actor.role, "customer_invoice:void");
   const canRecordPayment = roleHasPermission(actor.role, "customer_payment:manage");
+  const canCreateCredit = roleHasPermission(actor.role, "customer_credit:manage");
 
   const outstanding = (Number(invoice.total) - Number(invoice.amountPaid)).toFixed(2);
   const isOverdue = !["DRAFT", "VOID", "PAID"].includes(invoice.status) && new Date(invoice.dueDate) < new Date();
@@ -304,6 +305,11 @@ export default async function InvoiceDetailPage({
                     <td className="px-6 py-2.5 text-muted-foreground">
                       {new Date(a.createdAt).toLocaleDateString("en-AU")}
                     </td>
+                    <td className="px-6 py-2.5">
+                      <Link href={`/${org.slug}/sales/payments/${a.paymentId}/receipt`} className="text-primary hover:underline">
+                        Receipt
+                      </Link>
+                    </td>
                     <td className="px-6 py-2.5 text-right">
                       <MoneyDisplay amount={a.amount} currency={invoice.currency} />
                     </td>
@@ -313,6 +319,44 @@ export default async function InvoiceDetailPage({
             </table>
           </CardContent>
         </Card>
+      )}
+
+      {invoice.creditAllocations.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Credit notes applied</CardTitle>
+          </CardHeader>
+          <CardContent className="p-0">
+            <table className="w-full text-sm">
+              <tbody className="divide-y divide-border">
+                {invoice.creditAllocations.map((a) => (
+                  <tr key={a.id}>
+                    <td className="px-6 py-2.5 text-muted-foreground">{new Date(a.appliedDate).toLocaleDateString("en-AU")}</td>
+                    <td className="px-6 py-2.5">
+                      <Link href={`/${org.slug}/sales/credit-notes/${a.creditNoteId}`} className="text-primary hover:underline">
+                        {a.creditNoteNumber}
+                      </Link>
+                      {Number(a.amount) < 0 && <span className="ml-2 text-xs text-muted-foreground">(reversal)</span>}
+                    </td>
+                    <td className="px-6 py-2.5 text-right">
+                      <MoneyDisplay amount={a.amount} currency={invoice.currency} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </CardContent>
+        </Card>
+      )}
+
+      {canCreateCredit && invoice.status !== "VOID" && (
+        <div className="flex justify-end">
+          <Button asChild size="sm" variant="outline">
+            <Link href={`/${org.slug}/sales/credit-notes/new?customerContactId=${invoice.customerContactId}&invoiceId=${invoice.id}`}>
+              Create credit note for this invoice
+            </Link>
+          </Button>
+        </div>
       )}
 
       {canRecordPayment && invoice.status !== "VOID" && Number(outstanding) > 0 && (

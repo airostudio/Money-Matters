@@ -418,8 +418,15 @@
     {
       "idx": 59,
       "version": "7",
-      "when": 1791700070000,
-      "tag": "0059_login_security",
+      "when": 1791700084000,
+      "tag": "0059_sales_documents",
+      "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1791700096000,
+      "tag": "0060_login_security",
       "breakpoints": true
     }
   ]

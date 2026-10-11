@@ -27,7 +27,7 @@ export interface AgedCustomerRow {
   totalOutstanding: string;
 }
 
-function bucketFor(daysPastDue: number): AgingBucket {
+export function bucketFor(daysPastDue: number): AgingBucket {
   if (daysPastDue <= 0) return "current";
   if (daysPastDue <= 30) return "days1to30";
   if (daysPastDue <= 60) return "days31to60";
@@ -35,7 +35,7 @@ function bucketFor(daysPastDue: number): AgingBucket {
   return "days90plus";
 }
 
-function daysBetween(a: Date, b: Date): number {
+export function daysBetween(a: Date, b: Date): number {
   return Math.round((a.getTime() - b.getTime()) / (1000 * 60 * 60 * 24));
 }
 

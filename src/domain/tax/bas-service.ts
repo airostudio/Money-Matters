@@ -7,6 +7,8 @@ import {
   basStatements,
   billLines,
   bills,
+  customerCreditNoteLines,
+  customerCreditNotes,
   expenseClaimLines,
   expenseClaims,
   fiscalPeriods,
@@ -190,6 +192,56 @@ async function collectDocumentLines(
           },
           ev,
           false,
+        ),
+      );
+    }
+  }
+
+  // Customer credit notes (sales documents slice): a SALE-side document that REDUCES sales, so it enters with a
+  // negative sign (G1 and 1A fall by its net and GST); voiding it reverses that in the period the reversal is dated.
+  const ccn = await tx
+    .select({
+      line: customerCreditNoteLines,
+      docId: customerCreditNotes.id,
+      docNumber: customerCreditNotes.creditNoteNumber,
+      currency: customerCreditNotes.currency,
+      jeId: je.id,
+      jeDate: je.postingDate,
+      revId: rev.id,
+      revDate: rev.postingDate,
+      tcCode: taxCodes.code,
+      tcTreatment: taxCodes.basTreatment,
+      tcCapital: taxCodes.basCapital,
+    })
+    .from(customerCreditNoteLines)
+    .innerJoin(customerCreditNotes, eq(customerCreditNotes.id, customerCreditNoteLines.creditNoteId))
+    .innerJoin(je, eq(je.id, customerCreditNotes.journalEntryId))
+    .leftJoin(rev, eq(rev.reversalOfId, je.id))
+    .leftJoin(taxCodes, eq(taxCodes.id, customerCreditNoteLines.taxCodeId))
+    .where(and(eq(customerCreditNotes.organizationId, organizationId), inRange))
+    .orderBy(asc(customerCreditNotes.creditNoteNumber), asc(customerCreditNoteLines.lineNumber));
+  for (const r of ccn) {
+    for (const ev of eventsFor(r as EventRow, from, to)) {
+      out.push(
+        toSource(
+          {
+            docType: "CUSTOMER_CREDIT",
+            docId: r.docId,
+            docNumber: r.docNumber,
+            lineId: r.line.id,
+            lineNumber: r.line.lineNumber,
+            description: r.line.description,
+            side: "SALE",
+            taxCodeId: r.line.taxCodeId,
+            taxCodeCode: r.tcCode,
+            treatment: r.tcTreatment,
+            capital: r.tcCapital ?? false,
+            net: r.line.lineAmount,
+            gst: r.line.taxAmount,
+            foreignCurrency: r.currency !== baseCurrency,
+          },
+          ev,
+          true,
         ),
       );
     }
