@@ -158,6 +158,7 @@ export function isForbiddenForApi(permission: Permission): boolean {
     "client_request",
     "api_key",
     "oauth_app",
+    "approval",
     "automation",
     "integration",
     "webhook",
