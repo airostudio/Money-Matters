@@ -5,6 +5,7 @@ import { Money } from "@/domain/money/money";
 import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
 import { roleHasPermission } from "@/domain/permissions/roles";
 import { AuditService } from "@/domain/audit/audit-service";
+import { ApprovalService } from "@/domain/approvals/approval-service";
 import { PostingService } from "@/domain/ledger/posting-service";
 import type { JournalLineDraft } from "@/domain/ledger/types";
 import {
@@ -267,6 +268,9 @@ export const ExpenseClaimService = {
         after: { status: "SUBMITTED" },
       });
 
+      // Approval engine (spec s.45): opens a multi-step request when a policy matches; otherwise a no-op (existing flow).
+      await ApprovalService.openForSubmissionIn(tx, actor, "EXPENSE_CLAIM", claimId);
+
       return updated;
     });
   },
@@ -287,6 +291,8 @@ export const ExpenseClaimService = {
     return withTenant(actor.organizationId, async (tx) => {
       const claim = await loadClaimOr404(tx, actor.organizationId, claimId);
       if (claim.status !== "SUBMITTED") throw new ExpenseClaimNotSubmittedError(claim.claimNumber);
+      // Approval engine (spec s.45): refuses until the policy-governed request is fully APPROVED; a no-op with no matching policy.
+      await ApprovalService.assertClearedIn(tx, actor.organizationId, "EXPENSE_CLAIM", claimId);
 
       const lines = await tx
         .select()
@@ -395,6 +401,8 @@ export const ExpenseClaimService = {
         before: { status: "SUBMITTED" },
         after: { status: "REJECTED", reason },
       });
+      // A rejection made on the claim itself also closes any approval request still open for it.
+      await ApprovalService.rejectOpenIn(tx, actor, "EXPENSE_CLAIM", claimId, reason);
 
       return updated;
     });
