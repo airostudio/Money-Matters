@@ -2005,8 +2005,10 @@ export const expenseClaimLines = pgTable("expense_claim_lines", {
 // ---------------------------------------------------------------------------
 
 /**
- * Schema only in Phase 1 — see docs/roadmap.md. The generic approval engine
- * (master spec §45) is implemented starting Phase 3.
+ * LEGACY, unused: schema-only since Phase 1 and never written by the application. The approval engine (master spec
+ * s.45) deliberately did not reuse this single-row shape (multi-step approvals need a request, ordered steps and an
+ * append-only decision log): it lives in `approval_policies` / `approval_requests` / `approval_steps` /
+ * `approval_decisions` at the end of this file. Kept (empty) so migration history and the isolation tests stay valid.
  */
 export const approvals = pgTable("approvals", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -5748,4 +5750,129 @@ export const authEvents = pgTable("auth_events", {
 }, (table) => ({
   userIdx: index("auth_events_user_idx").on(table.userId, table.createdAt),
   eventIdx: index("auth_events_event_idx").on(table.event, table.createdAt),
+}));
+
+// ---------------------------------------------------------------------------
+// Approval engine (master spec s.45) - configurable multi-step approvals layered ON TOP of the single-step flows.
+// ---------------------------------------------------------------------------
+
+/**
+ * One org-configurable routing rule for one document type. The FIRST active policy (lowest `priority`, then oldest) whose
+ * amount band and filters match a document wins; no matching policy means the document's existing flow is unchanged.
+ * `min_amount` is INCLUSIVE and `max_amount` EXCLUSIVE, so adjacent tiers ($0-$500, $500-$5,000, ...) never overlap.
+ * `filters` = { supplierContactIds?, accountIds?, projectIds?, userIds?, currency? } (all optional; a list matches when ANY
+ * of the document's values is in it). `steps` = ordered [{ name, roles[], userIds[], requiredApprovals }]. Policies are
+ * deactivated, never deleted; a request snapshots its policy, so editing a policy never changes an in-flight request.
+ */
+export const approvalPolicies = pgTable("approval_policies", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  documentType: text("document_type").notNull(),
+  priority: integer("priority").notNull().default(100),
+  isActive: boolean("is_active").notNull().default(true),
+  minAmount: numeric("min_amount", { precision: 19, scale: 4 }),
+  maxAmount: numeric("max_amount", { precision: 19, scale: 4 }),
+  filters: jsonb("filters").notNull().default(sql`'{}'::jsonb`),
+  steps: jsonb("steps").notNull(),
+  /** When true one person may satisfy more than one step of the same request (audited). Default: never. */
+  allowSamePersonMultipleSteps: boolean("allow_same_person_multiple_steps").notNull().default(false),
+  createdById: uuid("created_by_id").notNull(),
+  updatedById: uuid("updated_by_id").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  orgTypeIdx: index("approval_policies_org_type_idx").on(table.organizationId, table.documentType, table.priority),
+  typeCheck: check("approval_policies_type_check", sql`${table.documentType} IN ('SUPPLIER_BILL','EXPENSE_CLAIM','PAYMENT_RUN')`),
+  bandCheck: check("approval_policies_band_check", sql`${table.minAmount} IS NULL OR ${table.maxAmount} IS NULL OR ${table.maxAmount} > ${table.minAmount}`),
+}));
+
+/**
+ * One approval attempt for one document. A resubmission after rejection/edit creates a NEW request; old ones are kept.
+ * At most one PENDING request per document (partial unique index). `policy_snapshot` freezes the matched policy's
+ * band/steps at creation. `excluded_user_ids` = people who can never decide it (requester, document creator/claimant).
+ */
+export const approvalRequests = pgTable("approval_requests", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  documentType: text("document_type").notNull(),
+  documentId: uuid("document_id").notNull(),
+  documentLabel: text("document_label").notNull(),
+  documentSummary: text("document_summary"),
+  amount: numeric("amount", { precision: 19, scale: 4 }).notNull(),
+  currency: text("currency").notNull(),
+  policyId: uuid("policy_id"),
+  policyName: text("policy_name").notNull(),
+  policySnapshot: jsonb("policy_snapshot").notNull(),
+  status: text("status").notNull().default("PENDING"),
+  requestedById: uuid("requested_by_id").notNull(),
+  excludedUserIds: jsonb("excluded_user_ids").notNull().default(sql`'[]'::jsonb`),
+  requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+  decidedAt: timestamp("decided_at", { withTimezone: true }),
+  decisionReason: text("decision_reason"),
+  /** Set when an OWNER/ADMINISTRATOR forced the outcome past the normal steps; always with a reason. */
+  overriddenById: uuid("overridden_by_id"),
+  overrideReason: text("override_reason"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  orgDocIdx: index("approval_requests_org_doc_idx").on(table.organizationId, table.documentType, table.documentId, table.requestedAt),
+  orgStatusIdx: index("approval_requests_org_status_idx").on(table.organizationId, table.status, table.requestedAt),
+  onePendingPerDoc: uniqueIndex("approval_requests_one_pending_unique")
+    .on(table.organizationId, table.documentType, table.documentId)
+    .where(sql`${table.status} = 'PENDING'`),
+  statusCheck: check("approval_requests_status_check", sql`${table.status} IN ('PENDING','APPROVED','REJECTED','CANCELLED')`),
+}));
+
+/** The ordered steps of a request (copied from the policy so later policy edits cannot alter them). Steps open in order. */
+export const approvalSteps = pgTable("approval_steps", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  requestId: uuid("request_id")
+    .notNull()
+    .references(() => approvalRequests.id, { onDelete: "cascade" }),
+  stepIndex: integer("step_index").notNull(),
+  name: text("name").notNull(),
+  requiredRoles: jsonb("required_roles").notNull().default(sql`'[]'::jsonb`),
+  requiredUserIds: jsonb("required_user_ids").notNull().default(sql`'[]'::jsonb`),
+  requiredApprovals: integer("required_approvals").notNull().default(1),
+  status: text("status").notNull().default("PENDING"),
+  /** When the step became the active one ("waiting since"). Null while it is still queued behind an earlier step. */
+  openedAt: timestamp("opened_at", { withTimezone: true }),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+}, (table) => ({
+  requestIdx: uniqueIndex("approval_steps_request_idx").on(table.requestId, table.stepIndex),
+  orgStatusIdx: index("approval_steps_org_status_idx").on(table.organizationId, table.status),
+  statusCheck: check("approval_steps_status_check", sql`${table.status} IN ('PENDING','APPROVED','REJECTED','CANCELLED','SKIPPED')`),
+  countCheck: check("approval_steps_count_check", sql`${table.requiredApprovals} >= 1`),
+}));
+
+/** Append-only log of every person's decision on a step (approve / reject), and of administrative reassignments. */
+export const approvalDecisions = pgTable("approval_decisions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  requestId: uuid("request_id")
+    .notNull()
+    .references(() => approvalRequests.id, { onDelete: "cascade" }),
+  stepId: uuid("step_id").references(() => approvalSteps.id, { onDelete: "cascade" }),
+  decidedById: uuid("decided_by_id").notNull(),
+  /** APPROVE | REJECT | OVERRIDE_APPROVE | OVERRIDE_REJECT | REASSIGN */
+  decision: text("decision").notNull(),
+  comment: text("comment"),
+  /** The decider's role as recomputed at decision time. */
+  deciderRole: text("decider_role").notNull(),
+  /** True when this person had already decided another step of the same request (only allowed by an explicit policy flag). */
+  repeatApprover: boolean("repeat_approver").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  requestIdx: index("approval_decisions_request_idx").on(table.requestId, table.createdAt),
+  decisionCheck: check("approval_decisions_decision_check", sql`${table.decision} IN ('APPROVE','REJECT','OVERRIDE_APPROVE','OVERRIDE_REJECT','REASSIGN')`),
 }));

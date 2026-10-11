@@ -389,7 +389,7 @@ export const AUTOMATION_ALLOWED_PERMISSIONS: ReadonlySet<Permission> = new Set<P
 
 /** Permissions that must NEVER be reachable by an automation, by name pattern (used by the exclusion test and by the identity builder). */
 export const AUTOMATION_FORBIDDEN_PATTERN =
-  /(:post|:void|:approve|:reverse|:close|:reopen|:reopen_hard|:override_soft|:post_advisor_locked|:import|:reconcile|:respond|:ai_suggest)$|^(period|membership|organization|api_key|webhook|integration|automation:manage|employee|payrun|journal|payment_run|supplier_payment|customer_payment:manage|consolidation|tax_code|fiscal_period|account:manage|onboarding|bank_account:manage|bank_rule|expense_claim:approve)/;
+  /(:post|:void|:approve|:reverse|:close|:reopen|:reopen_hard|:override_soft|:post_advisor_locked|:import|:reconcile|:respond|:ai_suggest)$|^(period|membership|organization|api_key|webhook|integration|approval|automation:manage|employee|payrun|journal|payment_run|supplier_payment|customer_payment:manage|consolidation|tax_code|fiscal_period|account:manage|onboarding|bank_account:manage|bank_rule|expense_claim:approve)/;
 
 export function isForbiddenForAutomation(permission: string): boolean {
   return AUTOMATION_FORBIDDEN_PATTERN.test(permission);

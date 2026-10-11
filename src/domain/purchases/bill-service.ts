@@ -13,6 +13,7 @@ import { withTenant, type TenantDb } from "@/db/tenant";
 import { Money } from "@/domain/money/money";
 import { assertPermission, type Actor } from "@/domain/permissions/permission-service";
 import { AuditService } from "@/domain/audit/audit-service";
+import { ApprovalService } from "@/domain/approvals/approval-service";
 import { DomainEventService } from "@/domain/webhooks/domain-events";
 import { PostingService, type PostOptions } from "@/domain/ledger/posting-service";
 import type { JournalLineDraft } from "@/domain/ledger/types";
@@ -355,6 +356,8 @@ export const BillService = {
         }
         throw new StaleEditError("bill", existing.billNumber, changedBy, existing.updatedAt);
       }
+      // An edit invalidates any approval request still waiting on the old figures (resubmitting starts a new one).
+      await ApprovalService.cancelOpenIn(tx, actor, "SUPPLIER_BILL", billId, "The bill was edited; request approval again.");
       return persistBillWithLines(tx, actor, input, billId, existing.updatedAt);
     });
   },
@@ -366,6 +369,7 @@ export const BillService = {
       if (!EDITABLE_STATUSES.includes(existing.status)) {
         throw new BillNotEditableError(existing.billNumber);
       }
+      await ApprovalService.cancelOpenIn(tx, actor, "SUPPLIER_BILL", billId, "The draft bill was deleted.");
       await tx.delete(bills).where(eq(bills.id, billId));
       await AuditService.record(tx, actor, {
         action: "bill.draft_deleted",
@@ -392,6 +396,9 @@ export const BillService = {
       if (bill.status !== "DRAFT") {
         throw new BillNotDraftError(bill.billNumber);
       }
+      // Approval engine (spec s.45): when an approval policy governs this bill it cannot be posted until its request is
+      // fully APPROVED. With no matching policy this is a no-op, so the existing behaviour is unchanged.
+      await ApprovalService.assertClearedIn(tx, actor.organizationId, "SUPPLIER_BILL", billId);
 
       const lines = await tx
         .select()
