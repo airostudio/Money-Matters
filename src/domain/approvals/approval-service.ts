@@ -32,6 +32,7 @@ import {
   MAX_POLICIES_PER_ORG,
   NATIVE_APPROVE_PERMISSION,
   NATIVE_REQUEST_PERMISSION,
+  COMPLETION_PERMISSIONS,
   describeRouting,
   policyInputSchema,
   readSteps,
@@ -236,11 +237,18 @@ async function parsePolicyInput(input: PolicyInput) {
 async function validatePolicySteps(tx: TenantDb, organizationId: string, type: ApprovalDocumentType, steps: PolicyStep[]) {
   const members = await loadActiveMembers(tx, organizationId);
   const byId = new Map(members.map((m) => [m.userId, m]));
-  for (const step of steps) {
+  const lastIndex = steps.length - 1;
+  for (const [index, step] of steps.entries()) {
+    const finishes = (role: MembershipRole) => index !== lastIndex || COMPLETION_PERMISSIONS[type].every((p) => roleHasPermission(role, p));
     for (const role of step.roles) {
       if (!roleCanApproveType(role, type)) {
         throw new InvalidApprovalPolicyError(
           `Step "${step.name}": the ${role.replace(/_/g, " ").toLowerCase()} role cannot approve ${DOCUMENT_TYPE_LABEL[type].toLowerCase()}s, so no one could ever satisfy it.`,
+        );
+      }
+      if (!finishes(role)) {
+        throw new InvalidApprovalPolicyError(
+          `Step "${step.name}" is the last step and finishes the ${DOCUMENT_TYPE_LABEL[type].toLowerCase()}, but the ${role.replace(/_/g, " ").toLowerCase()} role cannot post to the ledger. Pick a role such as Accountant, or add a later step.`,
         );
       }
     }
@@ -249,6 +257,9 @@ async function validatePolicySteps(tx: TenantDb, organizationId: string, type: A
       if (!member) throw new InvalidApprovalPolicyError(`Step "${step.name}" names someone who is not an active member of this organization.`);
       if (!roleCanApproveType(member.role, type)) {
         throw new InvalidApprovalPolicyError(`Step "${step.name}": ${member.name} cannot currently approve ${DOCUMENT_TYPE_LABEL[type].toLowerCase()}s with their role.`);
+      }
+      if (!finishes(member.role)) {
+        throw new InvalidApprovalPolicyError(`Step "${step.name}" is the last step and finishes the ${DOCUMENT_TYPE_LABEL[type].toLowerCase()}, but ${member.name}'s role cannot post to the ledger.`);
       }
     }
   }

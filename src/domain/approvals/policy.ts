@@ -29,6 +29,17 @@ export const NATIVE_APPROVE_PERMISSION: Record<ApprovalDocumentType, Permission>
   PAYMENT_RUN: "payment_run:approve",
 };
 
+/**
+ * What the FINAL approver must also be able to do, because finishing the document (posting its journal, recording the
+ * payments) is done AS the final approver through the document's own service, which checks these itself. A policy whose
+ * last step could not satisfy them is refused when it is saved, rather than discovered at the worst moment.
+ */
+export const COMPLETION_PERMISSIONS: Record<ApprovalDocumentType, Permission[]> = {
+  SUPPLIER_BILL: ["journal:post"],
+  EXPENSE_CLAIM: ["journal:post"],
+  PAYMENT_RUN: ["journal:post", "supplier_payment:manage"],
+};
+
 export const NATIVE_REQUEST_PERMISSION: Record<ApprovalDocumentType, Permission> = {
   SUPPLIER_BILL: "supplier_bill:manage",
   EXPENSE_CLAIM: "expense_claim:manage",
