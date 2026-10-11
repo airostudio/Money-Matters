@@ -10,6 +10,7 @@ import { ContactService } from "@/domain/contacts/contact-service";
 import { InvoiceService } from "@/domain/sales/invoice-service";
 import { scheduleDispatchAfterResponse } from "@/domain/webhooks/post-response";
 import { PaymentAllocationService } from "@/domain/sales/payment-service";
+import { CustomerCreditService } from "@/domain/sales/customer-credit-service";
 import { QuoteService } from "@/domain/sales/quote-service";
 import { RecurringInvoiceService } from "@/domain/sales/recurring-invoice-service";
 import { paymentMethodEnum, recurringFrequencyEnum } from "@/db/schema";
@@ -234,6 +235,9 @@ export async function recordPaymentAction(orgSlug: string, formData: FormData): 
         depositAccountId: String(formData.get("depositAccountId") ?? ""),
         reference: (formData.get("reference") ? String(formData.get("reference")).trim() : undefined) || undefined,
         allocations,
+        // Where any part of the payment not allocated to an invoice is credited (a customer credit). Optional when
+        // the payment allocates to at least one invoice.
+        arAccountId: (formData.get("arAccountId") ? String(formData.get("arAccountId")) : undefined) || undefined,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to record payment.";
@@ -243,6 +247,148 @@ export async function recordPaymentAction(orgSlug: string, formData: FormData): 
     void scheduleDispatchAfterResponse(actor.organizationId);
     revalidatePath(returnPath);
     revalidatePath(`/${orgSlug}/sales/invoices`);
+    redirect(returnPath);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
+}
+
+/** Applies part of a payment's unapplied balance (an overpayment, a deposit) to a posted invoice of the same customer. */
+export async function applyReceiptToInvoiceAction(orgSlug: string, formData: FormData): Promise<void> {
+  try {
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const customerContactId = String(formData.get("customerContactId") ?? "");
+    const returnPath = `/${orgSlug}/sales/customers/${customerContactId}`;
+    const invoiceId = String(formData.get("invoiceId") ?? "");
+    try {
+      await PaymentAllocationService.applyToInvoice(
+        actor,
+        String(formData.get("paymentId") ?? ""),
+        invoiceId,
+        String(formData.get("amount") ?? "0"),
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to apply the payment.";
+      redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+    }
+    revalidatePath(returnPath);
+    revalidatePath(`/${orgSlug}/sales/invoices/${invoiceId}`);
+    redirect(returnPath);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Customer credit notes (sales documents slice)
+// ---------------------------------------------------------------------------
+
+export async function createCustomerCreditAction(orgSlug: string, formData: FormData): Promise<void> {
+  try {
+    const { actor, org } = await requireOrgAndActor(orgSlug);
+    let created;
+    try {
+      created = await CustomerCreditService.create(actor, {
+        customerContactId: String(formData.get("customerContactId") ?? ""),
+        issueDate: new Date(String(formData.get("issueDate") ?? "")),
+        currency: org.baseCurrency,
+        arAccountId: String(formData.get("arAccountId") ?? ""),
+        invoiceId: (formData.get("invoiceId") ? String(formData.get("invoiceId")) : undefined) || undefined,
+        memo: (formData.get("memo") ? String(formData.get("memo")).trim() : undefined) || undefined,
+        lines: parseLinesFromFormData(formData),
+      });
+    } catch (error) {
+      if (error && typeof error === "object" && "digest" in error) throw error;
+      const message = error instanceof Error ? error.message : "Failed to create credit note.";
+      redirect(`/${orgSlug}/sales/credit-notes/new?error=${encodeURIComponent(message)}`);
+    }
+    revalidatePath(`/${orgSlug}/sales/credit-notes`);
+    redirect(`/${orgSlug}/sales/credit-notes/${created.id}`);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
+}
+
+export async function deleteDraftCustomerCreditAction(orgSlug: string, creditId: string): Promise<void> {
+  try {
+    const { actor } = await requireOrgAndActor(orgSlug);
+    await CustomerCreditService.deleteDraft(actor, creditId);
+    revalidatePath(`/${orgSlug}/sales/credit-notes`);
+    redirect(`/${orgSlug}/sales/credit-notes`);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
+}
+
+export async function approveAndPostCustomerCreditAction(orgSlug: string, creditId: string, formData?: FormData): Promise<void> {
+  try {
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const returnPath = `/${orgSlug}/sales/credit-notes/${creditId}`;
+    try {
+      await CustomerCreditService.approveAndPost(actor, creditId, postOptionsFromForm(formData));
+    } catch (error) {
+      const lockQuery = lockFailureQuery(error);
+      if (lockQuery) redirect(`${returnPath}?${lockQuery}`);
+      const message = error instanceof Error ? error.message : "Failed to post credit note.";
+      redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+    }
+    revalidatePath(returnPath);
+    redirect(returnPath);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
+}
+
+export async function voidCustomerCreditAction(orgSlug: string, creditId: string, formData: FormData): Promise<void> {
+  try {
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const reason = String(formData.get("reason") ?? "").trim() || "No reason given";
+    const returnPath = `/${orgSlug}/sales/credit-notes/${creditId}`;
+    try {
+      await CustomerCreditService.voidCredit(actor, creditId, reason);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to void credit note.";
+      redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+    }
+    revalidatePath(returnPath);
+    redirect(returnPath);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
+}
+
+export async function applyCustomerCreditAction(orgSlug: string, creditId: string, formData: FormData): Promise<void> {
+  try {
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const returnPath = `/${orgSlug}/sales/credit-notes/${creditId}`;
+    const invoiceId = String(formData.get("invoiceId") ?? "");
+    try {
+      await CustomerCreditService.applyToInvoice(actor, creditId, invoiceId, String(formData.get("amount") ?? "0"));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to apply credit note.";
+      redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+    }
+    revalidatePath(returnPath);
+    revalidatePath(`/${orgSlug}/sales/invoices/${invoiceId}`);
+    redirect(returnPath);
+  } catch (error) {
+    return rethrowPermissionDenied(error, orgSlug);
+  }
+}
+
+export async function unapplyCustomerCreditAction(orgSlug: string, creditId: string, formData: FormData): Promise<void> {
+  try {
+    const { actor } = await requireOrgAndActor(orgSlug);
+    const returnPath = `/${orgSlug}/sales/credit-notes/${creditId}`;
+    const reason = String(formData.get("reason") ?? "").trim() || "No reason given";
+    try {
+      const result = await CustomerCreditService.unapply(actor, String(formData.get("allocationId") ?? ""), reason);
+      revalidatePath(`/${orgSlug}/sales/invoices/${result.invoiceId}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to un-apply credit note.";
+      redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+    }
+    revalidatePath(returnPath);
     redirect(returnPath);
   } catch (error) {
     return rethrowPermissionDenied(error, orgSlug);

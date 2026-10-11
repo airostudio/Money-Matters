@@ -30,7 +30,7 @@ import {
 import { calculateInvoiceTotals } from "./invoice-calculations";
 import { nextInvoiceNumber } from "./numbering";
 import type { CreateInvoiceInput, InvoiceLineInput, UpdateInvoiceInput } from "./types";
-import { customerCreditAllocations, paymentAllocations, products, organizations } from "@/db/schema";
+import { customerCreditAllocations, customerCreditNotes, paymentAllocations, products, organizations } from "@/db/schema";
 import { InventoryService } from "@/domain/inventory/inventory-service";
 import { ProductCurrencyMismatchError, VoidWouldDesyncInventoryError } from "@/domain/inventory/errors";
 
@@ -299,10 +299,25 @@ export const InvoiceService = {
         .from(paymentAllocations)
         .where(and(eq(paymentAllocations.organizationId, actor.organizationId), eq(paymentAllocations.invoiceId, invoiceId)));
 
+      // Customer credit notes applied to this invoice (sales documents slice); reversals are negative rows.
+      const creditAllocations = await tx
+        .select({
+          id: customerCreditAllocations.id,
+          creditNoteId: customerCreditAllocations.creditNoteId,
+          creditNoteNumber: customerCreditNotes.creditNoteNumber,
+          amount: customerCreditAllocations.amount,
+          appliedDate: customerCreditAllocations.appliedDate,
+        })
+        .from(customerCreditAllocations)
+        .innerJoin(customerCreditNotes, eq(customerCreditNotes.id, customerCreditAllocations.creditNoteId))
+        .where(and(eq(customerCreditAllocations.organizationId, actor.organizationId), eq(customerCreditAllocations.invoiceId, invoiceId)))
+        .orderBy(asc(customerCreditAllocations.createdAt));
+
       const amountPaid = await loadAllocatedTotal(tx, actor.organizationId, invoiceId);
 
       return {
         ...row.invoice,
+        creditAllocations,
         /** Hidden-field token for the draft edit form (see StaleEditError). */
         editVersion: editVersionOf(row.invoice.updatedAt),
         customer: row.customer,
