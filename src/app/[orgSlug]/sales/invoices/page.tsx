@@ -5,6 +5,7 @@ import { InvoiceService } from "@/domain/sales/invoice-service";
 import { AutoExecutionService } from "@/domain/ai-controller/auto-execution-service";
 import { roleHasPermission } from "@/domain/permissions/roles";
 import { invoiceStatusEnum } from "@/db/schema";
+import { INVOICE_FILTERS, matchesInvoiceFilter, parseInvoiceFilter } from "@/domain/sales/invoice-filters";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { StatusBadge } from "@/components/accounting/status-badge";
@@ -17,7 +18,7 @@ export default async function InvoicesPage({
   searchParams,
 }: {
   params: { orgSlug: string };
-  searchParams: { status?: string };
+  searchParams: { status?: string; filter?: string };
 }) {
   const { actor, org } = await requireOrgAndActor(params.orgSlug);
   const statusFilter =
@@ -25,10 +26,14 @@ export default async function InvoicesPage({
       ? (searchParams.status as InvoiceStatus)
       : undefined;
 
-  const invoices = await InvoiceService.list(actor, { status: statusFilter });
+  const quickFilter = parseInvoiceFilter(searchParams.filter);
+  const now = new Date();
+
+  const allInvoices = await InvoiceService.list(actor, { status: statusFilter });
+  // "Unpaid" / "Overdue" are views over the same list (no extra query): see src/domain/sales/invoice-filters.ts.
+  const invoices = quickFilter ? allInvoices.filter((inv) => matchesInvoiceFilter(quickFilter, inv, now)) : allInvoices;
   const aiAutoInvoiceIds = await AutoExecutionService.listAutoExecutedEntityIds(org.id, "Invoice");
   const canManage = roleHasPermission(actor.role, "customer_invoice:manage");
-  const now = new Date();
 
   return (
     <div className="space-y-6">
@@ -49,15 +54,24 @@ export default async function InvoicesPage({
       <div className="flex flex-wrap gap-2 text-sm">
         <Link
           href={`/${org.slug}/sales/invoices`}
-          className={`rounded-full px-3 py-1 ${!statusFilter ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:bg-muted/70"}`}
+          className={`rounded-full px-3 py-1 ${!statusFilter && !quickFilter ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:bg-muted/70"}`}
         >
           All
         </Link>
+        {INVOICE_FILTERS.map((f) => (
+          <Link
+            key={f}
+            href={`/${org.slug}/sales/invoices?filter=${f}`}
+            className={`rounded-full px-3 py-1 capitalize ${quickFilter === f ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:bg-muted/70"}`}
+          >
+            {f}
+          </Link>
+        ))}
         {invoiceStatusEnum.enumValues.map((s) => (
           <Link
             key={s}
             href={`/${org.slug}/sales/invoices?status=${s}`}
-            className={`rounded-full px-3 py-1 capitalize ${statusFilter === s ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:bg-muted/70"}`}
+            className={`rounded-full px-3 py-1 capitalize ${statusFilter === s && !quickFilter ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:bg-muted/70"}`}
           >
             {s.toLowerCase().replace(/_/g, " ")}
           </Link>
@@ -66,7 +80,7 @@ export default async function InvoicesPage({
 
       {invoices.length === 0 ? (
         <Card>
-          <CardContent className="p-8 text-center text-sm text-muted-foreground">No invoices to show.</CardContent>
+          <CardContent className="p-8 text-center text-sm text-muted-foreground">{quickFilter ? `No ${quickFilter} invoices.` : "No invoices to show."}</CardContent>
         </Card>
       ) : (
         <Card>

@@ -89,6 +89,12 @@ export async function middleware(request: NextRequest) {
     return handleOAuthApi(request);
   }
 
+  // The palette's search endpoint authenticates itself (session cookie, membership, archived state) and answers a
+  // JSON 401, which a fetch() can act on; the generic redirect below would hand it the login page's HTML instead.
+  if (pathname === "/api/search") {
+    return NextResponse.next();
+  }
+
   if (pathname.startsWith("/.well-known/") || pathname === "/oauth" || pathname.startsWith("/oauth/")) {
     return NextResponse.next();
   }

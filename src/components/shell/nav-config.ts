@@ -203,22 +203,86 @@ export const NAV_ITEMS: NavItem[] = [
 
 export const BRAND_ICON = Building2;
 
+export type CreateGroup = "Sales" | "Purchases" | "Other";
+
 export interface CreateAction {
+  /** The menu label ("Invoice"); the command palette says "New invoice" (`commandLabel`). */
   label: string;
+  commandLabel: string;
   href: string;
-  /** The permission the actor's role needs; the action is not offered without it. */
-  permission: Permission;
+  group: CreateGroup;
+  /**
+   * EVERY permission the destination page needs to render, not just the one that gates it: a "New ..." page checks
+   * its own write permission and then loads the contacts, accounts, tax codes and products its form offers, each
+   * through a service that has its own read permission. The menu offers the action only if the role holds all of
+   * them, so it never leads to a refusal. (src/tests/unit/search/create-actions.test.ts reads each page's source and
+   * fails if this list drifts from what the page checks and loads.)
+   */
+  permissions: Permission[];
 }
 
 /**
- * Quick-create actions the top bar offers. Each carries the permission the
- * destination needs, so a role that cannot do it is never shown a button that
- * leads to a refusal. Presentation only: the domain service still enforces it.
+ * The universal "+ Create" menu (master spec s.57) and the palette's "New ..." commands. Presentation only: the
+ * domain service still enforces the write permission. Order is display order within each group.
  */
 export const CREATE_ACTIONS: CreateAction[] = [
-  { label: "New journal entry", href: "/accounting/journals/new", permission: "journal:post" },
+  {
+    label: "Invoice",
+    commandLabel: "New invoice",
+    href: "/sales/invoices/new",
+    group: "Sales",
+    permissions: ["customer_invoice:manage", "contact:read", "account:read", "journal:read", "product:read"],
+  },
+  {
+    label: "Quote",
+    commandLabel: "New quote",
+    href: "/sales/quotes/new",
+    group: "Sales",
+    permissions: ["customer_quote:manage", "contact:read", "account:read", "journal:read"],
+  },
+  { label: "Customer", commandLabel: "New customer", href: "/sales/customers/new", group: "Sales", permissions: ["contact:manage"] },
+  {
+    label: "Bill",
+    commandLabel: "New bill",
+    href: "/purchases/bills/new",
+    group: "Purchases",
+    permissions: ["supplier_bill:manage", "contact:read", "account:read", "journal:read", "product:read"],
+  },
+  {
+    label: "Expense claim",
+    commandLabel: "New expense claim",
+    href: "/expenses/new",
+    group: "Purchases",
+    permissions: ["expense_claim:manage", "account:read", "journal:read"],
+  },
+  {
+    label: "Purchase order",
+    commandLabel: "New purchase order",
+    href: "/purchases/purchase-orders/new",
+    group: "Purchases",
+    permissions: ["purchase_order:manage", "contact:read", "account:read", "journal:read"],
+  },
+  { label: "Supplier", commandLabel: "New supplier", href: "/purchases/suppliers/new", group: "Purchases", permissions: ["contact:manage"] },
+  { label: "Project", commandLabel: "New project", href: "/projects/new", group: "Other", permissions: ["project:manage", "contact:read"] },
+  {
+    label: "Journal entry",
+    commandLabel: "New journal entry",
+    href: "/accounting/journals/new",
+    group: "Other",
+    permissions: ["journal:post", "account:read", "dimension:read"],
+  },
 ];
 
+export const CREATE_GROUPS: CreateGroup[] = ["Sales", "Purchases", "Other"];
+
 export function createActionsFor(role: MembershipRole): CreateAction[] {
-  return CREATE_ACTIONS.filter((a) => roleHasPermission(role, a.permission));
+  return CREATE_ACTIONS.filter((a) => a.permissions.every((p) => roleHasPermission(role, p)));
+}
+
+/** The actions grouped for the menu, empty groups dropped. An empty result means the whole menu is hidden. */
+export function createGroupsFor(role: MembershipRole): Array<{ group: CreateGroup; actions: CreateAction[] }> {
+  const allowed = createActionsFor(role);
+  return CREATE_GROUPS.map((group) => ({ group, actions: allowed.filter((a) => a.group === group) })).filter(
+    (g) => g.actions.length > 0,
+  );
 }
