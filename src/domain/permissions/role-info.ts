@@ -110,6 +110,7 @@ export const PERMISSION_AREAS: Record<string, string> = {
   bank_rule: "Bank rules",
   customer_invoice: "Sales invoices",
   customer_payment: "Customer payments",
+  customer_credit: "Customer credit notes",
   customer_quote: "Quotes",
   recurring_invoice: "Recurring invoices",
   supplier_bill: "Bills",
@@ -146,6 +147,7 @@ export const PERMISSION_AREAS: Record<string, string> = {
   automation: "Automations",
   integration: "Integrations",
   oauth_app: "Connected apps (OAuth)",
+  approval: "Approval policies",
 };
 
 function areaOf(permission: Permission): string {

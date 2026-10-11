@@ -29,6 +29,10 @@ export const PERMISSIONS = [
   "customer_invoice:void",
   "customer_payment:read",
   "customer_payment:manage",
+  "customer_credit:read",
+  "customer_credit:manage",
+  "customer_credit:post",
+  "customer_credit:void",
   "customer_quote:read",
   "customer_quote:manage",
   "recurring_invoice:read",
@@ -155,6 +159,12 @@ export const PERMISSIONS = [
   // only AND a HUMAN actor (an API key, an OAuth token, an AI agent or an automation can never hold it). Any member can
   // revoke THEIR OWN grants (that is not a permission: it is the right to withdraw your own consent).
   "oauth_app:manage",
+  // Approval engine (master spec s.45). `approval:manage` configures approval policies and lets an owner/administrator reassign
+  // a waiting step or override a request WITH a reason (always audited). OWNER / ADMINISTRATOR only AND a HUMAN actor: an API
+  // key, OAuth token, AI agent or automation can never hold it, and can never decide an approval either (the approval
+  // service refuses every non-HUMAN actor even when the role behind it is OWNER). Deciding a step is NOT a permission of
+  // its own: it needs the policy-named role/user plus the document's own approve permission, recomputed at decision time.
+  "approval:manage",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -197,6 +207,10 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "customer_invoice:void",
     "customer_payment:read",
     "customer_payment:manage",
+    "customer_credit:read",
+    "customer_credit:manage",
+    "customer_credit:post",
+    "customer_credit:void",
     "customer_quote:read",
     "customer_quote:manage",
     "recurring_invoice:read",
@@ -287,6 +301,9 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "customer_invoice:post",
     "customer_payment:read",
     "customer_payment:manage",
+    "customer_credit:read",
+    "customer_credit:manage",
+    "customer_credit:post",
     "customer_quote:read",
     "customer_quote:manage",
     "recurring_invoice:read",
@@ -359,6 +376,10 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "customer_invoice:void",
     "customer_payment:read",
     "customer_payment:manage",
+    "customer_credit:read",
+    "customer_credit:manage",
+    "customer_credit:post",
+    "customer_credit:void",
     "customer_quote:read",
     "customer_quote:manage",
     "recurring_invoice:read",
@@ -452,6 +473,7 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "bank_account:read",
     "customer_invoice:read",
     "customer_payment:read",
+    "customer_credit:read",
     "customer_quote:read",
     "recurring_invoice:read",
     "supplier_bill:read",
@@ -500,6 +522,7 @@ export const ROLE_PERMISSIONS: Record<MembershipRole, ReadonlySet<Permission>> =
     "bank_account:read",
     "customer_invoice:read",
     "customer_payment:read",
+    "customer_credit:read",
     "customer_quote:read",
     "recurring_invoice:read",
     "supplier_bill:read",

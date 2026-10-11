@@ -266,6 +266,20 @@ export const supplierCreditStatusEnum = pgEnum("supplier_credit_status", [
 ]);
 
 /**
+ * Sales documents slice (customer credit notes), the mirror image of `supplier_credit_status`. A customer credit
+ * note posts the reverse of an invoice (debit revenue and GST payable, credit Accounts Receivable) on approval; it
+ * can then be applied against open invoices through `customer_credit_allocations`. PART_APPLIED/APPLIED are derived
+ * from those allocations, never a stored counter.
+ */
+export const customerCreditStatusEnum = pgEnum("customer_credit_status", [
+  "DRAFT",
+  "APPROVED",
+  "PART_APPLIED",
+  "APPLIED",
+  "VOID",
+]);
+
+/**
  * Phase 4 Slice 2 (Purchases — payment runs). Segregation of duties (master
  * spec §52) is enforced in `PaymentRunService`, not just this status column:
  * DRAFT is the run being assembled by its creator; AWAITING_APPROVAL is
@@ -1077,10 +1091,18 @@ export const paymentAllocations = pgTable("payment_allocations", {
     .notNull()
     .references(() => invoices.id),
   amount: numeric("amount", { precision: 19, scale: 4 }).notNull(),
+  /**
+   * The date this allocation took effect, for historical (as-at) statements and aged balances. Null on an allocation
+   * made when the payment was recorded (its effective date is then the payment's own `paymentDate`); set when an
+   * unapplied receipt is applied to an invoice later (sales documents slice). Never used for "outstanding" today.
+   */
+  appliedDate: timestamp("applied_date", { withTimezone: true, mode: "date" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   createdById: uuid("created_by_id"),
 }, (table) => ({
-  paymentInvoiceUnique: uniqueIndex("payment_allocations_payment_invoice_unique").on(
+  // Not unique any more (sales documents slice): an unapplied receipt can be applied to the same invoice in more
+  // than one step, each step being its own row with its own `appliedDate`.
+  paymentInvoiceIdx: index("payment_allocations_payment_invoice_idx").on(
     table.paymentId,
     table.invoiceId,
   ),
@@ -1780,6 +1802,137 @@ export const supplierCreditAllocations = pgTable("supplier_credit_allocations", 
 }));
 
 /**
+ * A customer credit note (sales documents slice) - a reduction in what a customer owes (a return, a pricing or
+ * quantity correction). Shaped like `invoices` so `CustomerCreditService` reuses `calculateInvoiceTotals`; on approval
+ * it posts the mirror image of an invoice (debit revenue and GST payable, credit Accounts Receivable) via
+ * `PostingService`. `invoiceId` optionally links it to the invoice it corrects. Until applied to an invoice through
+ * `customer_credit_allocations` it is an unapplied customer credit (a credit balance inside the AR control account).
+ */
+export const customerCreditNotes = pgTable("customer_credit_notes", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  customerContactId: uuid("customer_contact_id")
+    .notNull()
+    .references(() => contacts.id),
+  /** The invoice this credit corrects, when there is one. Informational plus a cap (linked credits never exceed the invoice total). */
+  invoiceId: uuid("invoice_id").references((): AnyPgColumn => invoices.id),
+  creditNoteNumber: text("credit_note_number").notNull(),
+  issueDate: timestamp("issue_date", { withTimezone: true, mode: "date" }).notNull(),
+  currency: text("currency").notNull(),
+  memo: text("memo"),
+  arAccountId: uuid("ar_account_id")
+    .notNull()
+    .references(() => accounts.id),
+  status: customerCreditStatusEnum("status").notNull().default("DRAFT"),
+  subtotal: numeric("subtotal", { precision: 19, scale: 4 }).notNull().default("0"),
+  taxTotal: numeric("tax_total", { precision: 19, scale: 4 }).notNull().default("0"),
+  total: numeric("total", { precision: 19, scale: 4 }).notNull().default("0"),
+  journalEntryId: uuid("journal_entry_id").references((): AnyPgColumn => journalEntries.id),
+  voidJournalEntryId: uuid("void_journal_entry_id").references((): AnyPgColumn => journalEntries.id),
+  postedAt: timestamp("posted_at", { withTimezone: true }),
+  postedById: uuid("posted_by_id"),
+  voidedAt: timestamp("voided_at", { withTimezone: true }),
+  voidedById: uuid("voided_by_id"),
+  voidReason: text("void_reason"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+  updatedById: uuid("updated_by_id"),
+}, (table) => ({
+  orgCreditNumberUnique: uniqueIndex("customer_credit_notes_org_number_unique").on(
+    table.organizationId,
+    table.creditNoteNumber,
+  ),
+  orgStatusIdx: index("customer_credit_notes_org_status_idx").on(table.organizationId, table.status),
+  orgCustomerIdx: index("customer_credit_notes_org_customer_idx").on(table.organizationId, table.customerContactId),
+  orgInvoiceIdx: index("customer_credit_notes_org_invoice_idx").on(table.organizationId, table.invoiceId),
+}));
+
+/** One line of a customer credit note - same shape as `invoice_lines` (no project/task; a tracked-stock product is refused). */
+export const customerCreditNoteLines = pgTable("customer_credit_note_lines", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  creditNoteId: uuid("credit_note_id")
+    .notNull()
+    .references(() => customerCreditNotes.id, { onDelete: "cascade" }),
+  lineNumber: integer("line_number").notNull(),
+  description: text("description").notNull(),
+  quantity: numeric("quantity", { precision: 19, scale: 4 }).notNull(),
+  unitPrice: numeric("unit_price", { precision: 19, scale: 4 }).notNull(),
+  accountId: uuid("account_id")
+    .notNull()
+    .references(() => accounts.id),
+  taxCodeId: uuid("tax_code_id").references(() => taxCodes.id),
+  /** Optional catalog product (non-stock only; its revenue account is used). TRACKED_INVENTORY products are refused. */
+  productId: uuid("product_id").references((): AnyPgColumn => products.id),
+  lineAmount: numeric("line_amount", { precision: 19, scale: 4 }).notNull(),
+  taxAmount: numeric("tax_amount", { precision: 19, scale: 4 }).notNull().default("0"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  creditLineUnique: uniqueIndex("customer_credit_note_lines_credit_line_unique").on(
+    table.creditNoteId,
+    table.lineNumber,
+  ),
+  orgCreditIdx: index("customer_credit_note_lines_org_credit_idx").on(table.organizationId, table.creditNoteId),
+}));
+
+/**
+ * How much of a `customer_credit_note` was applied against an `invoice`. APPEND-ONLY: a mistaken application is
+ * undone by inserting a NEGATIVE row that points at the original (`reversesAllocationId`), never by editing or
+ * deleting one (the table is granted SELECT + INSERT only). Net applied = the plain sum of `amount`. `appliedDate`
+ * is the effective date for historical statements. `CustomerCreditService` is the only writer.
+ */
+export const customerCreditAllocations = pgTable("customer_credit_allocations", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  creditNoteId: uuid("credit_note_id")
+    .notNull()
+    .references(() => customerCreditNotes.id),
+  invoiceId: uuid("invoice_id")
+    .notNull()
+    .references(() => invoices.id),
+  /** Positive = applied; negative = a reversal of an earlier application. Never zero. */
+  amount: numeric("amount", { precision: 19, scale: 4 }).notNull(),
+  appliedDate: timestamp("applied_date", { withTimezone: true, mode: "date" }).notNull(),
+  reversesAllocationId: uuid("reverses_allocation_id").references((): AnyPgColumn => customerCreditAllocations.id),
+  reason: text("reason"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  createdById: uuid("created_by_id"),
+}, (table) => ({
+  orgInvoiceIdx: index("customer_credit_allocations_org_invoice_idx").on(table.organizationId, table.invoiceId),
+  orgCreditIdx: index("customer_credit_allocations_org_credit_idx").on(table.organizationId, table.creditNoteId),
+  reversesUnique: uniqueIndex("customer_credit_allocations_reverses_unique").on(table.reversesAllocationId),
+}));
+
+/**
+ * The receipt issued for a recorded customer payment (sales documents slice). IMMUTABLE once issued: SELECT + INSERT
+ * only. `snapshot` freezes what the receipt said at issue time (customer, amount, method, reference, allocations to
+ * invoices, any credit left unapplied); later applications of the unapplied balance never rewrite it. One per payment.
+ */
+export const customerPaymentReceipts = pgTable("customer_payment_receipts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  paymentId: uuid("payment_id")
+    .notNull()
+    .references(() => payments.id),
+  receiptNumber: text("receipt_number").notNull(),
+  snapshot: jsonb("snapshot").notNull(),
+  issuedAt: timestamp("issued_at", { withTimezone: true }).notNull().defaultNow(),
+  issuedById: uuid("issued_by_id"),
+}, (table) => ({
+  paymentUnique: uniqueIndex("customer_payment_receipts_payment_unique").on(table.paymentId),
+  orgNumberUnique: uniqueIndex("customer_payment_receipts_org_number_unique").on(table.organizationId, table.receiptNumber),
+}));
+
+/**
  * A batch of approved bills prepared for payment together. Segregation of
  * duties (master spec §52) is enforced in `PaymentRunService`, not derivable
  * from this row alone: `createdById` prepares the run, and a *different*
@@ -2003,8 +2156,10 @@ export const expenseClaimLines = pgTable("expense_claim_lines", {
 // ---------------------------------------------------------------------------
 
 /**
- * Schema only in Phase 1 — see docs/roadmap.md. The generic approval engine
- * (master spec §45) is implemented starting Phase 3.
+ * LEGACY, unused: schema-only since Phase 1 and never written by the application. The approval engine (master spec
+ * s.45) deliberately did not reuse this single-row shape (multi-step approvals need a request, ordered steps and an
+ * append-only decision log): it lives in `approval_policies` / `approval_requests` / `approval_steps` /
+ * `approval_decisions` at the end of this file. Kept (empty) so migration history and the isolation tests stay valid.
  */
 export const approvals = pgTable("approvals", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -5701,3 +5856,129 @@ export const oauthRateWindows = pgTable("oauth_rate_windows", {
   windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
   requestCount: integer("request_count").notNull(),
 });
+
+
+// ---------------------------------------------------------------------------
+// Approval engine (master spec s.45) - configurable multi-step approvals layered ON TOP of the single-step flows.
+// ---------------------------------------------------------------------------
+
+/**
+ * One org-configurable routing rule for one document type. The FIRST active policy (lowest `priority`, then oldest) whose
+ * amount band and filters match a document wins; no matching policy means the document's existing flow is unchanged.
+ * `min_amount` is INCLUSIVE and `max_amount` EXCLUSIVE, so adjacent tiers ($0-$500, $500-$5,000, ...) never overlap.
+ * `filters` = { supplierContactIds?, accountIds?, projectIds?, userIds?, currency? } (all optional; a list matches when ANY
+ * of the document's values is in it). `steps` = ordered [{ name, roles[], userIds[], requiredApprovals }]. Policies are
+ * deactivated, never deleted; a request snapshots its policy, so editing a policy never changes an in-flight request.
+ */
+export const approvalPolicies = pgTable("approval_policies", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  documentType: text("document_type").notNull(),
+  priority: integer("priority").notNull().default(100),
+  isActive: boolean("is_active").notNull().default(true),
+  minAmount: numeric("min_amount", { precision: 19, scale: 4 }),
+  maxAmount: numeric("max_amount", { precision: 19, scale: 4 }),
+  filters: jsonb("filters").notNull().default(sql`'{}'::jsonb`),
+  steps: jsonb("steps").notNull(),
+  /** When true one person may satisfy more than one step of the same request (audited). Default: never. */
+  allowSamePersonMultipleSteps: boolean("allow_same_person_multiple_steps").notNull().default(false),
+  createdById: uuid("created_by_id").notNull(),
+  updatedById: uuid("updated_by_id").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  orgTypeIdx: index("approval_policies_org_type_idx").on(table.organizationId, table.documentType, table.priority),
+  typeCheck: check("approval_policies_type_check", sql`${table.documentType} IN ('SUPPLIER_BILL','EXPENSE_CLAIM','PAYMENT_RUN')`),
+  bandCheck: check("approval_policies_band_check", sql`${table.minAmount} IS NULL OR ${table.maxAmount} IS NULL OR ${table.maxAmount} > ${table.minAmount}`),
+}));
+
+/**
+ * One approval attempt for one document. A resubmission after rejection/edit creates a NEW request; old ones are kept.
+ * At most one PENDING request per document (partial unique index). `policy_snapshot` freezes the matched policy's
+ * band/steps at creation. `excluded_user_ids` = people who can never decide it (requester, document creator/claimant).
+ */
+export const approvalRequests = pgTable("approval_requests", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  documentType: text("document_type").notNull(),
+  documentId: uuid("document_id").notNull(),
+  documentLabel: text("document_label").notNull(),
+  documentSummary: text("document_summary"),
+  amount: numeric("amount", { precision: 19, scale: 4 }).notNull(),
+  currency: text("currency").notNull(),
+  policyId: uuid("policy_id"),
+  policyName: text("policy_name").notNull(),
+  policySnapshot: jsonb("policy_snapshot").notNull(),
+  status: text("status").notNull().default("PENDING"),
+  requestedById: uuid("requested_by_id").notNull(),
+  excludedUserIds: jsonb("excluded_user_ids").notNull().default(sql`'[]'::jsonb`),
+  requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+  decidedAt: timestamp("decided_at", { withTimezone: true }),
+  decisionReason: text("decision_reason"),
+  /** Set when an OWNER/ADMINISTRATOR forced the outcome past the normal steps; always with a reason. */
+  overriddenById: uuid("overridden_by_id"),
+  overrideReason: text("override_reason"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  orgDocIdx: index("approval_requests_org_doc_idx").on(table.organizationId, table.documentType, table.documentId, table.requestedAt),
+  orgStatusIdx: index("approval_requests_org_status_idx").on(table.organizationId, table.status, table.requestedAt),
+  onePendingPerDoc: uniqueIndex("approval_requests_one_pending_unique")
+    .on(table.organizationId, table.documentType, table.documentId)
+    .where(sql`${table.status} = 'PENDING'`),
+  statusCheck: check("approval_requests_status_check", sql`${table.status} IN ('PENDING','APPROVED','REJECTED','CANCELLED')`),
+}));
+
+/** The ordered steps of a request (copied from the policy so later policy edits cannot alter them). Steps open in order. */
+export const approvalSteps = pgTable("approval_steps", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  requestId: uuid("request_id")
+    .notNull()
+    .references(() => approvalRequests.id, { onDelete: "cascade" }),
+  stepIndex: integer("step_index").notNull(),
+  name: text("name").notNull(),
+  requiredRoles: jsonb("required_roles").notNull().default(sql`'[]'::jsonb`),
+  requiredUserIds: jsonb("required_user_ids").notNull().default(sql`'[]'::jsonb`),
+  requiredApprovals: integer("required_approvals").notNull().default(1),
+  status: text("status").notNull().default("PENDING"),
+  /** When the step became the active one ("waiting since"). Null while it is still queued behind an earlier step. */
+  openedAt: timestamp("opened_at", { withTimezone: true }),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+}, (table) => ({
+  requestIdx: uniqueIndex("approval_steps_request_idx").on(table.requestId, table.stepIndex),
+  orgStatusIdx: index("approval_steps_org_status_idx").on(table.organizationId, table.status),
+  statusCheck: check("approval_steps_status_check", sql`${table.status} IN ('PENDING','APPROVED','REJECTED','CANCELLED','SKIPPED')`),
+  countCheck: check("approval_steps_count_check", sql`${table.requiredApprovals} >= 1`),
+}));
+
+/** Append-only log of every person's decision on a step (approve / reject), and of administrative reassignments. */
+export const approvalDecisions = pgTable("approval_decisions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" }),
+  requestId: uuid("request_id")
+    .notNull()
+    .references(() => approvalRequests.id, { onDelete: "cascade" }),
+  stepId: uuid("step_id").references(() => approvalSteps.id, { onDelete: "cascade" }),
+  decidedById: uuid("decided_by_id").notNull(),
+  /** APPROVE | REJECT | OVERRIDE_APPROVE | OVERRIDE_REJECT | REASSIGN */
+  decision: text("decision").notNull(),
+  comment: text("comment"),
+  /** The decider's role as recomputed at decision time. */
+  deciderRole: text("decider_role").notNull(),
+  /** True when this person had already decided another step of the same request (only allowed by an explicit policy flag). */
+  repeatApprover: boolean("repeat_approver").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  requestIdx: index("approval_decisions_request_idx").on(table.requestId, table.createdAt),
+  decisionCheck: check("approval_decisions_decision_check", sql`${table.decision} IN ('APPROVE','REJECT','OVERRIDE_APPROVE','OVERRIDE_REJECT','REASSIGN')`),
+}));

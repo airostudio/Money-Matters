@@ -1,5 +1,6 @@
 import { and, asc, desc, eq, gte, inArray, lte, sql, type SQL } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
+import Decimal from "decimal.js";
 import {
   accounts,
   billLines,
@@ -10,6 +11,7 @@ import {
   journalEntries,
   journalLines,
   organizations,
+  customerCreditAllocations,
   paymentAllocations,
   payments,
   supplierPaymentAllocations,
@@ -169,7 +171,17 @@ async function allocatedByInvoice(tx: TenantDb, organizationId: string, ids: str
     .from(paymentAllocations)
     .where(and(eq(paymentAllocations.organizationId, organizationId), inArray(paymentAllocations.invoiceId, ids)))
     .groupBy(paymentAllocations.invoiceId);
-  return new Map(rows.map((r) => [r.id, r.paid]));
+  // Customer credit note applications also settle an invoice (reversals are negative rows, so the sum is the net).
+  const creditRows = await tx
+    .select({ id: customerCreditAllocations.invoiceId, paid: sql<string>`sum(${customerCreditAllocations.amount})::text` })
+    .from(customerCreditAllocations)
+    .where(and(eq(customerCreditAllocations.organizationId, organizationId), inArray(customerCreditAllocations.invoiceId, ids)))
+    .groupBy(customerCreditAllocations.invoiceId);
+  const out = new Map(rows.map((r) => [r.id, r.paid]));
+  for (const r of creditRows) {
+    out.set(r.id, new Decimal(out.get(r.id) ?? "0").plus(r.paid).toFixed(4));
+  }
+  return out;
 }
 
 async function allocatedByBill(tx: TenantDb, organizationId: string, ids: string[]): Promise<Map<string, string>> {

@@ -30,7 +30,7 @@ import { createHash } from "node:crypto";
 export const BAS_BASIS_SUPPORTED = "ACCRUAL" as const;
 
 export type BasGstTreatment = "TAXABLE" | "GST_FREE" | "EXPORT" | "INPUT_TAXED" | "NOT_REPORTED";
-export type BasDocType = "INVOICE" | "BILL" | "SUPPLIER_CREDIT" | "EXPENSE_CLAIM";
+export type BasDocType = "INVOICE" | "BILL" | "SUPPLIER_CREDIT" | "CUSTOMER_CREDIT" | "EXPENSE_CLAIM";
 export type BasLabel = "G1" | "G2" | "G3" | "G10" | "G11" | "1A" | "1B" | "W1" | "W2";
 export const BAS_LABELS: readonly BasLabel[] = ["G1", "G2", "G3", "G10", "G11", "1A", "1B", "W1", "W2"];
 

@@ -17,6 +17,8 @@ export function sourceDocumentHref(orgSlug: string, doc: SourceDocumentRef): str
       return `/${orgSlug}/purchases/bills/${doc.id}`;
     case "SUPPLIER_CREDIT_NOTE":
       return `/${orgSlug}/purchases/supplier-credits/${doc.id}`;
+    case "CUSTOMER_CREDIT_NOTE":
+      return `/${orgSlug}/sales/credit-notes/${doc.id}`;
     case "EXPENSE_CLAIM":
       return `/${orgSlug}/expenses/${doc.id}`;
     case "CUSTOMER_PAYMENT":
@@ -29,6 +31,7 @@ export const SOURCE_DOCUMENT_LABEL: Record<SourceDocumentRef["type"], string> = 
   INVOICE: "Invoice",
   BILL: "Bill",
   SUPPLIER_CREDIT_NOTE: "Supplier Credit",
+  CUSTOMER_CREDIT_NOTE: "Customer Credit Note",
   EXPENSE_CLAIM: "Expense Claim",
   CUSTOMER_PAYMENT: "Customer Payment",
   SUPPLIER_PAYMENT: "Supplier Payment",

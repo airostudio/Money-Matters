@@ -8,6 +8,7 @@ import {
   journalLines,
   organizations,
   payments,
+  customerCreditNotes,
   supplierCreditNotes,
   supplierPayments,
   invoices,
@@ -110,7 +111,7 @@ async function getCashAccountIds(tx: TenantDb, organizationId: string): Promise<
 }
 
 export interface SourceDocumentRef {
-  type: "INVOICE" | "BILL" | "SUPPLIER_CREDIT_NOTE" | "EXPENSE_CLAIM" | "CUSTOMER_PAYMENT" | "SUPPLIER_PAYMENT";
+  type: "INVOICE" | "BILL" | "SUPPLIER_CREDIT_NOTE" | "CUSTOMER_CREDIT_NOTE" | "EXPENSE_CLAIM" | "CUSTOMER_PAYMENT" | "SUPPLIER_PAYMENT";
   id: string;
   label: string;
 }
@@ -154,6 +155,19 @@ async function resolveSourceDocument(
     );
   if (creditNoteRow) {
     return { type: "SUPPLIER_CREDIT_NOTE", id: creditNoteRow.id, label: creditNoteRow.creditNoteNumber };
+  }
+
+  const [customerCreditRow] = await tx
+    .select({ id: customerCreditNotes.id, creditNoteNumber: customerCreditNotes.creditNoteNumber })
+    .from(customerCreditNotes)
+    .where(
+      and(
+        eq(customerCreditNotes.organizationId, organizationId),
+        eq(customerCreditNotes.journalEntryId, journalEntryId),
+      ),
+    );
+  if (customerCreditRow) {
+    return { type: "CUSTOMER_CREDIT_NOTE", id: customerCreditRow.id, label: customerCreditRow.creditNoteNumber };
   }
 
   const [expenseClaimRow] = await tx
