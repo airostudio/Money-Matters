@@ -1321,3 +1321,15 @@ RFC 6749 (authorization-code grant **only**; implicit, resource-owner password a
 ### 20.8 Known limits
 
 The OAuth rate limits are in Postgres (shared across instances) but keyed on the address a proxy reports (`X-Forwarded-For`), so a client able to spoof it can spread across address buckets; the per-client-id bucket still bounds it. The reuse-detection window is 7 days after rotation. A client that loses the response to a refresh (network failure after the server rotated) holds a spent token and will, on retry, trigger reuse detection and need a fresh consent: the documented trade-off of strict rotation (clients must persist the new refresh token before using it). The consent hand-off is an interstitial page rather than a 3xx because browsers apply the consent page's `form-action 'self'` CSP to a form's redirect chain; that was reasoned from the CSP specification and **not** observed in a real browser. The visual layout of every new page is unverified.
+
+## 21. Outbound email (Resend adapter)
+
+`src/domain/email/email-service.ts` sends transactional email by a plain HTTPS `POST https://api.resend.com/emails` (no SDK, no new dependency). Nothing calls it yet; it is a building block.
+
+- **Fails closed.** It is inert unless `EMAIL_PROVIDER=resend`, `RESEND_API_KEY` and `EMAIL_FROM` are all set and valid; otherwise `send` returns `not_configured` and sends nothing.
+- **Fixed destination, SSRF guard reused.** The host is hard-coded to `api.resend.com`; the webhook guard rules apply (https only, port 443, DNS answers vetted and pinned, no redirects, 10 s timeout, 8 KiB response cap).
+- **Secrets.** The API key is sent only as a Bearer header; it is never returned, logged or stored. Only the provider's error `name` is surfaced, never its free text or the message body.
+- **Input checks.** Recipients are validated (at most 50) and a subject containing line breaks is rejected (header injection). An optional `Idempotency-Key` is passed through.
+- **Owner steps.** Create a Resend account, verify the sending domain, create a sending-only API key, set the three variables on Vercel.
+- **Sources.** Resend "Send Email" reference (https://resend.com/docs/api-reference/emails/send-email) for endpoint, Bearer auth, `from/to/subject/html/text`, `Idempotency-Key` and the `{ "id" }` response; endpoint, auth and body independently corroborated at https://www.runxbuild.com/blog/resend-api/. The error body shape comes from Resend's Errors page; the adapter does not depend on the exact status codes (those pages disagree on 400 vs 422).
+- **Not verified.** No real send has been made against Resend.
