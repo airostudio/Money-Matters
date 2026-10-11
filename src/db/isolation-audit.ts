@@ -286,6 +286,32 @@ export async function loadTableSecurityRows(pool: Pick<Pool, "query">): Promise<
 }
 
 /**
+ * Platforms such as Supabase can switch row-level security ON for every table created in `public` (an "automatically
+ * enable RLS" project setting or event trigger). A table the schema deliberately leaves to GRANTs alone - users,
+ * organizations, platform_admin_audit_logs, currencies and the like - then has RLS enabled with no policy, which denies
+ * every row to mm_app: "new row violates row-level security policy". Every such write 500s with no build-time signal.
+ *
+ * This repairs exactly that state, and nothing broader: a table with NO scope column (so never tenant/user/practice
+ * isolated), RLS enabled, zero policies. It adds one policy for mm_app only, so RLS stays ON and the anon/authenticated
+ * roles remain denied (safer than disabling RLS on a table a project API could otherwise expose). The policy is
+ * permissive but the table's GRANTs still bound what mm_app can do (platform_admin_audit_logs stays INSERT/SELECT only).
+ * Scoped tables are never touched: a scoped table with no policy is a real isolation fault and stays a loud warning.
+ */
+export async function healUnscopedDenyAllTables(pool: Pick<Pool, "query">): Promise<string[]> {
+  const rows = await loadTableSecurityRows(pool);
+  const healed: string[] = [];
+  for (const row of rows) {
+    const unscoped = !row.tenant_scoped && !row.user_scoped && !row.practice_scoped;
+    if (!unscoped || !row.rls_enabled || Number(row.policies) !== 0) continue;
+    // Identifier comes from pg_class, but quote it properly regardless.
+    const ident = `"${row.table_name.replace(/"/g, '""')}"`;
+    await pool.query(`CREATE POLICY mm_app_grant_scoped ON public.${ident} FOR ALL TO mm_app USING (true) WITH CHECK (true)`);
+    healed.push(row.table_name);
+  }
+  return healed;
+}
+
+/**
  * Audits every table for the properties tenant AND user-scope isolation
  * actually rest on, rather than trusting that migrations were kept in step
  * with the schema.

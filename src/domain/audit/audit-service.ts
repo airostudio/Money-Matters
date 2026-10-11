@@ -75,6 +75,9 @@ const REDACTED_PLACEHOLDER = "[redacted]";
 
 export function redactSensitive(value: unknown): unknown {
   if (value === null || typeof value !== "object") return value;
+  // A Date has no own enumerable keys, so walking it as an object silently turned every timestamp in an audit
+  // snapshot into `{}` (seen on organization.archived). Keep it as its ISO string.
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString();
   if (Array.isArray(value)) return value.map(redactSensitive);
   const out: Record<string, unknown> = {};
   for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
