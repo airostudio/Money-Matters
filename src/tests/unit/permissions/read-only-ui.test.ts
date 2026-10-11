@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ReadOnlyBanner } from "@/components/shell/read-only-banner";
@@ -12,6 +12,9 @@ import { deniedViewUnless } from "@/lib/permission-gate";
 import { DEFAULT_INVITE_ROLE, roleOptions } from "@/domain/permissions/role-info";
 import { membershipRoleEnum } from "@/db/schema";
 import type { MembershipRole } from "@/domain/permissions/roles";
+
+// The top bar now contains the command palette, which reads the app router; there is none in a static render.
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: () => undefined }), usePathname: () => "/acme" }));
 
 const html = (el: Parameters<typeof renderToStaticMarkup>[0]) => renderToStaticMarkup(el);
 const noopAction = async () => {};
@@ -36,16 +39,21 @@ describe("read-only banner", () => {
 describe("create actions in the shell", () => {
   it("omit write items for a read-only role and keep them for a poster", () => {
     expect(createActionsFor("READ_ONLY")).toEqual([]);
-    expect(createActionsFor("MANAGER")).toEqual([]); // cannot post journals
+    expect(createActionsFor("MANAGER").map((a) => a.label)).not.toContain("Journal entry"); // cannot post journals
     for (const role of ["OWNER", "ADMINISTRATOR", "ACCOUNTANT", "BOOKKEEPER"] as MembershipRole[]) {
-      expect(createActionsFor(role).map((a) => a.label)).toContain("New journal entry");
+      expect(createActionsFor(role).map((a) => a.label)).toContain("Journal entry");
     }
   });
 
-  it("the top bar renders no 'New journal entry' button for READ_ONLY, and does for BOOKKEEPER", () => {
+  it("the top bar renders no Create menu for READ_ONLY, and does for BOOKKEEPER; both get Search", () => {
     const props = { orgSlug: "acme", orgName: "Acme", userName: "Sam", userEmail: "sam@example.test" };
-    expect(html(createElement(Topbar, { ...props, role: "READ_ONLY" }))).not.toContain("New journal entry");
-    expect(html(createElement(Topbar, { ...props, role: "BOOKKEEPER" }))).toContain("New journal entry");
+    const readOnly = html(createElement(Topbar, { ...props, role: "READ_ONLY" }));
+    const bookkeeper = html(createElement(Topbar, { ...props, role: "BOOKKEEPER" }));
+    expect(readOnly).not.toContain("create-menu-trigger");
+    expect(bookkeeper).toContain("create-menu-trigger");
+    expect(readOnly).toContain('data-testid="palette-trigger"');
+    expect(bookkeeper).toContain('aria-label="Search"');
+    expect(bookkeeper).toContain('aria-keyshortcuts="C"');
   });
 });
 

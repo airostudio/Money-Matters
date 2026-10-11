@@ -116,9 +116,9 @@ function ProposalCard({
  * draft" button, calling `confirmDraftProposalAction` — a completely
  * separate server action from the one that ran the conversation turn.
  */
-export function ControllerChat({ orgSlug }: { orgSlug: string }) {
+export function ControllerChat({ orgSlug, initialQuestion = "" }: { orgSlug: string; initialQuestion?: string }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput] = useState("");
+  const [input, setInput] = useState(initialQuestion);
   const [agentMode, setAgentMode] = useState<AgentMode>("GENERAL");
   const [isPending, startTransition] = useTransition();
   const [unavailableReason, setUnavailableReason] = useState<string | null>(null);
